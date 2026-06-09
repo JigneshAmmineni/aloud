@@ -18,5 +18,10 @@ services:
       - "8000:8000"
     volumes:
       - ./backend:/app
-    env_file:
-      - .env
+      # Mount host ADC credentials read-only into the container
+      - ${APPDATA}/gcloud/application_default_credentials.json:/gcloud/application_default_credentials.json:ro
+    environment:
+      - GOOGLE_CLOUD_PROJECT=aloud-498522
+      - GOOGLE_CLOUD_LOCATION=us-central1
+      - GOOGLE_APPLICATION_CREDENTIALS=/gcloud/application_default_credentials.json
+      - PYTHONUNBUFFERED=1

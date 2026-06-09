@@ -6,7 +6,7 @@ from fastapi import WebSocket
 from google import genai
 from google.genai import types
 
-MODEL = "gemini-live-2.5-flash-preview"
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-live-2.5-flash-native-audio")
 
 SYSTEM_PROMPT = """You are a thoughtful journaling companion called Aloud. Your role is to listen, \
 reflect, and ask gentle guiding questions that help the user explore their thoughts more deeply.
@@ -18,37 +18,103 @@ Ask one question at a time. Keep responses concise — this is a voice conversat
 
 class CompanionAgent:
     def __init__(self):
-        self.client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        self.client = genai.Client(
+            enterprise=True,
+            project=os.environ["GOOGLE_CLOUD_PROJECT"],
+            location=os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
+        )
         self.config = types.LiveConnectConfig(
-            response_modalities=["AUDIO", "TEXT"],
+            response_modalities=["AUDIO"],
             system_instruction=SYSTEM_PROMPT,
+            # Disable server-side VAD so we can use activity_start/activity_end
+            # for push-to-talk. With VAD on, batched audio confuses Gemini on turn 2+.
+            realtime_input_config=types.RealtimeInputConfig(
+                automatic_activity_detection=types.AutomaticActivityDetection(
+                    disabled=True
+                )
+            ),
         )
 
     async def run_session(self, browser_ws: WebSocket):
-        async with self.client.aio.live.connect(model=MODEL, config=self.config) as session:
-            await asyncio.gather(
-                self._browser_to_gemini(browser_ws, session),
-                self._gemini_to_browser(session, browser_ws),
-            )
+        print(f"[session] connecting to Gemini Live (model={MODEL})", flush=True)
+        try:
+            async with self.client.aio.live.connect(model=MODEL, config=self.config) as session:
+                print("[session] connected to Gemini Live", flush=True)
+                recv_task = asyncio.ensure_future(self._gemini_to_browser(session, browser_ws))
+                try:
+                    await self._browser_to_gemini(browser_ws, session)
+                finally:
+                    recv_task.cancel()
+                    try:
+                        await recv_task
+                    except asyncio.CancelledError:
+                        pass
+        except Exception as e:
+            print(f"[session] FATAL: {type(e).__name__}: {e}", flush=True)
+            raise
 
     async def _browser_to_gemini(self, browser_ws: WebSocket, session):
+        """
+        Push-to-talk protocol:
+          - binary frames: buffered PCM audio (all at once when user presses Stop)
+          - text frame {"type": "end_of_turn"}: signals Gemini the turn is complete
+        """
         try:
             while True:
-                data = await browser_ws.receive_bytes()
-                await session.send_realtime_input(
-                    audio=types.Blob(data=data, mime_type="audio/pcm;rate=16000")
-                )
-        except Exception:
-            pass
+                msg = await browser_ws.receive()
+                if msg["type"] == "websocket.disconnect":
+                    print("[browser→gemini] browser disconnected", flush=True)
+                    break
+
+                if msg.get("bytes"):
+                    audio_data = msg["bytes"]
+                    print(f"[browser→gemini] received audio {len(audio_data)}B, sending to Gemini", flush=True)
+                    await session.send_realtime_input(activity_start=types.ActivityStart())
+                    await session.send_realtime_input(
+                        media=types.Blob(data=audio_data, mime_type="audio/pcm;rate=16000")
+                    )
+
+                elif msg.get("text"):
+                    payload = json.loads(msg["text"])
+                    if payload.get("type") == "end_of_turn":
+                        print("[browser→gemini] end_of_turn → activity_end", flush=True)
+                        await session.send_realtime_input(activity_end=types.ActivityEnd())
+
+        except Exception as e:
+            print(f"[browser→gemini] error: {type(e).__name__}: {e}", flush=True)
 
     async def _gemini_to_browser(self, session, browser_ws: WebSocket):
+        msg_count = 0
         try:
             async for msg in session.receive():
+                msg_count += 1
+                has_data = bool(msg.data)
+                has_sc = bool(msg.server_content)
+                print(f"[gemini→browser] msg#{msg_count}: data={has_data} server_content={has_sc}", flush=True)
+
                 if msg.data:
                     await browser_ws.send_bytes(msg.data)
-                if msg.text:
-                    await browser_ws.send_text(
-                        json.dumps({"type": "transcript", "role": "agent", "text": msg.text})
-                    )
-        except Exception:
-            pass
+                    print(f"[gemini→browser] sent {len(msg.data)}B via msg.data", flush=True)
+                elif has_sc and msg.server_content.model_turn:
+                    for part in msg.server_content.model_turn.parts:
+                        if part.inline_data:
+                            await browser_ws.send_bytes(part.inline_data.data)
+                            print(f"[gemini→browser] sent {len(part.inline_data.data)}B via inline_data", flush=True)
+
+                # turn_complete can accompany audio or arrive standalone
+                if has_sc and getattr(msg.server_content, "turn_complete", False):
+                    await browser_ws.send_text(json.dumps({"type": "turn_complete"}))
+                    print("[gemini→browser] turn_complete forwarded", flush=True)
+
+                # Store resumption handle for potential future reconnect
+                if msg.session_resumption_update:
+                    upd = msg.session_resumption_update
+                    if getattr(upd, "resumable", False) and getattr(upd, "new_handle", None):
+                        print("[session] resumption handle updated", flush=True)
+
+        except Exception as e:
+            print(f"[gemini→browser] closed after {msg_count} msgs: {type(e).__name__}: {e}", flush=True)
+            try:
+                await browser_ws.send_text(json.dumps({"type": "error", "message": str(e)}))
+            except Exception:
+                pass
