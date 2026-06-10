@@ -37,6 +37,10 @@ class CompanionAgent:
             # across turns far better than audio tokens alone, and drive the UI transcript view.
             input_audio_transcription=types.AudioTranscriptionConfig(),
             output_audio_transcription=types.AudioTranscriptionConfig(),
+            # Compress oldest turns when the 32K context fills instead of choking the session.
+            context_window_compression=types.ContextWindowCompressionConfig(
+                sliding_window=types.SlidingWindow(),
+            ),
         )
 
     async def run_session(self, browser_ws: WebSocket):
