@@ -33,6 +33,10 @@ class CompanionAgent:
                     disabled=True
                 )
             ),
+            # Text transcripts let the model recall specific details (names, dates, etc.)
+            # across turns far better than audio tokens alone, and drive the UI transcript view.
+            input_audio_transcription=types.AudioTranscriptionConfig(),
+            output_audio_transcription=types.AudioTranscriptionConfig(),
         )
 
     async def run_session(self, browser_ws: WebSocket):
@@ -74,20 +78,26 @@ class CompanionAgent:
                 break
 
             if msg.get("bytes"):
+                # Streaming protocol: frontend sends 20ms chunks continuously during recording.
+                # activity_start arrives as a separate text signal before the first chunk.
                 audio_data = msg["bytes"]
-                print(f"[browser→gemini] received audio {len(audio_data)}B, sending to Gemini", flush=True)
-                try:
-                    await session.send_realtime_input(activity_start=types.ActivityStart())
-                    await session.send_realtime_input(
-                        media=types.Blob(data=audio_data, mime_type="audio/pcm;rate=16000")
-                    )
-                except Exception as e:
-                    print(f"[browser→gemini] send error: {type(e).__name__}: {e}", flush=True)
+                if audio_data:
+                    print(f"[browser→gemini] audio chunk {len(audio_data)}B", flush=True)
+                    try:
+                        await session.send_realtime_input(
+                            media=types.Blob(data=audio_data, mime_type="audio/pcm;rate=16000")
+                        )
+                    except Exception as e:
+                        print(f"[browser→gemini] send error: {type(e).__name__}: {e}", flush=True)
 
             elif msg.get("text"):
                 try:
                     payload = json.loads(msg["text"])
-                    if payload.get("type") == "end_of_turn":
+                    msg_type = payload.get("type")
+                    if msg_type == "activity_start":
+                        print("[browser→gemini] activity_start", flush=True)
+                        await session.send_realtime_input(activity_start=types.ActivityStart())
+                    elif msg_type == "end_of_turn":
                         print("[browser→gemini] end_of_turn → activity_end", flush=True)
                         await session.send_realtime_input(activity_end=types.ActivityEnd())
                 except json.JSONDecodeError:
@@ -117,9 +127,17 @@ class CompanionAgent:
                                 await browser_ws.send_bytes(part.inline_data.data)
                                 print(f"[gemini→browser] sent {len(part.inline_data.data)}B via inline_data", flush=True)
 
-                    if has_sc and getattr(msg.server_content, "turn_complete", False):
-                        await browser_ws.send_text(json.dumps({"type": "turn_complete"}))
-                        print("[gemini→browser] turn_complete forwarded", flush=True)
+                    if has_sc:
+                        sc = msg.server_content
+                        t = getattr(sc, "input_transcription", None)
+                        if t and getattr(t, "text", None):
+                            await browser_ws.send_text(json.dumps({"type": "transcript", "role": "user", "text": t.text}))
+                        t = getattr(sc, "output_transcription", None)
+                        if t and getattr(t, "text", None):
+                            await browser_ws.send_text(json.dumps({"type": "transcript", "role": "agent", "text": t.text}))
+                        if getattr(sc, "turn_complete", False):
+                            await browser_ws.send_text(json.dumps({"type": "turn_complete"}))
+                            print("[gemini→browser] turn_complete forwarded", flush=True)
 
                     if msg.session_resumption_update:
                         upd = msg.session_resumption_update

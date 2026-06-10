@@ -191,16 +191,27 @@ class TestGeminiToBrowser:
 
 class TestBrowserToGemini:
 
-    async def test_binary_frame_sends_activity_start_then_media(self, pcm_1s):
-        """Binary (audio) frame → activity_start, then media blob, in that order."""
+    async def test_binary_frame_sends_media_only(self, pcm_1s):
+        """Binary (audio) frame → media blob only. activity_start arrives as a separate text signal."""
         browser = MockBrowserWS([binary_frame(pcm_1s)])
         session = MockGeminiSession()
 
         await make_agent()._browser_to_gemini(browser, session)
 
-        assert len(session.realtime_inputs) == 2
+        assert len(session.realtime_inputs) == 1
+        assert "media" in session.realtime_inputs[0]
+
+    async def test_activity_start_text_frame_sends_activity_start(self):
+        """{"type": "activity_start"} JSON → ActivityStart to Gemini."""
+        from tests.conftest import text_frame
+
+        browser = MockBrowserWS([text_frame({"type": "activity_start"})])
+        session = MockGeminiSession()
+
+        await make_agent()._browser_to_gemini(browser, session)
+
+        assert len(session.realtime_inputs) == 1
         assert "activity_start" in session.realtime_inputs[0]
-        assert "media" in session.realtime_inputs[1]
 
     async def test_binary_frame_media_blob_contains_correct_data(self, pcm_1s):
         """The media blob carries the exact PCM bytes with correct MIME type."""
@@ -209,13 +220,15 @@ class TestBrowserToGemini:
 
         await make_agent()._browser_to_gemini(browser, session)
 
-        media_blob = session.realtime_inputs[1]["media"]
+        media_blob = session.realtime_inputs[0]["media"]
         assert media_blob.data == pcm_1s
         assert media_blob.mime_type == "audio/pcm;rate=16000"
 
     async def test_end_of_turn_sends_activity_end(self, pcm_1s):
         """{"type": "end_of_turn"} JSON → activity_end signal to Gemini."""
-        browser = MockBrowserWS([binary_frame(pcm_1s), end_of_turn_frame()])
+        from tests.conftest import text_frame
+
+        browser = MockBrowserWS([text_frame({"type": "activity_start"}), binary_frame(pcm_1s), end_of_turn_frame()])
         session = MockGeminiSession()
 
         await make_agent()._browser_to_gemini(browser, session)
@@ -225,8 +238,10 @@ class TestBrowserToGemini:
         assert "activity_end" in session.realtime_inputs[2]
 
     async def test_full_push_to_talk_turn(self, pcm_3s):
-        """Full push-to-talk sequence: binary → end_of_turn → activity_start, media, activity_end."""
-        browser = MockBrowserWS([binary_frame(pcm_3s), end_of_turn_frame()])
+        """Full push-to-talk: activity_start text → streaming binary chunks → end_of_turn."""
+        from tests.conftest import text_frame
+
+        browser = MockBrowserWS([text_frame({"type": "activity_start"}), binary_frame(pcm_3s), end_of_turn_frame()])
         session = MockGeminiSession()
 
         await make_agent()._browser_to_gemini(browser, session)
@@ -236,9 +251,11 @@ class TestBrowserToGemini:
 
     async def test_multiple_turns_correct_signal_sequence(self, pcm_1s):
         """Two complete push-to-talk turns in the same session."""
+        from tests.conftest import text_frame
+
         browser = MockBrowserWS([
-            binary_frame(pcm_1s), end_of_turn_frame(),
-            binary_frame(pcm_1s), end_of_turn_frame(),
+            text_frame({"type": "activity_start"}), binary_frame(pcm_1s), end_of_turn_frame(),
+            text_frame({"type": "activity_start"}), binary_frame(pcm_1s), end_of_turn_frame(),
         ])
         session = MockGeminiSession()
 
@@ -276,10 +293,9 @@ class TestBrowserToGemini:
 
         assert session.realtime_inputs == []
 
-    async def test_empty_binary_frame_skips_audio_signals(self):
-        """Zero-byte audio is falsy — activity_start + media are NOT sent.
-        Only activity_end fires from the end_of_turn that follows. The frontend
-        already filters zero-byte recordings, so this is the correct backend behavior.
+    async def test_empty_binary_frame_skips_media_send(self):
+        """Zero-byte audio is falsy — media is NOT sent.
+        Only activity_end fires from the end_of_turn that follows.
         """
         browser = MockBrowserWS([binary_frame(b""), end_of_turn_frame()])
         session = MockGeminiSession()

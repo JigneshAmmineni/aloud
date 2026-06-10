@@ -28,7 +28,10 @@ export class Session {
   private mediaStream: MediaStream | null = null;
   private workletNode: AudioWorkletNode | null = null;
   private workletLoaded = false;
-  private pcmChunks: ArrayBuffer[] = [];
+  private streamBuf: ArrayBuffer[] = [];
+  private streamBufBytes = 0;
+  // 20ms of PCM at 16kHz (320 samples × 2 bytes) — matches Live API recommendation
+  private readonly CHUNK_BYTES = 640;
   private playbackQueue: AudioBuffer[] = [];
   private isPlaying = false;
   private turnComplete = false;
@@ -62,7 +65,8 @@ export class Session {
 
   // Starts mic capture for the current turn. Safe to call multiple times across turns.
   startRecording() {
-    this.pcmChunks = [];
+    this.streamBuf = [];
+    this.streamBufBytes = 0;
     this.turnComplete = false;
     this.hasReceivedAudio = false;
 
@@ -86,9 +90,17 @@ export class Session {
     const source = this.audioContext!.createMediaStreamSource(this.mediaStream);
     this.workletNode = new AudioWorkletNode(this.audioContext!, "audio-processor");
 
-    // Buffer PCM chunks locally — don't stream to backend until Stop is pressed
+    // Signal Gemini that audio is starting (push-to-talk open)
+    this.ws!.send(JSON.stringify({ type: "activity_start" }));
+
+    // Stream PCM chunks every ~20ms instead of batching — lets Gemini start processing
+    // before the user finishes speaking, eliminating recording-duration latency.
     this.workletNode.port.onmessage = (e: MessageEvent<ArrayBuffer>) => {
-      this.pcmChunks.push(e.data);
+      this.streamBuf.push(e.data);
+      this.streamBufBytes += e.data.byteLength;
+      if (this.streamBufBytes >= this.CHUNK_BYTES) {
+        this._flushStreamBuf();
+      }
     };
 
     source.connect(this.workletNode);
@@ -101,9 +113,12 @@ export class Session {
     this.opts.onStatusChange("recording");
   }
 
-  // Stops the mic, sends all buffered audio, and signals end of turn.
+  // Stops the mic, flushes remaining buffered audio, and signals end of turn.
   // The WebSocket stays open to receive the agent's response.
   stopRecording() {
+    // Flush any sub-20ms remainder before disconnecting the worklet
+    this._flushStreamBuf();
+
     this.workletNode?.disconnect();
     this.mediaStream?.getTracks().forEach((t) => t.stop());
     this.workletNode = null;
@@ -111,26 +126,25 @@ export class Session {
 
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
-    const totalBytes = this.pcmChunks.reduce((sum, b) => sum + b.byteLength, 0);
-    if (totalBytes === 0) {
-      // Nothing recorded — go back to idle without bothering Gemini
-      this.opts.onStatusChange("idle");
+    this.ws.send(JSON.stringify({ type: "end_of_turn" }));
+    this.opts.onStatusChange("processing");
+  }
+
+  private _flushStreamBuf() {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || this.streamBufBytes === 0) {
+      this.streamBuf = [];
+      this.streamBufBytes = 0;
       return;
     }
-
-    const combined = new Uint8Array(totalBytes);
+    const combined = new Uint8Array(this.streamBufBytes);
     let offset = 0;
-    for (const chunk of this.pcmChunks) {
+    for (const chunk of this.streamBuf) {
       combined.set(new Uint8Array(chunk), offset);
       offset += chunk.byteLength;
     }
-    this.pcmChunks = [];
-
-    console.log(`[session] sending ${totalBytes}B of audio`);
     this.ws.send(combined.buffer);
-    this.ws.send(JSON.stringify({ type: "end_of_turn" }));
-
-    this.opts.onStatusChange("processing");
+    this.streamBuf = [];
+    this.streamBufBytes = 0;
   }
 
   // Explicitly ends the session and closes the WebSocket.
