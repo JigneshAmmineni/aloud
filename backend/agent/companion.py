@@ -58,30 +58,42 @@ class CompanionAgent:
         Push-to-talk protocol:
           - binary frames: buffered PCM audio (all at once when user presses Stop)
           - text frame {"type": "end_of_turn"}: signals Gemini the turn is complete
-        """
-        try:
-            while True:
-                msg = await browser_ws.receive()
-                if msg["type"] == "websocket.disconnect":
-                    print("[browser→gemini] browser disconnected", flush=True)
-                    break
 
-                if msg.get("bytes"):
-                    audio_data = msg["bytes"]
-                    print(f"[browser→gemini] received audio {len(audio_data)}B, sending to Gemini", flush=True)
+        Per-frame errors (malformed JSON, failed Gemini sends) are logged and the
+        frame is dropped — they do NOT kill the session loop.
+        """
+        while True:
+            try:
+                msg = await browser_ws.receive()
+            except Exception as e:
+                print(f"[browser→gemini] receive error: {type(e).__name__}: {e}", flush=True)
+                break
+
+            if msg["type"] == "websocket.disconnect":
+                print("[browser→gemini] browser disconnected", flush=True)
+                break
+
+            if msg.get("bytes"):
+                audio_data = msg["bytes"]
+                print(f"[browser→gemini] received audio {len(audio_data)}B, sending to Gemini", flush=True)
+                try:
                     await session.send_realtime_input(activity_start=types.ActivityStart())
                     await session.send_realtime_input(
                         media=types.Blob(data=audio_data, mime_type="audio/pcm;rate=16000")
                     )
+                except Exception as e:
+                    print(f"[browser→gemini] send error: {type(e).__name__}: {e}", flush=True)
 
-                elif msg.get("text"):
+            elif msg.get("text"):
+                try:
                     payload = json.loads(msg["text"])
                     if payload.get("type") == "end_of_turn":
                         print("[browser→gemini] end_of_turn → activity_end", flush=True)
                         await session.send_realtime_input(activity_end=types.ActivityEnd())
-
-        except Exception as e:
-            print(f"[browser→gemini] error: {type(e).__name__}: {e}", flush=True)
+                except json.JSONDecodeError:
+                    print(f"[browser→gemini] malformed JSON frame, ignoring", flush=True)
+                except Exception as e:
+                    print(f"[browser→gemini] send error: {type(e).__name__}: {e}", flush=True)
 
     async def _gemini_to_browser(self, session, browser_ws: WebSocket):
         msg_count = 0
