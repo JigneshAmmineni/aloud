@@ -124,25 +124,36 @@ class MockGeminiSession:
 
     messages: list of MockLiveMessage objects to yield from receive().
     error: if set, raised after all messages are exhausted.
+
+    The real SDK's receive() yields exactly one turn (breaks after turn_complete)
+    and must be called again for subsequent turns. This mock is stateful: the
+    first call to receive() yields all preset messages; subsequent calls yield
+    nothing (simulating a cleanly closed session), which causes _gemini_to_browser's
+    outer while loop to exit via the got_message=False check.
     """
 
     def __init__(self, messages: list = None, error: Exception = None):
         self._messages = list(messages or [])
         self._error = error
         self.realtime_inputs: list[dict] = []
+        self._receive_call_count = 0
 
     async def send_realtime_input(self, **kwargs):
         self.realtime_inputs.append(kwargs)
 
     def receive(self) -> AsyncIterator:
+        self._receive_call_count += 1
+        is_first_call = self._receive_call_count == 1
         messages = self._messages
         error = self._error
 
         async def _gen():
-            for msg in messages:
-                yield msg
-            if error:
-                raise error
+            if is_first_call:
+                for msg in messages:
+                    yield msg
+                if error:
+                    raise error
+            # Second+ calls: yield nothing → got_message=False → outer loop exits
 
         return _gen()
 

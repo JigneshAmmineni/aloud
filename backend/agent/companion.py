@@ -96,33 +96,39 @@ class CompanionAgent:
                     print(f"[browser→gemini] send error: {type(e).__name__}: {e}", flush=True)
 
     async def _gemini_to_browser(self, session, browser_ws: WebSocket):
+        # The SDK's receive() yields exactly one turn (breaks after turn_complete).
+        # We loop so it re-enters for each subsequent turn in the same session.
         msg_count = 0
         try:
-            async for msg in session.receive():
-                msg_count += 1
-                has_data = bool(msg.data)
-                has_sc = bool(msg.server_content)
-                print(f"[gemini→browser] msg#{msg_count}: data={has_data} server_content={has_sc}", flush=True)
+            while True:
+                got_message = False
+                async for msg in session.receive():
+                    got_message = True
+                    msg_count += 1
+                    has_sc = msg.server_content is not None
+                    print(f"[gemini→browser] msg#{msg_count}: data={bool(msg.data)} sc={has_sc}", flush=True)
 
-                if msg.data:
-                    await browser_ws.send_bytes(msg.data)
-                    print(f"[gemini→browser] sent {len(msg.data)}B via msg.data", flush=True)
-                elif has_sc and msg.server_content.model_turn:
-                    for part in msg.server_content.model_turn.parts:
-                        if part.inline_data:
-                            await browser_ws.send_bytes(part.inline_data.data)
-                            print(f"[gemini→browser] sent {len(part.inline_data.data)}B via inline_data", flush=True)
+                    if msg.data:
+                        await browser_ws.send_bytes(msg.data)
+                        print(f"[gemini→browser] sent {len(msg.data)}B via msg.data", flush=True)
+                    elif has_sc and msg.server_content.model_turn:
+                        for part in msg.server_content.model_turn.parts:
+                            if part.inline_data:
+                                await browser_ws.send_bytes(part.inline_data.data)
+                                print(f"[gemini→browser] sent {len(part.inline_data.data)}B via inline_data", flush=True)
 
-                # turn_complete can accompany audio or arrive standalone
-                if has_sc and getattr(msg.server_content, "turn_complete", False):
-                    await browser_ws.send_text(json.dumps({"type": "turn_complete"}))
-                    print("[gemini→browser] turn_complete forwarded", flush=True)
+                    if has_sc and getattr(msg.server_content, "turn_complete", False):
+                        await browser_ws.send_text(json.dumps({"type": "turn_complete"}))
+                        print("[gemini→browser] turn_complete forwarded", flush=True)
 
-                # Store resumption handle for potential future reconnect
-                if msg.session_resumption_update:
-                    upd = msg.session_resumption_update
-                    if getattr(upd, "resumable", False) and getattr(upd, "new_handle", None):
-                        print("[session] resumption handle updated", flush=True)
+                    if msg.session_resumption_update:
+                        upd = msg.session_resumption_update
+                        if getattr(upd, "resumable", False) and getattr(upd, "new_handle", None):
+                            print("[session] resumption handle updated", flush=True)
+
+                if not got_message:
+                    # receive() returned immediately with no messages — session closed cleanly
+                    break
 
         except Exception as e:
             print(f"[gemini→browser] closed after {msg_count} msgs: {type(e).__name__}: {e}", flush=True)
