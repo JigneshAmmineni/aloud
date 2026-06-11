@@ -41,38 +41,51 @@ User explicitly asks for the agent's opinion, alternatives, or next steps. The a
 ### 4.1 Voice Interaction
 - **FR-1** The app must support hands-free voice input and voice output. No typing required.
 - **FR-2** The user must be able to start a session with a single tap and begin speaking immediately.
-- **FR-3** The user must be able to signal end-of-turn (stop speaking) and receive a response without additional taps.
+- **FR-3** Turn detection is automatic via Voice Activity Detection (VAD). The agent responds when the user stops speaking; no button press is required to signal end-of-turn.
 - **FR-4** Voice output must feel natural and conversational, not robotic.
 
-### 4.2 Agent Behavior
-- **FR-5** By default, the agent is reactive: it responds when the user speaks.
-- **FR-6** When the agent detects something worth flagging — a gap in reasoning, a contradiction, a strong connection between ideas — it may proactively surface it without waiting to be asked. This behavior must be configurable (on/off).
-- **FR-7** The agent must ask one question at a time. It must not overwhelm the user with multiple questions or unsolicited lists of suggestions.
-- **FR-8** The agent must distinguish between modes: brainstorming (generative, expansive) vs. critique (analytical, skeptical). It should infer the mode from context; the user may also set it explicitly.
-- **FR-9** When asked, the agent must be able to summarize the current session's key ideas, decisions, and open questions.
-- **FR-10** When asked, the agent must be able to produce a written artifact: a structured summary, a list of action items, or a cleaned-up version of the user's idea.
+### 4.2 Session Controls & UI
+- **FR-5** The app must have a single prominent button that manages session state:
+  - **Idle / ready:** green "Talk" button. Tapping starts a session.
+  - **Booting up or shutting down:** grey, non-interactive. Indicates the system is connecting or cleaning up.
+  - **Active session:** red "End" button. Tapping ends the session.
+- **FR-6** While a session is active, the UI must indicate the current state via an animated waveform bar below the button:
+  - **Listening** — waveform animates to the user's mic amplitude (user sees their own voice as bars).
+  - **Thinking** — three pulsing dots (typing-indicator style).
+  - **Speaking** — waveform animates to the agent's audio amplitude, in a distinct color from the listening state.
 
-### 4.3 Memory
-- **FR-11** Within a session, the agent must remember everything said. It must be able to reference specific details from earlier in the same session.
-- **FR-12** Across sessions, the agent must retain a memory of past conversations — key topics discussed, decisions made, recurring themes — and use that context to inform future sessions.
-- **FR-13** The user must be able to ask about past sessions ("what did we discuss about X last week?") and get a meaningful answer.
-- **FR-14** The user must be able to correct or delete stored memories.
+### 4.3 Agent Behavior
+- **FR-7** By default, the agent is reactive: it responds when the user speaks.
+- **FR-8** When the agent detects something worth flagging — a gap in reasoning, a contradiction, a strong connection between ideas — it may proactively surface it without waiting to be asked. This behavior must be configurable (on/off).
+- **FR-9** The agent must ask one question at a time. It must not overwhelm the user with multiple questions or unsolicited lists of suggestions.
+- **FR-10** The agent must distinguish between modes: brainstorming (generative, expansive) vs. critique (analytical, skeptical). It should infer the mode from context; the user may also set it explicitly.
+- **FR-11** When asked, the agent must be able to summarize the current session's key ideas, decisions, and open questions.
+- **FR-12** When asked, the agent must be able to produce a written artifact: a structured summary, a list of action items, or a cleaned-up version of the user's idea.
 
-### 4.4 Session Management
-- **FR-15** A session begins when the user opens the app and connects. It ends when the user explicitly ends it or closes the app.
-- **FR-16** The app must handle interruptions gracefully: network drops, backgrounding the app, and resuming mid-session should not lose context.
-- **FR-17** Sessions must be logged and retrievable. The user must be able to review past sessions.
+### 4.4 Barge-In
+- **FR-13** The user must be able to start speaking while the agent is mid-response. The agent must stop speaking immediately, discard the remainder of its current response, and process the new input. The user can use this to redirect the conversation, add context, or correct the agent without waiting for it to finish.
+
+### 4.5 Memory
+- **FR-14** Within a session, the agent must remember everything said. It must be able to reference specific details from earlier in the same session.
+- **FR-15** Across sessions, the agent must retain a memory of past conversations — key topics discussed, decisions made, recurring themes — and use that context to inform future sessions.
+- **FR-16** The user must be able to ask about past sessions ("what did we discuss about X last week?") and get a meaningful answer.
+- **FR-17** The user must be able to correct or delete stored memories.
+
+### 4.6 Session Management
+- **FR-18** A session begins when the user taps "Talk" and the connection is established. It ends when the user taps "End" or the connection is lost.
+- **FR-19** The app must handle connection drops gracefully. If the connection drops mid-session, it must attempt to resume the session without losing the conversation context so far.
+- **FR-20** Full session transcripts must be stored in the backend database as an operational log. This is for internal review and debugging — it is not user-facing. The transcript is not injected into the agent's context; the agent maintains its own separate, compact memory layer.
 
 ---
 
 ## 5. Non-Functional Requirements
 
 ### 5.1 Latency
-- **NFR-1** Time from end-of-user-speech to first audio from the agent must be under 1 second under normal network conditions. This is the single most important feel metric — delays above 1s break the conversational illusion.
+- **NFR-1** Time from end-of-user-speech to first audio from the agent must be under 3 seconds under normal network conditions.
 - **NFR-2** Audio must stream as it is generated. The agent must not wait until its full response is ready before speaking.
 
 ### 5.2 Availability & Reliability
-- **NFR-3** The app must function on mobile (iOS and Android) and desktop (web browser).
+- **NFR-3** The app is a web application. It must function correctly in mobile browsers on iOS and Android, and in desktop browsers. No native app installation required.
 - **NFR-4** Session state must be recoverable after a connection drop without losing the conversation so far.
 
 ### 5.3 Privacy
@@ -96,6 +109,9 @@ The following are explicitly not part of this product:
 
 ## 7. Constraints
 
-- **C-1** Voice I/O pipeline latency is the binding constraint on model and architecture choices. Any component that adds more than ~200ms of overhead is a candidate for replacement.
+- **C-1** Voice I/O pipeline latency is the binding constraint on model and architecture choices. The total budget from end-of-speech to first audio is 3 seconds. Any single component consuming more than ~1 second of that budget is a candidate for replacement.
 - **C-2** The LLM provider must be swappable without rewriting session logic, memory, or API routes. Provider-specific code is isolated to a single agent class.
 - **C-3** The product must never describe itself or its agent as a therapist, counselor, or mental health resource — in UI copy, system prompts, or onboarding.
+
+---
+
