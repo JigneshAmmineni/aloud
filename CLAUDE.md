@@ -69,4 +69,4 @@ Server-side encryption (key held by us) is added post-MVP. To make this painless
 - [REQUIREMENTS.md](REQUIREMENTS.md) — what the product must do (FR/NFR/constraints)
 - [SDD.md](SDD.md) — software design, Pipecat-based (the version to build)
 - [SDD-v2.md](SDD-v2.md) — alternative fully hand-rolled design, for learning value
-- [PLAN.md](PLAN.md) — scrap notes / future directions (deployment options, post-MVP ideas); not a tracked plan
+- PLAN.md — scrap notes / future directions (deployment options, post-MVP ideas); local-only, gitignored
