@@ -72,8 +72,7 @@ frontend/     Next.js app — session button FSM, live waveform, artifacts panel
 - [REQUIREMENTS.md](REQUIREMENTS.md) — what the product must do (and what's deliberately out of scope)
 - [SDD.md](SDD.md) — the software design this branch implements
 - [SDD-v2.md](SDD-v2.md) — an alternative fully hand-rolled design, kept for learning value
-- [PLAN.md](PLAN.md) — scrap notes and future directions (deployment, memory layer)
 
 ## Status
 
-Working MVP demo (localhost). Deliberately deferred: cross-session memory (MemGPT-style design planned), session resume, proactive flagging, deployment off localhost. See [REQUIREMENTS.md §6](REQUIREMENTS.md) for the full out-of-scope list and PLAN.md for where this goes next.
+Working MVP demo (localhost). Deliberately deferred: cross-session memory (MemGPT-style design planned), session resume, proactive flagging, deployment off localhost. See [REQUIREMENTS.md §6](REQUIREMENTS.md) for the full out-of-scope list.

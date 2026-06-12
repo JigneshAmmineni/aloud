@@ -8,3 +8,6 @@ __pycache__/
 
 # tooling scratch
 .playwright-mcp/
+
+# personal scrap notes — local only
+PLAN.md
