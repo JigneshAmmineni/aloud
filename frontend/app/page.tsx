@@ -1,5 +1,6 @@
 "use client";
 
+import { ArtifactsPanel } from "@/components/ArtifactsPanel";
 import { SessionButton } from "@/components/SessionButton";
 import { WaveformBar } from "@/components/WaveformBar";
 import { useAloudSession } from "@/lib/useAloudSession";
@@ -14,7 +15,7 @@ const STATUS: Record<string, string> = {
 };
 
 export default function Home() {
-  const { state, mode, error, localTrack, botTrack, talk, end } =
+  const { state, mode, error, localTrack, botTrack, artifacts, talk, end } =
     useAloudSession();
 
   const status = state === "active" ? STATUS[mode] : STATUS[state];
@@ -25,6 +26,8 @@ export default function Home() {
         <h1 className="wordmark">Aloud</h1>
         <p className="tagline">a place to think out loud</p>
       </header>
+
+      <ArtifactsPanel artifacts={artifacts} />
 
       <div className="core">
         <SessionButton state={state} onTalk={talk} onEnd={end} />

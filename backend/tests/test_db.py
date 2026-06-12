@@ -23,11 +23,16 @@ EXPECTED_SCHEMA = {
         "turn_id",
         "latency_ms",
     },
+    "artifacts": {"id", "session_id", "user_id", "created_at", "kind", "title", "content"},
 }
 
 # NFR-6: sensitive (🔒, to-be-encrypted) content columns, kept separate from
 # metadata. Every Text-typed column must be accounted for here.
-SENSITIVE_COLUMNS = {("transcript_events", "text")}
+SENSITIVE_COLUMNS = {
+    ("transcript_events", "text"),
+    ("artifacts", "title"),
+    ("artifacts", "content"),
+}
 
 
 def test_schema_snapshot():

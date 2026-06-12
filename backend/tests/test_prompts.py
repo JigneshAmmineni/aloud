@@ -31,3 +31,10 @@ def test_prompt_keeps_spoken_output_rules():
 def test_prompt_keeps_greeting_instruction():
     """The greeting kick (LLMRunFrame on connect) relies on this."""
     assert "greet" in build_system_prompt().lower()
+
+
+def test_prompt_keeps_artifact_instructions():
+    """FR-12: tool named, on-request only, never read aloud."""
+    prompt = build_system_prompt().lower()
+    assert "create_artifact" in prompt
+    assert "never read the artifact" in prompt

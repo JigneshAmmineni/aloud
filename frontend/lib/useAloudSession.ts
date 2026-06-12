@@ -15,12 +15,21 @@ import { SmallWebRTCTransport } from "@pipecat-ai/small-webrtc-transport";
 export type SessionState = "idle" | "connecting" | "active" | "ending";
 export type VoiceMode = "listening" | "thinking" | "speaking";
 
+export type Artifact = {
+  id: number;
+  title: string;
+  kind: string;
+  content: string;
+  created_at: string;
+};
+
 export function useAloudSession() {
   const [state, setState] = useState<SessionState>("idle");
   const [mode, setMode] = useState<VoiceMode>("listening");
   const [error, setError] = useState<string | null>(null);
   const [localTrack, setLocalTrack] = useState<MediaStreamTrack | null>(null);
   const [botTrack, setBotTrack] = useState<MediaStreamTrack | null>(null);
+  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
 
   const clientRef = useRef<PipecatClient | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -75,9 +84,19 @@ export function useAloudSession() {
               }
             }
           },
+          // FR-12: the create_artifact tool announces new artifacts here.
+          onServerMessage: (data: any) => {
+            if (data?.type === "artifact.created" && data.artifact) {
+              setArtifacts((prev) => [data.artifact as Artifact, ...prev]);
+            }
+          },
         },
       });
       clientRef.current = client;
+      if (process.env.NODE_ENV !== "production") {
+        // dev hook for driving the client from the console / E2E tests
+        (window as unknown as Record<string, unknown>).__aloudClient = client;
+      }
       await client.connect({ webrtcUrl: "/api/offer" });
     } catch (e) {
       console.error("connect failed", e);
@@ -98,5 +117,5 @@ export function useAloudSession() {
     cleanup();
   }, [cleanup]);
 
-  return { state, mode, error, localTrack, botTrack, talk, end };
+  return { state, mode, error, localTrack, botTrack, artifacts, talk, end };
 }

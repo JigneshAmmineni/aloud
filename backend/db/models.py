@@ -50,3 +50,17 @@ class TranscriptEvent(Base):
     text: Mapped[str] = mapped_column(Text)  # 🔒 sensitive
     turn_id: Mapped[int | None] = mapped_column(Integer)
     latency_ms: Mapped[int | None] = mapped_column(Integer)
+
+
+class Artifact(Base):
+    __tablename__ = "artifacts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    kind: Mapped[str] = mapped_column(String(24))  # summary|action_items|cleaned_idea
+    title: Mapped[str] = mapped_column(Text)  # 🔒 sensitive
+    content: Mapped[str] = mapped_column(Text)  # 🔒 sensitive

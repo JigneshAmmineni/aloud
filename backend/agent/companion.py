@@ -17,6 +17,7 @@ from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
 from agent.prompts import build_system_prompt
 from agent.providers import make_llm, make_stt, make_tts
 from agent.sanitizer import make_text_filters
+from agent.tools import make_create_artifact_handler, tool_schemas
 from app.config import Settings
 from db.sessions_repo import create_session_row, end_session_row
 from db.engine import session_factory
@@ -35,7 +36,8 @@ def build_pipeline_parts(settings: Settings):
     )
 
     context = LLMContext(
-        messages=[{"role": "system", "content": build_system_prompt()}]
+        messages=[{"role": "system", "content": build_system_prompt()}],
+        tools=tool_schemas(),
     )
     # Flux handles end-of-turn detection itself, so the user aggregator
     # defers to external turn events instead of running its own VAD logic.
@@ -67,6 +69,10 @@ class CompanionAgent:
 
         stt, llm, tts, context, user_agg, assistant_agg = build_pipeline_parts(
             self._settings
+        )
+        llm.register_function(
+            "create_artifact",
+            make_create_artifact_handler(session_id, session_factory()),
         )
 
         pipeline = Pipeline(
