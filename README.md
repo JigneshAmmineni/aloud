@@ -4,7 +4,7 @@
 
 You tap one button and start talking. Aloud listens, asks sharp questions — one at a time — and helps you brainstorm, pressure-test plans, and untangle messy thoughts. Ask it to *"write that up"* and a structured artifact appears on screen while the conversation keeps moving. Interrupt it mid-sentence and it stops immediately.
 
-It is not a note-taking app, not a search engine, and not a wellbeing companion. It is a conversational agent that makes your thinking better in real time.
+It is a conversational agent that makes your thinking better in real time.
 
 ---
 
