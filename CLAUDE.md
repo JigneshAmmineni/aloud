@@ -2,76 +2,71 @@
 
 ## What this is
 
-A voice-first journaling companion. Users speak, the app listens, and an AI agent responds with guiding questions to encourage reflection and deeper introspection. The agent notices patterns across sessions and gently surfaces them.
+A voice-first thinking partner for people who process ideas best by talking out loud. The user speaks; the agent listens, asks sharp questions, and helps them brainstorm, pressure-test plans, and organize messy thoughts — hands-free, on the go.
 
-**It is NOT a therapist. Never use the word "therapy" in the product, UI copy, or system prompts.**
+**It is NOT a therapist. Never use the words "therapy," "therapist," or "counselor" in the product, UI copy, system prompts, or documentation.**
 
 ---
 
-## Stack
+## Stack (cascade architecture)
 
 | Layer | Choice |
 |---|---|
-| Frontend | Next.js + React |
+| Frontend | Next.js + React + Pipecat JS client SDK |
 | Backend | Python + FastAPI |
-| LLM (prototype) | Gemini 2.5 Flash via Live API |
-| LLM (future) | Claude (Anthropic) — see migration note below |
+| Voice orchestration | Pipecat (cascade pipeline: turn detection → STT → LLM → TTS) |
+| Transport | WebRTC via Pipecat SmallWebRTC |
+| STT + turn detection | Deepgram Flux |
+| LLM (default) | Gemini Flash — swappable; Claude Sonnet is the runner-up if question quality disappoints |
+| TTS | Cartesia Sonic-3 |
 | DB | PostgreSQL |
-| Auth | TBD (likely Supabase Auth or Auth.js) |
+| Auth | TBD (likely Supabase Auth or Auth.js); MVP runs single-user |
 
 ---
 
 ## Key architectural decisions
 
-### LLM provider abstraction (required, do not skip)
+### Cascade, not speech-to-speech
 
-All LLM interactions must go through a single `CompanionAgent` class in the Python backend. The provider-specific code (SDK calls, message formatting, audio pipeline) is isolated inside that class. Everything else — memory layer, session logic, DB, API routes — is provider-agnostic.
+The earlier prototype (`main` branch) used Gemini Live native audio and hit its limits: 32K audio-token context, no control over memory, no provider swap. This branch rebuilds as a cascaded pipeline where conversation state is **text on our server** — which is what makes the memory layer, provider swapping, and session resume work.
 
-**Why this matters:** the prototype uses Gemini Live API (which handles STT + LLM + TTS natively in one WebSocket connection). The Claude branch will swap in Whisper (STT) + Claude API + ElevenLabs or browser TTS as three separate calls. The abstraction layer is what makes this a branch swap, not a rewrite.
+### Provider abstraction (required, do not skip)
 
-### Gemini prototype model
+All provider-specific construction (STT/LLM/TTS service classes, SDK imports) is isolated in `agent/providers.py` factory functions; `agent/companion.py` (`CompanionAgent`) builds and runs the pipeline from those factories. Everything else — memory layer, session logic, DB, API routes, prompts — is provider-agnostic. Swapping any provider is a change to one factory plus an env var.
 
-Use **Gemini 2.5 Flash** via the Live API. Verify availability in Google AI Studio before starting — Live API support may lag for 2.5 Pro.
+### Memory (MVP: in-session only)
 
-### Future Claude migration (feature/anthropic branch)
-
-When ready to migrate:
-- Swap `CompanionAgent` internals only
-- STT: Whisper WASM (browser, local) or Whisper API
-- LLM: Claude Sonnet (best quality/cost for emotionally nuanced conversation)
-- TTS: ElevenLabs or browser `speechSynthesis`
-- System prompt will need retuning — Claude has a different default personality than Gemini
-
-### Memory layer (two-tier)
-
-**Tier 1 — Session summary (runs at end of each session):**
-A second LLM call reads the full session transcript and extracts: key themes, emotional tone, things the user seems to be processing. Stored in a `session_memories` table. This is the agent manually deciding what's worth noting.
-
-**Tier 2 — Cross-session patterns (runs periodically):**
-Aggregates tier-1 summaries to detect recurring topics and sentiment trends over time. This powers the "noticing patterns" feature.
-
-Sentiment analysis runs as a parallel numeric signal (separate lightweight pass) for visualization/trend tracking — not a replacement for the agent's qualitative judgment.
-
-Reference: MemGPT/Letta paper for tiered agent memory design.
+- **Cross-session memory is deferred** (see REQUIREMENTS.md §6 Out of Scope). In-session, the Pipecat `LLMContext` holds the full session history. Planned future direction: a MemGPT-style framework, possibly RAG with semantic vector search, processed in parallel while the user is still speaking.
+- Full transcripts are stored in the DB **as an operational log only** — never injected into the agent's context, never user-facing.
 
 ### Encryption (add after MVP)
 
-Cloud LLM is fine — privacy policy will disclose that transcripts are processed by Google/Anthropic.
+Cloud processing is fine — the privacy policy discloses that voice and transcripts are processed by Deepgram, Google, and Cartesia.
 
-Server-side encryption (key held by us) will be added post-MVP. To make this painless:
-- **Keep sensitive columns clearly separated from metadata at schema design time.** Transcripts, session summaries, and memory entries go in their own columns/tables. Timestamps, user IDs, and session metadata stay unencrypted.
-- Adding `pgcrypto` or app-level AES encryption to bounded columns later is straightforward if the schema is clean.
+Server-side encryption (key held by us) is added post-MVP. To make this painless:
+- **Keep sensitive columns clearly separated from metadata at schema design time.** Transcripts, summaries, memory entries, and artifacts get their own columns; timestamps, IDs, and session metadata stay unencrypted.
+- Adding `pgcrypto` or app-level AES to bounded columns later is straightforward if the schema is clean. The schema in SDD.md §3 marks every sensitive column.
+
+---
+
+## Workflow rules
+
+- **Never commit or push without being explicitly asked.** Make changes, then wait for the user to say "commit" or "push" before running any git commit or git push command.
 
 ---
 
 ## Hard constraints
 
 - Never describe the app as therapy or the agent as a therapist — in code, copy, system prompts, or documentation.
-- Always route LLM calls through `CompanionAgent`. No direct SDK calls in route handlers.
+- All provider SDK usage lives in `agent/providers.py` (factories) behind `CompanionAgent`. No direct SDK calls in route handlers or anywhere else.
 - DB schema: sensitive content columns must be separable from metadata. Design for encryption even if you don't implement it yet.
+- Every pipeline stage is instrumented: structured logs with `session_id`/`turn_id`, per-stage latency, WARN over 1s per stage, ERROR over 3s end-of-speech → first audio.
 
 ---
 
 ## Docs
 
-- [PLAN.md](PLAN.md) — sprint breakdown and current progress
+- [REQUIREMENTS.md](REQUIREMENTS.md) — what the product must do (FR/NFR/constraints)
+- [SDD.md](SDD.md) — software design, Pipecat-based (the version to build)
+- [SDD-v2.md](SDD-v2.md) — alternative fully hand-rolled design, for learning value
+- [PLAN.md](PLAN.md) — scrap notes / future directions (deployment options, post-MVP ideas); not a tracked plan

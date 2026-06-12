@@ -56,25 +56,25 @@ User explicitly asks for the agent's opinion, alternatives, or next steps. The a
 
 ### 4.3 Agent Behavior
 - **FR-7** By default, the agent is reactive: it responds when the user speaks.
-- **FR-8** When the agent detects something worth flagging — a gap in reasoning, a contradiction, a strong connection between ideas — it may proactively surface it without waiting to be asked. This behavior must be configurable (on/off).
 - **FR-9** The agent must ask one question at a time. It must not overwhelm the user with multiple questions or unsolicited lists of suggestions.
-- **FR-10** The agent must distinguish between modes: brainstorming (generative, expansive) vs. critique (analytical, skeptical). It should infer the mode from context; the user may also set it explicitly.
 - **FR-11** When asked, the agent must be able to summarize the current session's key ideas, decisions, and open questions.
 - **FR-12** When asked, the agent must be able to produce a written artifact: a structured summary, a list of action items, or a cleaned-up version of the user's idea.
+
+*FR-8 (proactive flagging) and FR-10 (brainstorm/critique modes) are demo stretch goals — moved to §6 Out of Scope. Requirement numbering stays stable; removed numbers are not reused.*
 
 ### 4.4 Barge-In
 - **FR-13** The user must be able to start speaking while the agent is mid-response. The agent must stop speaking immediately, discard the remainder of its current response, and process the new input. The user can use this to redirect the conversation, add context, or correct the agent without waiting for it to finish.
 
 ### 4.5 Memory
 - **FR-14** Within a session, the agent must remember everything said. It must be able to reference specific details from earlier in the same session.
-- **FR-15** Across sessions, the agent must retain a memory of past conversations — key topics discussed, decisions made, recurring themes — and use that context to inform future sessions.
-- **FR-16** The user must be able to ask about past sessions ("what did we discuss about X last week?") and get a meaningful answer.
-- **FR-17** The user must be able to correct or delete stored memories.
+
+*FR-15–FR-17 (cross-session memory: retention across sessions, recall of past sessions, memory correction/deletion) — moved to §6 Out of Scope.*
 
 ### 4.6 Session Management
 - **FR-18** A session begins when the user taps "Talk" and the connection is established. It ends when the user taps "End" or the connection is lost.
-- **FR-19** The app must handle connection drops gracefully. If the connection drops mid-session, it must attempt to resume the session without losing the conversation context so far.
-- **FR-20** Full session transcripts must be stored in the backend database as an operational log. This is for internal review and debugging — it is not user-facing. The transcript is not injected into the agent's context; the agent maintains its own separate, compact memory layer.
+- **FR-20** Full session transcripts must be stored in the backend database as an operational log. This is for internal review and debugging — it is not user-facing. The transcript is not injected into the agent's context.
+
+*FR-19 (resume after connection drop) — moved to §6 Out of Scope. A dropped connection simply ends the session.*
 
 ---
 
@@ -86,11 +86,12 @@ User explicitly asks for the agent's opinion, alternatives, or next steps. The a
 
 ### 5.2 Availability & Reliability
 - **NFR-3** The app is a web application. It must function correctly in mobile browsers on iOS and Android, and in desktop browsers. No native app installation required.
-- **NFR-4** Session state must be recoverable after a connection drop without losing the conversation so far.
+
+*NFR-4 (session state recovery after connection drop) — moved to §6 Out of Scope along with FR-19; they were the same requirement.*
 
 ### 5.3 Privacy
 - **NFR-5** All voice data and transcripts are processed server-side. The privacy policy must disclose this clearly.
-- **NFR-6** Sensitive session content (transcripts, summaries, memory entries) must be stored encrypted at rest.
+- **NFR-6** Sensitive session content (transcripts, artifacts, future memory entries) must live in dedicated database columns, separable from session metadata, so that encryption at rest can be added post-MVP without schema rework. The encryption itself is deferred — see §6 Out of Scope.
 - **NFR-7** The user must be able to delete all their data.
 
 ---
@@ -104,6 +105,15 @@ The following are explicitly not part of this product:
 - **Emotional support / mental health.** The agent is a thinking tool, not a wellbeing companion. It must never present itself as a therapist or suggest therapeutic interpretations.
 - **Collaboration.** Sessions are single-user. No shared sessions or multi-user features.
 - **Document ingestion.** The agent cannot read files, PDFs, or links the user shares. Voice only.
+
+### Deferred — planned, but out of scope for the MVP demo
+
+- **Cross-session memory** (formerly FR-15–FR-17). The agent starts every session fresh; memory is in-session only. Planned later following the MemGPT framework, possibly integrating RAG with clever indexing and semantic vector search, depending on performance.
+- **Streaming memory processing.** When cross-session memory lands, it must run in parallel while the user is still speaking — context editing during input, not after the session ends.
+- **Proactive flagging** (formerly FR-8; demo stretch goal). The agent surfacing gaps, contradictions, or connections unprompted, with a user-configurable on/off setting.
+- **Brainstorm/critique mode inference** (formerly FR-10; demo stretch goal). Distinct generative vs. analytical behavior, inferred from context or set explicitly.
+- **Session resume** (formerly FR-19 / NFR-4). A dropped connection ends the session; the user starts a new one.
+- **Encryption at rest** (deferred from NFR-6). The schema keeps sensitive content in dedicated columns so encryption can be added post-MVP without rework; the encryption itself is not in the MVP.
 
 ---
 

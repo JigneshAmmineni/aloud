@@ -1,0 +1,10 @@
+# secrets — never commit; work against .env.example
+.env
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# tooling scratch
+.playwright-mcp/

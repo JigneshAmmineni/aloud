@@ -1,0 +1,27 @@
+services:
+  backend:
+    build: ./backend
+    env_file: .env
+    ports:
+      - "7860:7860"
+    volumes:
+      - ./backend:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 7860 --reload
+
+  frontend:
+    image: node:22-alpine
+    working_dir: /app
+    environment:
+      - BACKEND_URL=http://backend:7860
+      - WATCHPACK_POLLING=true
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    command: sh -c "npm install && npm run dev -- --hostname 0.0.0.0"
+    depends_on:
+      - backend
+
+volumes:
+  frontend_node_modules:
