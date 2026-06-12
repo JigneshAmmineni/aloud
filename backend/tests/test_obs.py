@@ -2,10 +2,16 @@
 
 import asyncio
 import json
+import time
 from unittest.mock import MagicMock
 
 from loguru import logger
-from pipecat.frames.frames import BotStartedSpeakingFrame, UserStoppedSpeakingFrame
+from pipecat.frames.frames import (
+    BotStartedSpeakingFrame,
+    MetricsFrame,
+    UserStoppedSpeakingFrame,
+)
+from pipecat.metrics.metrics import TTFBMetricsData
 from pipecat.observers.base_observer import FramePushed
 from pipecat.processors.frame_processor import FrameDirection
 
@@ -83,3 +89,86 @@ def test_flux_turn_frames_drive_latency_events():
     )
     assert latency_record["extra"]["session_id"] == "test-session"
     assert latency_record["extra"]["duration_ms"] >= 0
+
+
+def _capture_observer_run(frames_then_state=None):
+    """Run an observer over a frame sequence; return captured log records."""
+    captured: list = []
+    logger.remove()
+    logger.add(lambda m: captured.append(m.record), level="DEBUG")
+    observer = make_latency_observer("test-session")
+    return observer, captured
+
+
+def _pushed(frame):
+    return FramePushed(
+        source=MagicMock(),
+        destination=MagicMock(),
+        frame=frame,
+        direction=FrameDirection.DOWNSTREAM,
+        timestamp=0,
+    )
+
+
+def test_latency_over_budget_logs_error():
+    """NFR-1: end-of-speech -> first audio over 3s is an ERROR."""
+    observer, captured = _capture_observer_run()
+
+    async def run():
+        await observer.on_push_frame(_pushed(UserStoppedSpeakingFrame()))
+        observer._user_stopped_time = time.time() - 4.0  # simulate a 4s wait
+        await observer.on_push_frame(_pushed(BotStartedSpeakingFrame()))
+
+    asyncio.run(run())
+
+    record = next(r for r in captured if r["extra"].get("event") == "turn.latency")
+    assert record["level"].name == "ERROR"
+    assert record["extra"]["duration_ms"] >= 3000
+
+
+def test_slow_stage_logs_warning_with_guilty_stage():
+    """C-1: any single stage over 1s is a WARNING naming the stage."""
+    observer, captured = _capture_observer_run()
+
+    async def run():
+        await observer.on_push_frame(_pushed(UserStoppedSpeakingFrame()))
+        await observer.on_push_frame(
+            _pushed(
+                MetricsFrame(
+                    data=[TTFBMetricsData(processor="GoogleLLMService#0", value=1.5)]
+                )
+            )
+        )
+        await observer.on_push_frame(_pushed(BotStartedSpeakingFrame()))
+
+    asyncio.run(run())
+
+    record = next(
+        r for r in captured if r["extra"].get("event") == "turn.latency_breakdown"
+    )
+    assert record["level"].name == "WARNING"
+    assert record["extra"]["stages_ms"]["ttfb.GoogleLLMService#0"] == 1500
+
+
+def test_fast_turn_logs_info_not_warning():
+    observer, captured = _capture_observer_run()
+
+    async def run():
+        await observer.on_push_frame(_pushed(UserStoppedSpeakingFrame()))
+        await observer.on_push_frame(
+            _pushed(
+                MetricsFrame(
+                    data=[TTFBMetricsData(processor="GoogleLLMService#0", value=0.6)]
+                )
+            )
+        )
+        await observer.on_push_frame(_pushed(BotStartedSpeakingFrame()))
+
+    asyncio.run(run())
+
+    latency = next(r for r in captured if r["extra"].get("event") == "turn.latency")
+    breakdown = next(
+        r for r in captured if r["extra"].get("event") == "turn.latency_breakdown"
+    )
+    assert latency["level"].name == "INFO"
+    assert breakdown["level"].name == "INFO"

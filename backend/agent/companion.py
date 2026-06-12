@@ -18,7 +18,34 @@ from agent.prompts import build_system_prompt
 from agent.providers import make_llm, make_stt, make_tts
 from agent.sanitizer import make_text_filters
 from app.config import Settings
+from db.sessions_repo import create_session_row, end_session_row
+from db.engine import session_factory
+from db.transcript_log import TranscriptWriter
 from obs.latency import make_latency_observer
+
+
+def build_pipeline_parts(settings: Settings):
+    """Per-session services, context, and aggregators — separated from the
+    transport so the assembly contracts are testable (test_pipeline_setup)."""
+    stt = make_stt(settings)
+    llm = make_llm(settings)
+    tts = make_tts(
+        settings,
+        text_filters=make_text_filters(settings.tts_sanitize_enabled),
+    )
+
+    context = LLMContext(
+        messages=[{"role": "system", "content": build_system_prompt()}]
+    )
+    # Flux handles end-of-turn detection itself, so the user aggregator
+    # defers to external turn events instead of running its own VAD logic.
+    user_agg, assistant_agg = LLMContextAggregatorPair(
+        context,
+        user_params=LLMUserAggregatorParams(
+            user_turn_strategies=ExternalUserTurnStrategies()
+        ),
+    )
+    return stt, llm, tts, context, user_agg, assistant_agg
 
 
 class CompanionAgent:
@@ -38,23 +65,8 @@ class CompanionAgent:
             ),
         )
 
-        stt = make_stt(self._settings)
-        llm = make_llm(self._settings)
-        tts = make_tts(
-            self._settings,
-            text_filters=make_text_filters(self._settings.tts_sanitize_enabled),
-        )
-
-        context = LLMContext(
-            messages=[{"role": "system", "content": build_system_prompt()}]
-        )
-        # Flux handles end-of-turn detection itself, so the user aggregator
-        # defers to external turn events instead of running its own VAD logic.
-        user_agg, assistant_agg = LLMContextAggregatorPair(
-            context,
-            user_params=LLMUserAggregatorParams(
-                user_turn_strategies=ExternalUserTurnStrategies()
-            ),
+        stt, llm, tts, context, user_agg, assistant_agg = build_pipeline_parts(
+            self._settings
         )
 
         pipeline = Pipeline(
@@ -69,13 +81,17 @@ class CompanionAgent:
             ]
         )
 
+        writer = TranscriptWriter(session_id, session_factory())
+
         task = PipelineTask(
             pipeline,
             params=PipelineParams(
                 enable_metrics=True,
                 enable_usage_metrics=True,
-                observers=[make_latency_observer(session_id)],
             ),
+            # observers go on the task, NOT PipelineParams — the params model
+            # silently ignores unknown fields
+            observers=[make_latency_observer(session_id), writer.observer()],
             enable_turn_tracking=True,
             conversation_id=session_id,
         )
@@ -94,7 +110,19 @@ class CompanionAgent:
             )
             await task.cancel()
 
+        await create_session_row(session_id)
+        writer.start()
         log.bind(event="session.started").info("Pipeline starting")
-        runner = PipelineRunner(handle_sigint=False)
-        await runner.run(task)
-        log.bind(event="session.ended").info("Pipeline finished")
+        end_reason = "user"  # tap and connection drop are indistinguishable (resume is descoped)
+        try:
+            runner = PipelineRunner(handle_sigint=False)
+            await runner.run(task)
+        except Exception:
+            end_reason = "error"
+            raise
+        finally:
+            await writer.stop()
+            await end_session_row(session_id, end_reason)
+            log.bind(event="session.ended", end_reason=end_reason).info(
+                "Pipeline finished"
+            )

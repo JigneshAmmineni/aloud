@@ -1,0 +1,115 @@
+"""Signaling API contracts (SDD §2.2): /healthz, /start, offer routes.
+
+WebRTC handling itself is stubbed — these tests pin the HTTP contract that
+the frontend and the Pipecat client SDK depend on.
+"""
+
+import uuid
+
+import pytest
+from fastapi.testclient import TestClient
+
+import app.main as main
+
+
+class StubWebRTCHandler:
+    def __init__(self):
+        self.web_requests = []
+        self.patch_requests = []
+
+    async def handle_web_request(self, request, webrtc_connection_callback):
+        self.web_requests.append(request)
+        return {"sdp": "answer-sdp", "type": "answer", "pc_id": "pc-test-1"}
+
+    async def handle_patch_request(self, request):
+        self.patch_requests.append(request)
+
+
+@pytest.fixture
+def stub_handler(monkeypatch):
+    stub = StubWebRTCHandler()
+    monkeypatch.setattr(main, "webrtc_handler", stub)
+    return stub
+
+
+@pytest.fixture
+def client():
+    with TestClient(main.app) as c:  # runs lifespan → init_db on sqlite
+        yield c
+
+
+def test_healthz(client):
+    resp = client.get("/healthz")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
+
+
+def test_start_returns_session_id_and_registers_it(client):
+    resp = client.post("/start", json={"transport": "webrtc"})
+    assert resp.status_code == 200
+    session_id = resp.json()["sessionId"]
+    uuid.UUID(session_id)  # well-formed
+    assert session_id in main.active_sessions
+
+
+def test_start_with_default_ice_servers(client):
+    resp = client.post("/start", json={"enableDefaultIceServers": True})
+    ice = resp.json()["iceConfig"]["iceServers"]
+    assert ice and "stun:" in ice[0]["urls"][0]
+
+
+def test_start_without_ice_request_omits_ice_config(client):
+    resp = client.post("/start", json={})
+    assert "iceConfig" not in resp.json()
+
+
+def test_start_tolerates_missing_body(client):
+    resp = client.post("/start")
+    assert resp.status_code == 200
+    assert "sessionId" in resp.json()
+
+
+def test_offer_returns_answer_from_handler(client, stub_handler):
+    resp = client.post("/api/offer", json={"sdp": "v=0...", "type": "offer"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["type"] == "answer"
+    assert body["pc_id"] == "pc-test-1"
+    assert len(stub_handler.web_requests) == 1
+    assert stub_handler.web_requests[0].sdp == "v=0..."
+
+
+def test_session_scoped_offer_requires_known_session(client, stub_handler):
+    resp = client.post(
+        "/sessions/not-a-real-session/api/offer",
+        json={"sdp": "v=0...", "type": "offer"},
+    )
+    assert resp.status_code == 404
+    assert stub_handler.web_requests == []
+
+
+def test_session_scoped_offer_with_valid_session(client, stub_handler):
+    session_id = client.post("/start", json={}).json()["sessionId"]
+    resp = client.post(
+        f"/sessions/{session_id}/api/offer",
+        json={"sdp": "v=0...", "type": "offer"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["pc_id"] == "pc-test-1"
+
+
+def test_ice_candidate_patch(client, stub_handler):
+    resp = client.patch(
+        "/api/offer", json={"pc_id": "pc-test-1", "candidates": []}
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "success"}
+    assert len(stub_handler.patch_requests) == 1
+
+
+def test_session_scoped_patch_requires_known_session(client, stub_handler):
+    resp = client.patch(
+        "/sessions/nope/api/offer", json={"pc_id": "x", "candidates": []}
+    )
+    assert resp.status_code == 404
+    assert stub_handler.patch_requests == []

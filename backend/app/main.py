@@ -12,6 +12,7 @@ Signaling follows the Pipecat client contract:
 """
 
 import uuid
+from contextlib import asynccontextmanager
 
 from obs.logging import setup_logging
 
@@ -29,10 +30,18 @@ from pipecat_ai_small_webrtc_prebuilt.frontend import SmallWebRTCPrebuiltUI
 
 from agent.companion import CompanionAgent
 from app.config import load_settings
+from db.engine import init_db
 
 settings = load_settings()  # fail fast at boot, naming any missing env vars
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db(settings.database_url)
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 app.mount("/client", SmallWebRTCPrebuiltUI)
 
 ICE_SERVERS = [IceServer(urls=["stun:stun.l.google.com:19302"])]

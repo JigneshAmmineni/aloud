@@ -2,11 +2,32 @@ services:
   backend:
     build: ./backend
     env_file: .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://aloud:aloud@db:5432/aloud
     ports:
       - "7860:7860"
     volumes:
       - ./backend:/app
     command: uvicorn app.main:app --host 0.0.0.0 --port 7860 --reload
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=aloud
+      - POSTGRES_PASSWORD=aloud
+      - POSTGRES_DB=aloud
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aloud"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
 
   frontend:
     image: node:22-alpine
@@ -25,3 +46,4 @@ services:
 
 volumes:
   frontend_node_modules:
+  pgdata:

@@ -27,6 +27,7 @@ class Settings:
     llm_provider: str
     tts_provider: str
     tts_sanitize_enabled: bool
+    database_url: str
 
 
 def load_settings() -> Settings:
@@ -47,4 +48,6 @@ def load_settings() -> Settings:
         llm_provider=os.getenv("LLM_PROVIDER") or "google",
         tts_provider=os.getenv("TTS_PROVIDER") or "cartesia",
         tts_sanitize_enabled=_env_bool("TTS_SANITIZE_ENABLED", True),
+        database_url=os.getenv("DATABASE_URL")
+        or "postgresql+asyncpg://aloud:aloud@localhost:5432/aloud",
     )

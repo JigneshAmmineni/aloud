@@ -18,6 +18,7 @@ def _settings(**overrides) -> Settings:
         llm_provider="google",
         tts_provider="cartesia",
         tts_sanitize_enabled=True,
+        database_url="sqlite+aiosqlite://",
     )
     base.update(overrides)
     return Settings(**base)

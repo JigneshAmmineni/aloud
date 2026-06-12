@@ -161,7 +161,7 @@ backend/
   agent/prompts.py       # system prompt builder (identity, spoken style)
   agent/sanitizer.py     # TTSTextSanitizer: strips markdown before TTS (§2.3)
   agent/tools.py         # LLM tools: create_artifact
-  db/                    # SQLAlchemy models + Alembic migrations
+  db/                    # SQLAlchemy models; create_all at boot (Alembic when schema churns)
   obs/                   # logging setup, latency observer wiring
 ```
 
