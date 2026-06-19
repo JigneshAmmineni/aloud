@@ -1,0 +1,18 @@
+# Production reverse proxy. Domain + email injected from .env via the caddy
+# service's environment (see docker-compose.prod.yml). Caddy obtains and
+# auto-renews the Let's Encrypt cert for ALOUD_DOMAIN.
+
+{
+	email {$ALOUD_EMAIL}
+}
+
+{$ALOUD_DOMAIN} {
+	# signaling + health → backend; everything else → frontend
+	@backend path /api/* /start /sessions/* /healthz
+	handle @backend {
+		reverse_proxy localhost:7860
+	}
+	handle {
+		reverse_proxy localhost:3000
+	}
+}

@@ -1,0 +1,53 @@
+# Production stack (single GCE VM). See deployment.md.
+# Run with:  docker compose -f docker-compose.prod.yml up -d --build
+#
+# All services use host networking: WebRTC media binds ephemeral UDP ports
+# directly to the VM's interface (Docker bridge can't forward those), and
+# host networking keeps inter-service addressing simple (everyone on localhost).
+# Domain / email / DB password come from .env — nothing to hand-edit here.
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    network_mode: host          # binds 80/443 on the VM; HTTPS + path routing
+    restart: unless-stopped
+    environment:
+      - ALOUD_DOMAIN=${ALOUD_DOMAIN}
+      - ALOUD_EMAIL=${ALOUD_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data         # persists the issued cert across restarts
+      - caddy_config:/config
+    depends_on: [frontend, backend]
+
+  frontend:
+    build: ./frontend
+    network_mode: host           # serves localhost:3000 (not firewalled → Caddy-only)
+    restart: unless-stopped
+    depends_on: [backend]
+
+  backend:
+    build: ./backend
+    network_mode: host           # REQUIRED: WebRTC UDP media on the host interface
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://aloud:${POSTGRES_PASSWORD}@127.0.0.1:5432/aloud
+    depends_on: [db]
+
+  db:
+    image: postgres:16-alpine
+    network_mode: host
+    restart: unless-stopped
+    command: postgres -c listen_addresses=127.0.0.1   # loopback only: not on any public iface
+    environment:
+      - POSTGRES_USER=aloud
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=aloud
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  caddy_data:
+  caddy_config:
+  pgdata:
