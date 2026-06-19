@@ -10,7 +10,8 @@ RUN npm run build
 
 FROM node:22-alpine
 WORKDIR /app
-ENV NODE_ENV=production       # also strips the dev-only window.__aloudClient hook
+# NODE_ENV=production also strips the dev-only window.__aloudClient hook
+ENV NODE_ENV=production
 COPY --from=build /app ./
 EXPOSE 3000
 CMD ["npm", "start"]          # next start, serves the compiled app on :3000
