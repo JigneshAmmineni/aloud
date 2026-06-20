@@ -14,6 +14,8 @@ services:
     environment:
       - ALOUD_DOMAIN=${ALOUD_DOMAIN}
       - ALOUD_EMAIL=${ALOUD_EMAIL}
+      - ALOUD_AUTH_USER=${ALOUD_AUTH_USER}
+      - ALOUD_AUTH_HASH=${ALOUD_AUTH_HASH}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile
       - caddy_data:/data         # persists the issued cert across restarts

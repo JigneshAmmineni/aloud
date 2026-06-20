@@ -7,6 +7,13 @@
 }
 
 {$ALOUD_DOMAIN} {
+	# Gate the whole site behind one shared login. Username + bcrypt hash come
+	# from .env (ALOUD_AUTH_USER / ALOUD_AUTH_HASH). Remove this block to make
+	# the site open again.
+	basic_auth {
+		{$ALOUD_AUTH_USER} {$ALOUD_AUTH_HASH}
+	}
+
 	# signaling + health → backend; everything else → frontend
 	@backend path /api/* /start /sessions/* /healthz
 	handle @backend {
