@@ -14,4 +14,5 @@ WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=build /app ./
 EXPOSE 3000
-CMD ["npm", "start"]          # next start, serves the compiled app on :3000
+# next start — serves the compiled app on :3000
+CMD ["npm", "start"]
