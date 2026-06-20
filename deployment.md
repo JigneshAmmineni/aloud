@@ -466,6 +466,52 @@ docker compose -f docker-compose.prod.yml up -d --build       # rebuild + start 
 Tip: set `alias dc='docker compose -f docker-compose.prod.yml'` in `~/.bashrc` so you
 can type `dc ps`, `dc logs -f backend`, etc.
 
+### Logs & traffic
+
+**The richest view — backend structured logs (JSON).** Sessions, per-turn latency, the
+WebRTC/UDP connection setup, transcripts, tool calls. Best workflow: follow this in one
+window, then have a conversation on the site — you watch it all happen live.
+```bash
+docker compose -f docker-compose.prod.yml logs -f backend
+```
+Filter for specific events (the logs are JSON, so `grep` works well):
+```bash
+dc logs backend | grep -iE "ice|candidate|connection state"  # WebRTC/UDP path coming up:
+                                                              # candidate gathering, the srflx
+                                                              # (public-IP) candidate, and state
+                                                              # → connected/completed = media is up
+dc logs backend | grep turn.latency        # per-turn end-of-speech → first-audio (ERROR if >3s)
+dc logs backend | grep -E "session|transport"   # session lifecycle (connect/start/end)
+dc logs backend | grep transcript          # transcript rows being written
+dc logs backend | grep tool.invoked        # artifact / tool calls
+```
+
+**HTTP / HTTPS requests — Caddy.** Page loads and signaling POSTs (`/api/offer`, `/start`).
+```bash
+docker compose -f docker-compose.prod.yml logs -f caddy
+```
+Note: by default Caddy logs errors + lifecycle, **not a line per request**. For a clean
+access log (one line per HTTP request), add a `log` block to the `Caddyfile`:
+```
+{$ALOUD_DOMAIN} {
+    log                              # access log → stdout (visible in `logs caddy`)
+    # ...existing handle blocks...
+}
+```
+then `dc up -d` to apply.
+
+**Raw UDP at the socket/packet level** (rarely needed — the ICE state in the backend logs
+usually answers "is audio flowing?"):
+```bash
+sudo ss -unap                                   # active UDP sockets (media ports show here)
+sudo tcpdump -i any -n udp and not port 53      # live UDP packets; Ctrl+C to stop
+```
+
+When this stack later ships its logs to **GCP Cloud Logging** (Cloud Run/GKE, or the
+logging agent on this VM), the same backend JSON becomes searchable in the console —
+`jsonPayload.session_id`, `jsonPayload.event`, etc. — no code change. For now, `grep` on
+the container logs is the fastest view.
+
 ### The database
 ```bash
 # open a SQL shell (container name from `docker compose ... ps`):
