@@ -113,3 +113,61 @@ def test_session_scoped_patch_requires_known_session(client, stub_handler):
     )
     assert resp.status_code == 404
     assert stub_handler.patch_requests == []
+
+
+def test_upload_document_returns_metadata(client):
+    resp = client.post(
+        "/documents",
+        files={"file": ("notes.md", b"# Title\nhello there", "text/markdown")},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["filename"] == "notes.md"
+    assert body["char_count"] > 0
+    assert "id" in body
+
+
+def test_upload_document_rejects_unsupported_type(client):
+    resp = client.post(
+        "/documents",
+        files={"file": ("pic.png", b"\x89PNG\r\n\x1a\n", "image/png")},
+    )
+    assert resp.status_code == 400
+
+
+def test_documents_reach_the_agent_via_session_start(client, monkeypatch):
+    """End-to-end wiring: /documents -> /start(document_ids) -> session offer
+    resolves the docs and hands them to CompanionAgent."""
+    uploaded = client.post(
+        "/documents", files={"file": ("a.txt", b"hello world", "text/plain")}
+    ).json()
+    session_id = client.post(
+        "/start", json={"body": {"document_ids": [uploaded["id"]]}}
+    ).json()["sessionId"]
+
+    captured = {}
+
+    class FakeAgent:
+        def __init__(self, settings, documents=None):
+            captured["documents"] = documents
+
+        async def run(self, connection):
+            pass
+
+    class InvokingHandler:
+        async def handle_web_request(self, request, webrtc_connection_callback):
+            class Conn:
+                pc_id = "pc-doc-test"
+
+            await webrtc_connection_callback(Conn())
+            return {"type": "answer", "pc_id": "pc-doc-test"}
+
+    monkeypatch.setattr(main, "CompanionAgent", FakeAgent)
+    monkeypatch.setattr(main, "webrtc_handler", InvokingHandler())
+
+    resp = client.post(
+        f"/sessions/{session_id}/api/offer", json={"sdp": "v=0...", "type": "offer"}
+    )
+    assert resp.status_code == 200
+    docs = captured["documents"]
+    assert [d.content for d in docs] == ["hello world"]

@@ -92,7 +92,8 @@ await client.connect({ webrtcUrl: "/api/offer" });
 
 ### 2.2 Signaling & transport
 
-- Signaling follows the Pipecat client contract (three routes, all in `app/main.py`): `POST /start` (session bootstrap, returns `sessionId`), `POST /api/offer` (SDP exchange via `SmallWebRTCRequestHandler`, also at `/sessions/{id}/api/offer` — the path Pipecat clients use after `/start`), and `PATCH /api/offer` (trickle ICE candidates). Every connect creates a new session.
+- Signaling follows the Pipecat client contract (three routes, all in `app/main.py`): `POST /start` (session bootstrap, returns `sessionId`), `POST /api/offer` (SDP exchange via `SmallWebRTCRequestHandler`, also at `/sessions/{id}/api/offer` — the path Pipecat clients use after `/start`), and `PATCH /api/offer` (trickle ICE candidates). The frontend always goes through the session-scoped path (`/start` then `/sessions/{id}/api/offer`) so a session can carry attached-document ids; the unscoped `/api/offer` stays for the prebuilt debug UI.
+- **Document upload (FR-21):** `POST /documents` (multipart) accepts a `.txt`/`.md`/`.pdf`, extracts its text (`app/documents.py`; PDF via `pypdf`), stashes it in an ephemeral per-process `DocumentStore`, and returns `{id, filename, char_count}`. The frontend passes the chosen ids in the `/start` body (`{body: {document_ids: [...]}}`); `session_offer` resolves them via the store and hands the `Document`s to `CompanionAgent`. The store's `add`/`get` surface is the swap point for a DB-backed document repo when the memory layer lands (§2.6).
 - **The MVP demo runs on localhost** (browser and backend on the same machine / LAN), so NAT traversal is a non-issue. STUN-only config stays for LAN testing; TURN and deployment networking are deferred until the app moves off localhost (§11).
 
 ### 2.3 The pipeline
@@ -155,7 +156,8 @@ task = PipelineTask(
 
 ```
 backend/
-  app/main.py            # FastAPI app, routes: /api/offer, /api/me/*, /healthz
+  app/main.py            # FastAPI app, routes: /documents, /start, /api/offer, /healthz
+  app/documents.py       # document text extraction + ephemeral DocumentStore (FR-21)
   agent/companion.py     # CompanionAgent: builds + runs one session's pipeline
   agent/providers.py     # THE swap point: make_stt(), make_llm(), make_tts()
   agent/prompts.py       # system prompt builder (identity, spoken style)
@@ -173,6 +175,7 @@ The system prompt is assembled per session by `prompts.py` from blocks:
 
 1. **Identity** — a thinking partner that sharpens the user's ideas. Hard ban (C-3): the words therapist/therapy/counselor/mental-health never appear in any prompt block.
 2. **Spoken-output style** — responses are read aloud by TTS: short sentences, no markdown, no lists, no emoji. One question at a time (FR-9); never stack questions or volunteer lists of suggestions. The sanitizer (§2.3) is the enforcement backstop for the no-markdown rule.
+3. **Attached documents (FR-21)** — when the user attached documents before the session, their extracted text is appended as a second `system` message after the identity/style blocks (`build_document_context_block`), instructing the agent to acknowledge them in its greeting and reference them by name. With no documents, the context is just the base prompt — the FR-20 guard test (`test_pipeline_setup`) pins this so injection never happens by accident.
 
 FR-8 (proactive flagging) and FR-10 (modes) are demo stretch goals (REQUIREMENTS §6); each returns as one additional prompt block when picked back up.
 
@@ -183,6 +186,7 @@ FR-8 (proactive flagging) and FR-10 (modes) are demo stretch goals (REQUIREMENTS
 
 - **In-session (FR-14):** the `LLMContext` holds the full text history of the session. Text is cheap; no truncation within a session.
 - **Cross-session memory is deferred** (REQUIREMENTS §6): the planned direction is a MemGPT-style framework, possibly RAG with semantic vector search, processed in parallel while the user is still speaking. Nothing in this build depends on it; tables are added when it lands.
+- **Attached documents (FR-21):** ephemeral for the MVP — held in the in-process `DocumentStore` (`app/documents.py`) and injected into the session's `LLMContext` at startup, never persisted. The `add`/`get` surface is where a DB-backed repo (a `documents` table FK'd to the session, mirroring `sessions_repo.py`) slots in when cross-session memory lands, so documents persist alongside the conversation. The schema is untouched until then.
 - **FR-20 compliance:** raw transcripts are never injected into context.
 
 ### 2.7 Transcript ops log (FR-20)
