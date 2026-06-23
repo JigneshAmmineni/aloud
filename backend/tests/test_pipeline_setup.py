@@ -53,15 +53,23 @@ def test_llm_thinking_stays_disabled(make_settings):
 
 
 def test_sanitizer_toggle_reaches_tts(make_settings):
-    """SDD §2.3: TTS_SANITIZE_ENABLED routes the markdown filter into TTS."""
+    """SDD §2.3: TTS_SANITIZE_ENABLED routes the markdown filter into TTS; the
+    identifier filter rides along always (snake_case → spoken words)."""
+    from agent.sanitizer import IdentifierTextFilter
+    from pipecat.utils.text.markdown_text_filter import MarkdownTextFilter
+
     _stt, _llm, tts_enabled, *_ = build_pipeline_parts(
         make_settings(tts_sanitize_enabled=True)
     )
     _stt2, _llm2, tts_disabled, *_ = build_pipeline_parts(
         make_settings(tts_sanitize_enabled=False)
     )
-    assert len(tts_enabled._text_filters) == 1
-    assert len(tts_disabled._text_filters) == 0
+    enabled = tts_enabled._text_filters
+    disabled = tts_disabled._text_filters
+    assert any(isinstance(f, MarkdownTextFilter) for f in enabled)
+    assert any(isinstance(f, IdentifierTextFilter) for f in enabled)
+    assert not any(isinstance(f, MarkdownTextFilter) for f in disabled)
+    assert any(isinstance(f, IdentifierTextFilter) for f in disabled)
 
 
 def test_default_providers_are_the_documented_stack(make_settings):

@@ -101,7 +101,7 @@ await client.connect({ webrtcUrl: "/api/offer" });
 ```python
 stt = DeepgramFluxSTTService(
     api_key=settings.DEEPGRAM_API_KEY,
-    settings=DeepgramFluxSTTService.Settings(eot_threshold=0.8),
+    settings=DeepgramFluxSTTService.Settings(eot_threshold=settings.FLUX_EOT_THRESHOLD),
 )
 llm = GoogleLLMService(
     api_key=settings.GOOGLE_API_KEY,
@@ -113,7 +113,11 @@ llm = GoogleLLMService(
 )
 tts = CartesiaTTSService(
     api_key=settings.CARTESIA_API_KEY,
-    settings=CartesiaTTSService.Settings(model="sonic-3", voice=settings.CARTESIA_VOICE_ID),
+    settings=CartesiaTTSService.Settings(
+        model="sonic-3",
+        voice=settings.CARTESIA_VOICE_ID,
+        generation_config=GenerationConfig(speed=settings.CARTESIA_SPEED),  # 1.0 = normal
+    ),
     text_filters=make_text_filters(settings.TTS_SANITIZE_ENABLED),  # sanitizer, see below
 )
 
@@ -146,11 +150,11 @@ task = PipelineTask(
 )
 ```
 
-**Turn detection (FR-3):** Flux detects end-of-turn natively (`eot_threshold=0.8` to start; tune by ear). Flux manages its own turn events, so the pipeline uses `ExternalUserTurnStrategies` per Pipecat's Flux docs — no separate VAD needed. `eager_eot_threshold` (speculative early end-of-turn → speculative LLM call) is a latency optimization left **off** initially; enable behind a config flag if measured EOT latency is the budget's long pole.
+**Turn detection (FR-3):** Flux detects end-of-turn natively. `eot_threshold` (env `FLUX_EOT_THRESHOLD`, default 0.8; library default 0.7) is the end-of-turn *confidence* required — higher = softer turn-taking, waiting through brief pauses before replying. It's confidence-based, not a silence timer, and it has a cliff: set it too high (0.9 was perpetual-listening in testing) and Flux never gets confident enough to end the turn. Nudge up in small steps; tune by ear. Flux manages its own turn events, so the pipeline uses `ExternalUserTurnStrategies` per Pipecat's Flux docs — no separate VAD needed. `eager_eot_threshold` (speculative early end-of-turn → speculative LLM call) is a latency optimization left **off** initially; enable behind a config flag if measured EOT latency is the budget's long pole.
 
 **Barge-in (FR-13):** Flux emits start-of-turn when the user speaks over the bot; Pipecat's interruption handling cancels the in-flight LLM and TTS generation and flushes queued output audio. This is framework-provided; our only job is to keep AEC working (§2.1) so it doesn't false-trigger.
 
-**TTS text sanitization:** prompt instructions alone won't stop the LLM leaking markdown (asterisks, list markers, headings) into its output, and the TTS reads those characters aloud. The sanitizer (`agent/sanitizer.py`) is implemented as a Pipecat TTS *text filter* (`MarkdownTextFilter`) rather than a standalone frame processor: streaming LLM frames can split a markdown token (e.g. `**`) across two frames, while text filters run on sentence-aggregated text where stripping is reliable. Toggleable via `TTS_SANITIZE_ENABLED` so the with/without difference is audible in A/B listening during development.
+**TTS text sanitization:** prompt instructions alone won't stop the LLM leaking markdown (asterisks, list markers, headings) into its output, and the TTS reads those characters aloud. The sanitizer (`agent/sanitizer.py`) is implemented as Pipecat TTS *text filters* rather than standalone frame processors: streaming LLM frames can split a token (e.g. `**`) across two frames, while text filters run on sentence-aggregated text where rewriting is reliable. Two filters: `MarkdownTextFilter` (strips markdown; toggleable via `TTS_SANITIZE_ENABLED` for A/B listening) and `IdentifierTextFilter` (always on — turns snake_case identifiers like `create_artifact` into spoken words so the voice doesn't say "create underscore artifact").
 
 ### 2.4 CompanionAgent & provider isolation (C-2)
 
@@ -292,6 +296,7 @@ CARTESIA_VOICE_ID=           LLM_MODEL=<gemini 2.5 flash model id>
 STT_PROVIDER=deepgram_flux   LLM_PROVIDER=google         TTS_PROVIDER=cartesia
 DATABASE_URL=postgresql://...
 TTS_SANITIZE_ENABLED=true    EAGER_EOT_ENABLED=false
+CARTESIA_SPEED=0.85          FLUX_EOT_THRESHOLD=0.8
 OTEL_ENABLED=false           OTEL_EXPORTER_OTLP_ENDPOINT=
 ```
 

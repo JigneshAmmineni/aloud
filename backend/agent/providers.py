@@ -5,7 +5,7 @@ branches on the configured provider name and returns a Pipecat service.
 Swapping a provider = add a branch here + set an env var.
 """
 
-from pipecat.services.cartesia.tts import CartesiaTTSService
+from pipecat.services.cartesia.tts import CartesiaTTSService, GenerationConfig
 from pipecat.services.deepgram.flux.stt import DeepgramFluxSTTService
 from pipecat.services.google.llm import GoogleLLMService
 
@@ -16,7 +16,12 @@ def make_stt(settings: Settings):
     if settings.stt_provider == "deepgram_flux":
         return DeepgramFluxSTTService(
             api_key=settings.deepgram_api_key,
-            settings=DeepgramFluxSTTService.Settings(eot_threshold=0.8),
+            # Higher eot_threshold = Flux waits for more certainty the user is
+            # done, sitting through brief pauses before ending the turn (softer
+            # turn-taking). Confidence-based, not a fixed timer. Tune by ear.
+            settings=DeepgramFluxSTTService.Settings(
+                eot_threshold=settings.flux_eot_threshold
+            ),
         )
     raise ValueError(f"Unknown STT_PROVIDER: {settings.stt_provider}")
 
@@ -44,6 +49,8 @@ def make_tts(settings: Settings, text_filters: list):
             settings=CartesiaTTSService.Settings(
                 model="sonic-3",
                 voice=settings.cartesia_voice_id,
+                # Sonic-3 speech rate; 1.0 = normal, lower = slower.
+                generation_config=GenerationConfig(speed=settings.cartesia_speed),
             ),
             text_filters=text_filters,
         )
