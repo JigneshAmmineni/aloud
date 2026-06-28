@@ -8,6 +8,23 @@ It is a conversational agent that makes your thinking better in real time.
 
 ---
 
+## Try it live
+
+Aloud is deployed on a Google Compute Engine VM with a real domain and HTTPS (Caddy + Let's Encrypt):
+
+### → **https://work-aloud.com**
+
+It's a personal demo running on my own API credits, so it sits behind a simple login. Use:
+
+| | |
+|---|---|
+| **Username** | `test-user` |
+| **Password** | `12345678` |
+
+Tap **Talk**, allow the mic, and start thinking out loud. Works on a laptop or a phone.
+
+---
+
 ## How it works
 
 A cascaded voice pipeline — conversation state is **text on the server**, which is what makes provider swapping, the ops log, and the future memory layer possible:
@@ -75,4 +92,4 @@ frontend/     Next.js app — session button FSM, live waveform, artifacts panel
 
 ## Status
 
-Working MVP demo (localhost). Deliberately deferred: cross-session memory (MemGPT-style design planned), session resume, proactive flagging, deployment off localhost. See [REQUIREMENTS.md §6](REQUIREMENTS.md) for the full out-of-scope list.
+Working MVP, deployed and live at [work-aloud.com](https://work-aloud.com) — a single GCE VM with HTTPS via Caddy (see [deployment.md](deployment.md) for the full setup). Deliberately deferred: cross-session memory (MemGPT-style design planned), session resume, proactive flagging. See [REQUIREMENTS.md §6](REQUIREMENTS.md) for the full out-of-scope list.
