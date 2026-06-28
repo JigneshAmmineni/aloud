@@ -13,14 +13,29 @@ from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
 
 
 def test_context_starts_with_exactly_one_system_message(make_settings):
-    """FR-20 guard: nothing but the system prompt is injected at session
-    start — no transcripts, no memory. The future memory layer must change
-    this test consciously, not by accident."""
+    """FR-20 guard: with no attached documents, nothing but the system prompt
+    is injected at session start — no transcripts, no memory. The future memory
+    layer must change this test consciously, not by accident."""
     *_, context, _ua, _aa = build_pipeline_parts(make_settings())
     messages = context.get_messages()
     assert len(messages) == 1
     assert messages[0]["role"] == "system"
     assert messages[0]["content"] == build_system_prompt()
+
+
+def test_attached_documents_are_injected_into_context(make_settings):
+    """Document upload feature: attached docs ride in alongside the base prompt
+    (and only then). The base identity prompt stays intact."""
+    from app.documents import Document
+
+    docs = [Document("d1", "arch.md", "text/markdown", "cascade pipeline", 16)]
+    *_, context, _ua, _aa = build_pipeline_parts(make_settings(), docs)
+    combined = " ".join(
+        m["content"] for m in context.get_messages() if isinstance(m.get("content"), str)
+    )
+    assert build_system_prompt() in combined
+    assert "arch.md" in combined
+    assert "cascade pipeline" in combined
 
 
 def test_user_aggregator_defers_to_external_turn_detection(make_settings):
@@ -38,15 +53,23 @@ def test_llm_thinking_stays_disabled(make_settings):
 
 
 def test_sanitizer_toggle_reaches_tts(make_settings):
-    """SDD §2.3: TTS_SANITIZE_ENABLED routes the markdown filter into TTS."""
+    """SDD §2.3: TTS_SANITIZE_ENABLED routes the markdown filter into TTS; the
+    identifier filter rides along always (snake_case → spoken words)."""
+    from agent.sanitizer import IdentifierTextFilter
+    from pipecat.utils.text.markdown_text_filter import MarkdownTextFilter
+
     _stt, _llm, tts_enabled, *_ = build_pipeline_parts(
         make_settings(tts_sanitize_enabled=True)
     )
     _stt2, _llm2, tts_disabled, *_ = build_pipeline_parts(
         make_settings(tts_sanitize_enabled=False)
     )
-    assert len(tts_enabled._text_filters) == 1
-    assert len(tts_disabled._text_filters) == 0
+    enabled = tts_enabled._text_filters
+    disabled = tts_disabled._text_filters
+    assert any(isinstance(f, MarkdownTextFilter) for f in enabled)
+    assert any(isinstance(f, IdentifierTextFilter) for f in enabled)
+    assert not any(isinstance(f, MarkdownTextFilter) for f in disabled)
+    assert any(isinstance(f, IdentifierTextFilter) for f in disabled)
 
 
 def test_default_providers_are_the_documented_stack(make_settings):

@@ -4,6 +4,7 @@ fastapi
 uvicorn[standard]
 sqlalchemy[asyncio]
 asyncpg
+pypdf
 python-dotenv
 pytest
 aiosqlite

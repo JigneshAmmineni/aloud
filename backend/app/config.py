@@ -16,6 +16,16 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 @dataclass(frozen=True)
 class Settings:
     deepgram_api_key: str
@@ -27,6 +37,8 @@ class Settings:
     llm_provider: str
     tts_provider: str
     tts_sanitize_enabled: bool
+    cartesia_speed: float  # Cartesia Sonic-3 speech rate; 1.0 = normal
+    flux_eot_threshold: float  # Deepgram Flux end-of-turn confidence (0-1)
     database_url: str
 
 
@@ -48,6 +60,8 @@ def load_settings() -> Settings:
         llm_provider=os.getenv("LLM_PROVIDER") or "google",
         tts_provider=os.getenv("TTS_PROVIDER") or "cartesia",
         tts_sanitize_enabled=_env_bool("TTS_SANITIZE_ENABLED", True),
+        cartesia_speed=_env_float("CARTESIA_SPEED", 0.85),
+        flux_eot_threshold=_env_float("FLUX_EOT_THRESHOLD", 0.8),
         database_url=os.getenv("DATABASE_URL")
         or "postgresql+asyncpg://aloud:aloud@localhost:5432/aloud",
     )

@@ -18,6 +18,8 @@ def _settings(**overrides) -> Settings:
         llm_provider="google",
         tts_provider="cartesia",
         tts_sanitize_enabled=True,
+        cartesia_speed=0.85,
+        flux_eot_threshold=0.8,
         database_url="sqlite+aiosqlite://",
     )
     base.update(overrides)
@@ -29,6 +31,16 @@ def test_factories_construct():
     assert make_stt(s) is not None
     assert make_llm(s) is not None
     assert make_tts(s, text_filters=make_text_filters(True)) is not None
+
+
+def test_flux_eot_threshold_comes_from_settings():
+    stt = make_stt(_settings(flux_eot_threshold=0.95))
+    assert stt._settings.eot_threshold == 0.95
+
+
+def test_cartesia_speed_comes_from_settings():
+    tts = make_tts(_settings(cartesia_speed=0.7), text_filters=[])
+    assert tts._settings.generation_config.speed == 0.7
 
 
 def test_unknown_providers_raise():

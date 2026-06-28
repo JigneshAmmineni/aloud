@@ -1,6 +1,7 @@
 "use client";
 
 import { ArtifactsPanel } from "@/components/ArtifactsPanel";
+import { DocumentUpload } from "@/components/DocumentUpload";
 import { SessionButton } from "@/components/SessionButton";
 import { WaveformBar } from "@/components/WaveformBar";
 import { useAloudSession } from "@/lib/useAloudSession";
@@ -15,8 +16,19 @@ const STATUS: Record<string, string> = {
 };
 
 export default function Home() {
-  const { state, mode, error, localTrack, botTrack, artifacts, talk, end } =
-    useAloudSession();
+  const {
+    state,
+    mode,
+    error,
+    localTrack,
+    botTrack,
+    artifacts,
+    documents,
+    uploadDocument,
+    removeDocument,
+    talk,
+    end,
+  } = useAloudSession();
 
   const status = state === "active" ? STATUS[mode] : STATUS[state];
 
@@ -39,6 +51,13 @@ export default function Home() {
         />
         <p className={`status ${state === "active" ? mode : state}`}>{status}</p>
         {error && <p className="error">{error}</p>}
+        {state === "idle" && (
+          <DocumentUpload
+            documents={documents}
+            onUpload={uploadDocument}
+            onRemove={removeDocument}
+          />
+        )}
       </div>
 
       <footer className="foot" aria-hidden>

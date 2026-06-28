@@ -18,7 +18,7 @@ from obs.logging import setup_logging
 
 setup_logging()  # before anything logs — every line on stdout is JSON
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, UploadFile
 from loguru import logger
 from pipecat.transports.smallwebrtc.connection import IceServer, SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.request_handler import (
@@ -30,7 +30,8 @@ from pipecat_ai_small_webrtc_prebuilt.frontend import SmallWebRTCPrebuiltUI
 
 from agent.companion import CompanionAgent
 from app.config import load_settings
-from db.engine import init_db
+from app.documents import DocumentError, document_store, extract_text
+from db.engine import DEFAULT_USER_ID, init_db
 
 settings = load_settings()  # fail fast at boot, naming any missing env vars
 
@@ -57,6 +58,31 @@ async def healthz():
     return {"status": "ok"}
 
 
+@app.post("/documents")
+async def upload_document(file: UploadFile = File(...)):
+    """Accept a .txt/.md/.pdf upload, extract its text, and stash it in the
+    ephemeral store. Returns metadata (id + char count); the chosen ids are
+    later passed in the /start body to attach the docs to a session."""
+    data = await file.read()
+    filename = file.filename or "document"
+    try:
+        text = extract_text(filename, file.content_type, data)
+    except DocumentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    doc = document_store.add(DEFAULT_USER_ID, filename, file.content_type or "", text)
+    logger.bind(
+        component="app.documents",
+        event="document.uploaded",
+        char_count=doc.char_count,
+    ).info(f"Document uploaded: {filename!r}")
+    return {
+        "id": doc.id,
+        "filename": doc.filename,
+        "mime_type": doc.mime_type,
+        "char_count": doc.char_count,
+    }
+
+
 @app.post("/start")
 async def start(request: Request):
     """Session bootstrap used by Pipecat clients (incl. the prebuilt UI)."""
@@ -74,14 +100,17 @@ async def start(request: Request):
     return result
 
 
-async def _handle_offer(request: SmallWebRTCRequest, background_tasks: BackgroundTasks):
+async def _handle_offer(
+    request: SmallWebRTCRequest, background_tasks: BackgroundTasks, documents=None
+):
     async def webrtc_connection_callback(connection: SmallWebRTCConnection):
         logger.bind(
             session_id=connection.pc_id,
             component="app.signaling",
             event="signaling.offer",
+            document_count=len(documents) if documents else 0,
         ).info("New WebRTC connection; launching agent")
-        background_tasks.add_task(CompanionAgent(settings).run, connection)
+        background_tasks.add_task(CompanionAgent(settings, documents).run, connection)
 
     return await webrtc_handler.handle_web_request(
         request=request,
@@ -106,7 +135,9 @@ async def session_offer(
 ):
     if session_id not in active_sessions:
         raise HTTPException(status_code=404, detail="Invalid or not-yet-ready session_id")
-    return await _handle_offer(request, background_tasks)
+    document_ids = active_sessions[session_id].get("document_ids") or []
+    documents = document_store.get(DEFAULT_USER_ID, document_ids)
+    return await _handle_offer(request, background_tasks, documents)
 
 
 @app.patch("/sessions/{session_id}/api/offer")

@@ -27,3 +27,28 @@ invite them to start thinking out loud."""
 
 def build_system_prompt() -> str:
     return _SYSTEM_PROMPT
+
+
+def build_document_context_block(documents) -> str:
+    """Format attached documents into a single system message (SDD §2.5).
+
+    Kept separate from the base prompt so the identity/style prompt stays pure.
+    `documents` is a list of app.documents.Document. The combined block is
+    trimmed to MAX_TOTAL_CHARS so a multi-document session can't blow the
+    latency budget.
+    """
+    from app.documents import MAX_TOTAL_CHARS, _TRUNCATION_MARKER
+
+    parts = [
+        "The user has attached the following document(s) to think through with "
+        "you. Read them, and when you greet the user, acknowledge in one short "
+        "sentence that you've read them. Refer to a document by its name when it "
+        "comes up. Do not read a document aloud verbatim or summarize it unasked; "
+        "discuss it as the conversation calls for it."
+    ]
+    for doc in documents:
+        parts.append(f"--- DOCUMENT: {doc.filename} ---\n{doc.content}\n--- END ---")
+    block = "\n\n".join(parts)
+    if len(block) > MAX_TOTAL_CHARS:
+        block = block[:MAX_TOTAL_CHARS] + _TRUNCATION_MARKER
+    return block

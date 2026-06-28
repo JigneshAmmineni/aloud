@@ -23,6 +23,12 @@ export type Artifact = {
   created_at: string;
 };
 
+export type AttachedDocument = {
+  id: string;
+  filename: string;
+  char_count: number;
+};
+
 export function useAloudSession() {
   const [state, setState] = useState<SessionState>("idle");
   const [mode, setMode] = useState<VoiceMode>("listening");
@@ -30,6 +36,7 @@ export function useAloudSession() {
   const [localTrack, setLocalTrack] = useState<MediaStreamTrack | null>(null);
   const [botTrack, setBotTrack] = useState<MediaStreamTrack | null>(null);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [documents, setDocuments] = useState<AttachedDocument[]>([]);
 
   const clientRef = useRef<PipecatClient | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -40,6 +47,27 @@ export function useAloudSession() {
     setBotTrack(null);
     setMode("listening");
     setState("idle");
+  }, []);
+
+  // Upload a file to the backend; on success it's attached to the next
+  // session. Throws with the backend's message so the caller can show it.
+  const uploadDocument = useCallback(async (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    const res = await fetch("/documents", { method: "POST", body: form });
+    if (!res.ok) {
+      const detail = await res
+        .json()
+        .then((d) => d?.detail)
+        .catch(() => null);
+      throw new Error(detail || "couldn't read that file");
+    }
+    const doc = (await res.json()) as AttachedDocument;
+    setDocuments((prev) => [...prev, doc]);
+  }, []);
+
+  const removeDocument = useCallback((id: string) => {
+    setDocuments((prev) => prev.filter((d) => d.id !== id));
   }, []);
 
   const talk = useCallback(async () => {
@@ -97,13 +125,24 @@ export function useAloudSession() {
         // dev hook for driving the client from the console / E2E tests
         (window as unknown as Record<string, unknown>).__aloudClient = client;
       }
-      await client.connect({ webrtcUrl: "/api/offer" });
+      // Bootstrap a session so any attached documents reach the agent, then
+      // connect on the session-scoped offer path the backend serves them from.
+      const startRes = await fetch("/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          body: { document_ids: documents.map((d) => d.id) },
+        }),
+      });
+      if (!startRes.ok) throw new Error("session start failed");
+      const { sessionId } = (await startRes.json()) as { sessionId: string };
+      await client.connect({ webrtcUrl: `/sessions/${sessionId}/api/offer` });
     } catch (e) {
       console.error("connect failed", e);
       cleanup();
       setError("couldn't connect — check that the backend is running");
     }
-  }, [cleanup]);
+  }, [cleanup, documents]);
 
   const end = useCallback(async () => {
     const client = clientRef.current;
@@ -117,5 +156,17 @@ export function useAloudSession() {
     cleanup();
   }, [cleanup]);
 
-  return { state, mode, error, localTrack, botTrack, artifacts, talk, end };
+  return {
+    state,
+    mode,
+    error,
+    localTrack,
+    botTrack,
+    artifacts,
+    documents,
+    uploadDocument,
+    removeDocument,
+    talk,
+    end,
+  };
 }
