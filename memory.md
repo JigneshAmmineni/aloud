@@ -366,7 +366,8 @@ documents) arrive with it.
 users ─┬─ sessions ─┬─ transcript_events   (ops log, exists today)
        │            └─ session_summaries   (recall storage)
        ├─ memories                          (core + archival rows; embedding column)
-       └─ documents ── document_chunks      (chunked + embedded on upload)
+       └─ documents ── document_chunks      (source: uploaded | agent; chunked
+                                             + embedded on save)
 ```
 
 - Conversation memory and documents are **different tables, one database** —
@@ -380,6 +381,27 @@ users ─┬─ sessions ─┬─ transcript_events   (ops log, exists today)
 (size/overlap/structure-aware); whether a session's *attached* documents stay
 fully pinned in context (today's behavior) or degrade to retrieval-only chunks
 under memory pressure.
+
+### Artifacts become documents (decided)
+
+Artifacts stop being ephemeral boxes on screen and become **documents in their own
+right** — the same first-class thing as an uploaded file:
+
+- Every `create_artifact` output is a **markdown document**: downloadable as a
+  `.md` file, persisted in the `documents` table with a `source` column
+  (`uploaded` | `agent`) rather than a separate artifacts table. One storage
+  model, one retrieval path — agent-created documents get chunked + embedded like
+  uploads, so a summary written last week is searchable next week.
+- **UI:** two scrollable lists at the bottom of the screen — uploaded documents
+  and created documents — each item with a download and a **preview** button.
+- **Preview pane:** one document at a time, whichever is selected, opening on the
+  side of the screen. Split-screen (multiple previews) is a possible later
+  addition, not MVP.
+
+This supersedes today's `artifacts` table + `artifact.created` box rendering
+(`backend/agent/tools.py`, ArtifactsPanel). The spoken contract stays the same:
+non-committal "writing that up now…" (§12), then the document appears in the
+created list when the subagent finishes.
 
 ---
 
@@ -456,6 +478,8 @@ The running record. Items move upward as they harden: OPEN → LEANING → DECID
 | Artifact confirmation is non-committal ("writing that up now…"); speech never gated on a subagent | agent can't lie about what's on screen (§12) |
 | Write races handled deterministically: per-resource locks + single-writer discipline through the background loop | no LLM-mediated conflict resolution for a systems problem (§12) |
 | Compaction is LLM-powered but **deterministically triggered** (token watermark, not model choice) | the model shouldn't gamble the context window (§10) |
+| Artifacts become markdown **documents** — downloadable, persisted in `documents` with `source: uploaded \| agent`, retrievable like uploads | one storage/retrieval model; artifacts stop being ephemeral boxes (§11) |
+| Document UI: two scrollable lists (uploaded / created) with per-item preview; single preview pane, selected doc only | user-friendly minimum; split-screen preview deferred (§11) |
 
 ### Leaning (recommended, awaiting final call)
 
