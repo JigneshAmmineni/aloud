@@ -20,7 +20,10 @@ documents are theirs alone.
 ## Feature order
 
 The order is intentional: auth establishes `user_id`, which everything after it
-hangs on (per-user metrics, per-user documents, per-user memory isolation).
+hangs on (per-user metrics, per-user documents, per-user memory isolation) —
+and the context engine (4) lands before memory storage/retrieval (5), because
+retrieval injection and memory-management writes both depend on a context
+window we control section-by-section.
 
 ### 1. Auth — individual accounts
 
@@ -62,9 +65,29 @@ From single upload-at-start + copy-paste artifacts to a real document workspace.
 - Later (own spec, after the basics land): multiple adjustable preview windows;
   live co-editing where user edits and agent edits flow both ways.
 
-### 4. Memory layer — cross-session memory
+### 4. Context engine — structured, owned context window
+
+Replace the pipeline's monolithic `LLMContext` with a context window we fully
+control — the foundation the memory layer builds on.
+
+- Distinct, individually budgeted sections: system prompt, core memory
+  (durable facts about the user), retrieved memory (populated by feature 5),
+  and the current conversation.
+- Auto-compression of the conversation section under memory pressure
+  (recursive summarization: oldest turns compressed into summaries, raw turns
+  evicted) — per memory.md's MemGPT-style sketch.
+- Full programmatic control of context assembly each turn, with per-section
+  token accounting and instrumentation.
+- Spec-time decision: a custom context-management stage inside the Pipecat
+  pipeline vs. a custom agent loop replacing the pipeline's LLM stage
+  (STT/TTS/transport stay on Pipecat either way; SDD-v2.md is background for
+  the hand-rolled direction).
+
+### 5. Memory layer — cross-session memory
 
 Tiered, MemGPT-style memory so the agent remembers past sessions and documents.
+Builds on the context engine: retrieval fills its retrieved-memory section; the
+memory-management loop consumes its summaries and evictions.
 
 - Storage/indexing structure and the retrieval mechanism are designed
   **together** — the structure is judged by the latency and quality of
@@ -74,6 +97,34 @@ Tiered, MemGPT-style memory so the agent remembers past sessions and documents.
   covered by RLS; one user's agent can never retrieve another user's data.
 - Retrieval quality is measured by evals (golden query→memory datasets), not
   just unit tests.
+
+### 6. LLM tracing
+
+Every LLM call recorded as a trace: full input messages, output, model, token
+counts, latency, purpose (voice turn / memory loop / compression), linked to
+`session_id`/`turn_id`.
+
+- The substrate for evals (golden datasets, LLM-as-judge, provider
+  comparisons) and for debugging the context engine and memory loop —
+  complements feature 2's aggregate usage metrics.
+- Trace content columns (inputs/outputs) separate from metadata, per the
+  encryption rule.
+- A minimal version may be pulled forward if debugging features 4–5 demands
+  it.
+
+## Process infrastructure
+
+Per-PR CI (ruff + pytest, frontend build) and the tailored Claude review are
+live. Still to add, roughly when its prerequisite feature lands:
+
+- **Promotion gate (main → prod):** before `prod` fast-forwards to `main`,
+  run the heavy suite per-PR CI deliberately skips — golden-audio E2E through
+  the real providers (recorded utterances with known content; assert loosely:
+  transcript keywords, a response produced, tool fired, latency within
+  budget) — plus a manual talk-through. Later, a deploy workflow keyed off
+  `prod` completes the pipeline.
+- **Evals** (retrieval recall, response quality) join the scheduled/nightly
+  lane once features 5–6 provide the data they run on.
 
 ## Working notes
 
