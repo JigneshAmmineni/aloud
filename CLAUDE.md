@@ -66,6 +66,7 @@ Server-side encryption (key held by us) is added post-MVP. To make this painless
 
 ## Docs
 
+- [ROADMAP.md](ROADMAP.md) — feature order, vision, and process; PRs implement FRs specced from it
 - [REQUIREMENTS.md](REQUIREMENTS.md) — what the product must do (FR/NFR/constraints)
 - [SDD.md](SDD.md) — software design, Pipecat-based (the version to build)
 - [SDD-v2.md](SDD-v2.md) — alternative fully hand-rolled design, for learning value
