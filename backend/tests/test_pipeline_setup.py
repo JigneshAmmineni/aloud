@@ -4,12 +4,13 @@ These pin the invariants that future features (memory layer, artifacts,
 connectors) are most likely to break when they touch the per-session setup.
 """
 
-from agent.companion import build_pipeline_parts
-from agent.prompts import build_system_prompt
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.flux.stt import DeepgramFluxSTTService
 from pipecat.services.google.llm import GoogleLLMService
 from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
+
+from agent.companion import build_pipeline_parts
+from agent.prompts import build_system_prompt
 
 
 def test_context_starts_with_exactly_one_system_message(make_settings):
@@ -55,8 +56,9 @@ def test_llm_thinking_stays_disabled(make_settings):
 def test_sanitizer_toggle_reaches_tts(make_settings):
     """SDD §2.3: TTS_SANITIZE_ENABLED routes the markdown filter into TTS; the
     identifier filter rides along always (snake_case → spoken words)."""
-    from agent.sanitizer import IdentifierTextFilter
     from pipecat.utils.text.markdown_text_filter import MarkdownTextFilter
+
+    from agent.sanitizer import IdentifierTextFilter
 
     _stt, _llm, tts_enabled, *_ = build_pipeline_parts(
         make_settings(tts_sanitize_enabled=True)

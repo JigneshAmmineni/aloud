@@ -3,27 +3,16 @@ name: Claude Code Review
 on:
   pull_request:
     types: [opened, synchronize, ready_for_review, reopened]
-    # Optional: Only run on specific file changes
-    # paths:
-    #   - "src/**/*.ts"
-    #   - "src/**/*.tsx"
-    #   - "src/**/*.js"
-    #   - "src/**/*.jsx"
 
 jobs:
   claude-review:
-    # Optional: Filter by PR author
-    # if: |
-    #   github.event.pull_request.user.login == 'external-contributor' ||
-    #   github.event.pull_request.user.login == 'new-developer' ||
-    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
-
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: read
       issues: read
       id-token: write
+      actions: read # lets the reviewer inspect CI results on the PR
 
     steps:
       - name: Checkout repository
@@ -36,9 +25,97 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
-          plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
+          use_sticky_comment: true # re-reviews update one comment instead of stacking
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh run view:*)"
+            --max-turns 30
+          prompt: |
+            Review PR #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+            Use `gh pr view` / `gh pr diff` to read the PR description and diff.
 
+            You are reviewing a PR for Aloud, a voice-first thinking partner
+            (cascaded Pipecat pipeline: turn detection -> STT -> LLM -> TTS).
+
+            ## Before reviewing
+            1. Read CLAUDE.md (hard constraints), ROADMAP.md (feature order and
+               vision), and the FR numbers referenced in the PR description in
+               REQUIREMENTS.md. If the PR description references a design doc,
+               read the relevant sections.
+            2. If the PR description states no intent or references no FRs, say
+               so — that alone is a finding.
+
+            ## Review priorities, in order
+            These priorities guide emphasis and ordering — they are NOT an
+            exhaustive checklist. Report any genuine issue you find, of any
+            severity, in any category, whether or not it is mentioned anywhere
+            in this prompt.
+
+            1. Intent & scope — Does the diff implement the referenced FRs, all
+               of them, and nothing else? Flag scope creep and unrelated
+               drive-by changes.
+            2. Correctness — Construct concrete failing scenarios: edge cases
+               (empty/duplicate/concurrent), error paths (provider call fails
+               mid-turn, DB write fails after partial state change), async
+               mistakes (blocking calls in async code, un-awaited coroutines),
+               WebRTC/session lifecycle (reconnects, abandoned sessions,
+               cleanup).
+            3. Security & user isolation — the highest-stakes area:
+               - Every DB query touching sensitive tables must be scoped by
+                 user_id.
+               - user_id must ALWAYS originate from the server-side auth
+                 dependency (get_current_user_id) — never from a request body,
+                 query param, or client-supplied header. Flag any repo function
+                 signature giving user_id a default value.
+               - Every new route must declare the auth dependency. List any
+                 that don't.
+               - No secrets, tokens, or .env contents in the diff.
+            4. Hard constraints (violations are always blocking):
+               - The words "therapy"/"therapist"/"counselor" must not appear
+                 in code, copy, prompts, or docs.
+               - Provider SDK imports/construction only in agent/providers.py
+                 factories. Flag any direct SDK usage elsewhere.
+               - New DB columns holding transcript/summary/memory/document
+                 content must be separate from metadata columns
+                 (encryption-readiness).
+               - New pipeline stages need structured logging with
+                 session_id/turn_id and latency instrumentation per CLAUDE.md.
+            5. Latency (voice hot path) — advisory, NOT strict: flag any
+               addition of synchronous work (network, DB, heavy compute) to
+               the end-of-speech -> first-audio path, with a rough cost
+               estimate, so the author can decide. Hot-path additions are not
+               blocking by default; treat one as blocking only if it plainly
+               endangers the 3s end-to-end budget (NFR-1).
+            6. Design — Does the change respect existing seams (providers
+               factory, auth dependency, repo layer)? Judge by "how expensive
+               is the next change." Flag BOTH under-design (logic smeared
+               across layers, duplication of an existing helper) AND
+               over-design (abstractions with one caller, speculative
+               config/flexibility, error handling for impossible cases). This
+               project prefers the simplest code that solves the stated
+               problem.
+            7. Tests — New behavior needs tests in this PR, mapped to the FR
+               acceptance criteria. Tests must assert behavior (they'd fail if
+               the feature broke), including at least the primary error path.
+               For auth and user-scoping changes, require a negative test
+               (user A cannot access user B's data). A diff that weakens or
+               deletes an existing test to get CI green is always a blocking
+               finding.
+            8. Readability — Names, function size, and comments that explain
+               why. Only flag genuine comprehension obstacles, not preferences.
+
+            ## Output rules
+            - Post line-specific findings as inline comments on the diff; put
+              the overall summary in the review comment.
+            - Order findings by severity: blocking issues first, then
+              "nit:"-prefixed suggestions. Cap at ~10 findings — surface the
+              ones that matter most.
+            - For every finding: file:line, what's wrong, a concrete failing
+              scenario or consequence, and a suggested fix.
+            - Do not comment on formatting/style a linter would catch (ruff
+              runs in CI).
+            - Do not propose features or refactors beyond the PR's scope
+              unless a hard constraint requires it.
+            - Do not pad with praise or restate what the diff does. If the PR
+              is clean, say so in two sentences and stop.
+            - End with a one-line verdict: "Blocking issues: N" or "No
+              blocking issues."

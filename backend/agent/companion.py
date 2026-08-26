@@ -19,8 +19,8 @@ from agent.providers import make_llm, make_stt, make_tts
 from agent.sanitizer import make_text_filters
 from agent.tools import make_create_artifact_handler, tool_schemas
 from app.config import Settings
-from db.sessions_repo import create_session_row, end_session_row
 from db.engine import session_factory
+from db.sessions_repo import create_session_row, end_session_row
 from db.transcript_log import TranscriptWriter
 from obs.latency import make_latency_observer
 
