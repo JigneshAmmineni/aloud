@@ -5,6 +5,8 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.venv/
+.ruff_cache/
 
 # tooling scratch
 .playwright-mcp/

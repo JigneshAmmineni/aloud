@@ -5,7 +5,7 @@ import asyncio
 from sqlalchemy import Text, select
 
 from db.engine import DEFAULT_USER_ID, init_db, session_factory
-from db.models import Base, Session, TranscriptEvent, User
+from db.models import Base, Session, User
 from db.sessions_repo import create_session_row, end_session_row
 
 # Schema snapshot: adding tables/columns (memory layer, artifacts, …) must

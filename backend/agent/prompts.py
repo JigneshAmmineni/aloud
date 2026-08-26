@@ -42,7 +42,7 @@ def build_document_context_block(documents) -> str:
     trimmed to MAX_TOTAL_CHARS so a multi-document session can't blow the
     latency budget.
     """
-    from app.documents import MAX_TOTAL_CHARS, _TRUNCATION_MARKER
+    from app.documents import _TRUNCATION_MARKER, MAX_TOTAL_CHARS
 
     parts = [
         "The user has attached the following document(s) to think through with "
