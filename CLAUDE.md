@@ -51,7 +51,8 @@ Server-side encryption (key held by us) is added post-MVP. To make this painless
 
 ## Workflow rules
 
-- **Never commit or push without being explicitly asked.** Make changes, then wait for the user to say "commit" or "push" before running any git commit or git push command.
+- **Everything runs in Docker.** Never install packages or dependencies on the host machine — no venvs, no global pip/npm installs. Run backend commands (tests, lint, one-off scripts) inside the compose services, e.g. `docker compose run --rm backend python -m pytest -q`; the frontend service manages its own `node_modules` volume. Dependency changes go in `requirements.txt` / `package.json` so the Docker images pick them up.
+- **Commit at reasonable checkpoints; never push or open PRs unprompted.** Claude may commit on its own when a coherent unit of work is done, but must only *suggest* a push or PR and wait for explicit confirmation — the user may have additional changes or instructions first.
 
 ---
 

@@ -100,21 +100,22 @@ jobs:
                (user A cannot access user B's data). A diff that weakens or
                deletes an existing test to get CI green is always a blocking
                finding.
-            8. Readability — Names, function size, and comments that explain
-               why. Only flag genuine comprehension obstacles, not preferences.
+            8. Readability & craft — Names, function size, and comments that
+               explain why. Flag nits and best-practice preferences too,
+               prefixed "nit:" — the author wants to see and learn
+               senior-level coding practices, not only blocking problems.
 
             ## Output rules
             - Post line-specific findings as inline comments on the diff; put
               the overall summary in the review comment.
             - Order findings by severity: blocking issues first, then
-              "nit:"-prefixed suggestions. Cap at ~10 findings — surface the
-              ones that matter most.
+              "nit:"-prefixed suggestions. Aim for roughly 10 findings,
+              leading with what matters most — a soft cap: exceed it freely
+              when more findings are pressing or high-priority.
             - For every finding: file:line, what's wrong, a concrete failing
               scenario or consequence, and a suggested fix.
             - Do not comment on formatting/style a linter would catch (ruff
               runs in CI).
-            - Do not propose features or refactors beyond the PR's scope
-              unless a hard constraint requires it.
             - Do not pad with praise or restate what the diff does. If the PR
               is clean, say so in two sentences and stop.
             - End with a one-line verdict: "Blocking issues: N" or "No

@@ -16,7 +16,8 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          # match backend/Dockerfile (python:3.12-slim) — CI mirrors deploy
+          python-version: "3.12"
           cache: pip
           cache-dependency-path: backend/requirements.txt
 
