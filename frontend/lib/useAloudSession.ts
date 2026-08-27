@@ -146,7 +146,13 @@ export function useAloudSession() {
         webrtcRequestParams: {
           endpoint: new Request(`/sessions/${sessionId}/api/offer`, {
             method: "POST",
-            headers: { Authorization: `Bearer ${token}` },
+            headers: {
+              // With an endpoint Request, the transport uses these headers
+              // verbatim (no defaults) — Content-Type must come along or the
+              // JSON body arrives unparseable (422).
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${token}`,
+            },
           }),
         },
       });
