@@ -157,7 +157,10 @@ Caddy `basic_auth` gate, which is removed at rollout.
     email is already registered. Firebase does not suppress either error
     (documented behavior — enumeration protection covers sign-in, not signup
     or OAuth collisions), so these are deliberate, documented exceptions to
-    (d)'s non-enumeration rule — not oversights.
+    (d)'s non-enumeration rule — not oversights. The signup availability
+    pre-check endpoint (FR-30) surfaces the same fact as (e) one click
+    earlier; it is unauthenticated by necessity (the caller has no account
+    yet) and rate-limited per caller, accepted on the same grounds.
 - **FR-27** The user can sign out, landing back on `/login`. Password accounts
   can reset their password via Firebase's emailed reset link; the
   reset-request confirmation is non-enumerating ("If an account exists for
@@ -196,11 +199,14 @@ Caddy `basic_auth` gate, which is removed at rollout.
     fields, always visible while the form is in sign-in mode (FR-27's reset
     entry point; signup mode shows "Already have an account?" instead —
     recovery belongs to sign-in).
-  - "Sign up" does not create the account immediately: the form switches to
-    signup mode — credentials stay in place, a "Preferred name" field appears,
-    and the side-by-side buttons are replaced by a single explicit
-    "Create account" action. The still-visible email doubles as the
-    confirmation step; no re-entry, no dialog. On success the user is signed
+  - "Sign up" first checks availability via the rate-limited, unauthenticated
+    `/api/auth/email-check` endpoint (an Admin SDK lookup; a documented FR-26
+    enumeration exception): if the email is registered, FR-26(e)'s inline
+    error shows and the form does NOT expand. Only an available email
+    switches the form to signup mode — credentials stay in place, a
+    "Preferred name" field appears, and the side-by-side buttons are replaced
+    by a single explicit "Create account" action; nothing is created until
+    that click. On success the user is signed
     in and taken into the app (verification email sent per FR-25); the
     preferred name — length-limited and escaped wherever displayed — is saved
     to the user's profile at creation.

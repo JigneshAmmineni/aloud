@@ -127,6 +127,26 @@ async def get_current_admin(
     return user
 
 
+def email_exists(email: str) -> bool:
+    """Signup pre-check (FR-30). A deliberate, rate-limited enumeration
+    exception per FR-26: signup unavoidably reveals existence via
+    email-already-in-use anyway — this surfaces the same fact one click
+    earlier, before the form expands."""
+    # Resolved OUTSIDE the try: a broken service-account config raises
+    # ValueError too, and must surface as an error (the route's 503), never
+    # masquerade as "not registered".
+    app = _firebase()
+    try:
+        fb_auth.get_user_by_email(email, app=app)
+        return True
+    except fb_auth.UserNotFoundError:
+        return False
+    except ValueError:
+        # get_user_by_email rejects malformed emails with ValueError —
+        # nothing is registered under a malformed address.
+        return False
+
+
 # --- Admin account operations (FR-29) — provider-aware, so they live here. ---
 
 
