@@ -127,8 +127,13 @@ Caddy `basic_auth` gate, which is removed at rollout.
   - (f) Google sign-in asserting a non-gmail address that belongs to an
     existing account → `auth/account-exists-with-different-credential`; v1
     shows "sign in with your original method" (no automatic linking).
-- **FR-27** The user can sign out. Password accounts can reset their password
-  via Firebase's emailed reset link.
+  - (g) Email+password sign-in with correct credentials on an account that
+    holds a password → signed in (the base case, stated for completeness).
+- **FR-27** The user can sign out, landing back on `/login`. Password accounts
+  can reset their password via Firebase's emailed reset link; the
+  reset-request confirmation is non-enumerating ("If an account exists for
+  this email, a reset link has been sent") regardless of whether the email is
+  registered.
 - **FR-28** Admin access is granted by the Firebase custom claim
   `admin: true`, checked server-side on every admin request by a second
   dependency (`get_current_admin`; 403 otherwise). Claims are granted/revoked
@@ -140,7 +145,10 @@ Caddy `basic_auth` gate, which is removed at rollout.
   Disabling also revokes the user's refresh tokens, and session start
   (`/start`) verifies with `check_revoked=True`, so a disabled user cannot
   open a new session; other endpoints may rely on the ≤1h token expiry.
-  (Per-user usage metrics belong to the observability feature, not this one.)
+  Accepted v1 limitation: disabling does not terminate an already-connected
+  voice session (tokens are not re-verified mid-session) — it blocks new
+  requests and new sessions. (Per-user usage metrics belong to the
+  observability feature, not this one.)
 - **FR-30** Frontend: a `/login` page; unauthenticated visits redirect there.
   Layout, top to bottom: email field; password field; two side-by-side buttons
   directly under the password field — "Sign in" (left) and "Sign up" (right),
@@ -154,12 +162,21 @@ Caddy `basic_auth` gate, which is removed at rollout.
     fields, always visible (FR-27's reset entry point).
   - "Sign up" does not create the account immediately: the form switches to
     signup mode — credentials stay in place, a "Preferred name" field appears,
-    and the action becomes an explicit "Create account". The still-visible
-    email doubles as the confirmation step; no re-entry, no dialog. The
-    preferred name is saved to the user's profile at creation.
+    and the side-by-side buttons are replaced by a single explicit
+    "Create account" action. The still-visible email doubles as the
+    confirmation step; no re-entry, no dialog. On success the user is signed
+    in and taken into the app (verification email sent per FR-25); the
+    preferred name — length-limited and escaped wherever displayed — is saved
+    to the user's profile at creation.
   - In signup mode, "Already have an account?" hyperlink text sits at the
     bottom of the form; clicking it reverts to sign-in mode with the email and
     password fields keeping whatever is already typed.
+  - Empty or malformed inputs are rejected inline before any Firebase call;
+    Firebase-side errors (e.g., password too short) surface inline the same
+    way, keeping field values.
+  - Already-signed-in visits to `/login` redirect into the app. If `/login`
+    supports a post-login redirect parameter, it accepts only same-origin
+    paths (no open redirect).
   Testable UI notes: signed-out / loading / error states exist; sign-in error
   copy follows FR-26(d); an "Admin" nav item renders only when the token
   carries the admin claim (cosmetic — the server enforces regardless). Finer
