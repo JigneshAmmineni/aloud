@@ -28,7 +28,7 @@ jobs:
           use_sticky_comment: true # re-reviews update one comment instead of stacking
           claude_args: |
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh run view:*),Bash(gh pr comment:*)"
-            --max-turns 30
+            --max-turns 60
           prompt: |
             Review PR #${{ github.event.pull_request.number }} in ${{ github.repository }}.
             Use `gh pr view` / `gh pr diff` to read the PR description and diff.
@@ -110,9 +110,12 @@ jobs:
               mcp__github_inline_comment__create_inline_comment with
               confirmed: true — comments left unconfirmed are silently
               discarded when the job ends, never posted.
-            - Post the overall summary and the final verdict as a PR comment
-              via `gh pr comment` — text that only reaches the workflow log
-              is invisible to the author.
+            - Post the overall summary and the final verdict as ONE PR
+              comment, updating your previous summary on re-reviews instead
+              of stacking new ones:
+              `gh pr comment <pr> --edit-last --create-if-none --body ...`.
+              Text that only reaches the workflow log is invisible to the
+              author.
             - Order findings by severity: blocking issues first, then
               "nit:"-prefixed suggestions. Aim for roughly 10 findings,
               leading with what matters most — a soft cap: exceed it freely
