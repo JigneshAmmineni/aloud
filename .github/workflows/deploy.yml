@@ -1,0 +1,113 @@
+# Continuous delivery: one button deploys a chosen main commit to the VM.
+#
+#   Actions tab → "Deploy to production" → Run workflow
+#     ref blank  → deploys the tip of main
+#     ref = SHA  → deploys that commit (must be on main) — this is also the
+#                  ROLLBACK path: pick any older main commit and run.
+#
+# What it does: validates the commit is on main (nothing skips the PR gate),
+# force-moves the `prod` branch pointer to it (prod = deployed truth, even
+# going backward), opens an IAP tunnel with a tunnel-only service account,
+# SSHes to the VM as the deploy user, hard-resets the checkout and rebuilds
+# the compose stack, then health-checks the live site.
+#
+# Rollback caveat: DB schema migrations are NOT reversed. Rolling back past
+# a release that migrated the schema may need manual DB attention first.
+#
+# Secrets: GCP_DEPLOYER_SA_KEY (service account with iap.tunnelResourceAccessor
+# + compute.viewer only), VM_SSH_PRIVATE_KEY (dedicated deploy key for the VM
+# user). The heavy suite / talk-through promotion gate (ROADMAP "Process
+# infrastructure") remains a manual pre-flight for now.
+
+name: Deploy to production
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit SHA on main to deploy (blank = tip of main)"
+        required: false
+        default: ""
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+env:
+  GCP_PROJECT: aloud-498522
+  VM_NAME: aloud
+  VM_ZONE: us-west1-b
+  VM_USER: jigne
+  SITE: https://work-aloud.com
+
+permissions:
+  contents: write # moves the prod branch pointer
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve and validate the commit
+        id: resolve
+        run: |
+          SHA=$(git rev-parse "${{ inputs.ref || 'origin/main' }}")
+          if ! git merge-base --is-ancestor "$SHA" origin/main; then
+            echo "::error::$SHA is not a commit on main — only gate-passed commits deploy."
+            exit 1
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Deploying $(git log -1 --oneline "$SHA")" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Point prod at the commit
+        run: git push origin "+${{ steps.resolve.outputs.sha }}:refs/heads/prod"
+
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_DEPLOYER_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Open IAP tunnel to the VM
+        run: |
+          gcloud compute start-iap-tunnel "$VM_NAME" 22 \
+            --project="$GCP_PROJECT" --zone="$VM_ZONE" \
+            --local-host-port=localhost:2222 &
+          for i in $(seq 1 20); do
+            sleep 2
+            (exec 3<>/dev/tcp/localhost/2222) 2>/dev/null && exec 3>&- && break
+          done
+
+      - name: Deploy on the VM
+        run: |
+          echo "${{ secrets.VM_SSH_PRIVATE_KEY }}" > deploy_key
+          chmod 600 deploy_key
+          ssh -i deploy_key -p 2222 \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o ServerAliveInterval=30 \
+            "$VM_USER@localhost" bash -s <<'REMOTE'
+          set -euo pipefail
+          cd ~/aloud
+          git fetch origin
+          git checkout prod
+          git reset --hard "${{ steps.resolve.outputs.sha }}"
+          docker compose -f docker-compose.prod.yml up -d --build
+          echo "deployed: $(git rev-parse HEAD)"
+          REMOTE
+
+      - name: Verify the live site
+        run: |
+          sleep 10
+          for i in $(seq 1 12); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" "$SITE/healthz" || true)
+            [ "$code" = "200" ] && break
+            sleep 10
+          done
+          if [ "$code" != "200" ]; then
+            echo "::error::healthz returned $code after deploy — investigate (containers may still be starting, or the deploy broke; roll back by re-running with the previous SHA)."
+            exit 1
+          fi
+          echo "healthz 200 — live at $SITE ($(date -u))" >> "$GITHUB_STEP_SUMMARY"

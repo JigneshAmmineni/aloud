@@ -186,8 +186,8 @@ WebRTC UDP media path (not HTTP).
 
 | Process | How | Status |
 |---|---|---|
-| Deploy an update | SSH to VM → `git pull` → `docker compose -f docker-compose.prod.yml up -d --build` ([deployment.md §13](deployment.md)) | live (manual; CD workflow planned — ROADMAP "Process infrastructure") |
-| Promote code | PR → `main` (CI + review gate) → test on workbench → fast-forward `prod` → deploy from `prod` | live |
+| Deploy / promote / roll back | Actions → **"Deploy to production"** → Run workflow. Blank ref = tip of `main`; an older main SHA = rollback (same button). Moves the `prod` pointer, IAP-tunnels to the VM (tunnel-only deployer SA), hard-resets + rebuilds, health-checks the site. Manual path still works ([deployment.md §13](deployment.md)). Rollback does not reverse DB migrations | live |
+| Promote code | PR → `main` (CI + review gate) → test on workbench → run the deploy workflow (it moves `prod` itself) | live |
 | Logs / debugging | `docker compose logs -f backend` on the VM; JSON events greppable by `session_id`/`event` ([deployment.md §12](deployment.md)) | live |
 | DB access | `psql` in the db container, or SSH port-forward for a GUI — 5432 is never public | live |
 | Add / remove an admin | from `backend/`: `python scripts/grant_admin.py <email>` (or `--revoke`) with the service-account key present — sets the custom claim, refuses unverified emails, revokes the target's tokens so it lands promptly | live |
