@@ -50,9 +50,12 @@ jobs:
             severity, in any category, whether or not it is mentioned anywhere
             in this prompt.
 
-            1. Intent & scope — Does the diff implement the referenced FRs, all
-               of them, and nothing else? Flag scope creep and unrelated
-               drive-by changes.
+            1. Intent — Does the diff implement the referenced FRs, all of
+               them? Unrelated miscellaneous edits riding along are expected
+               and fine — the author routinely batches small fixes with main
+               changes. Do NOT flag scope creep or drive-by changes; comment
+               on an unrelated change only if it is itself defective,
+               dangerous, or violates a hard constraint.
             2. Correctness — Construct concrete failing scenarios: edge cases
                (empty/duplicate/concurrent), error paths (provider call fails
                mid-turn, DB write fails after partial state change), async
