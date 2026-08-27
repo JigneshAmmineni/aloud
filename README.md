@@ -14,14 +14,7 @@ Aloud is deployed on a Google Compute Engine VM with a real domain and HTTPS (Ca
 
 ### → **https://work-aloud.com**
 
-It's a personal demo running on my own API credits, so it sits behind a simple login. Use:
-
-| | |
-|---|---|
-| **Username** | `test-user` |
-| **Password** | `12345678` |
-
-Tap **Talk**, allow the mic, and start thinking out loud. Works on a laptop or a phone.
+Create an account (email + password, or continue with Google), then tap **Talk**, allow the mic, and start thinking out loud. Works on a laptop or a phone.
 
 ---
 

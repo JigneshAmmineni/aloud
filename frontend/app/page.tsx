@@ -1,9 +1,16 @@
 "use client";
 
+import { useEffect } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { signOut } from "firebase/auth";
+
 import { ArtifactsPanel } from "@/components/ArtifactsPanel";
 import { DocumentUpload } from "@/components/DocumentUpload";
 import { SessionButton } from "@/components/SessionButton";
 import { WaveformBar } from "@/components/WaveformBar";
+import { useAuth } from "@/lib/auth";
+import { auth } from "@/lib/firebase";
 import { useAloudSession } from "@/lib/useAloudSession";
 
 const STATUS: Record<string, string> = {
@@ -16,6 +23,8 @@ const STATUS: Record<string, string> = {
 };
 
 export default function Home() {
+  const router = useRouter();
+  const { user, loading, isAdmin } = useAuth();
   const {
     state,
     mode,
@@ -30,10 +39,31 @@ export default function Home() {
     end,
   } = useAloudSession();
 
+  // FR-30: unauthenticated visits land on /login.
+  useEffect(() => {
+    if (!loading && !user) router.replace("/login");
+  }, [loading, user, router]);
+
   const status = state === "active" ? STATUS[mode] : STATUS[state];
+
+  if (loading || !user) return null;
 
   return (
     <main className="stage">
+      <nav className="topnav" aria-label="account">
+        {isAdmin && (
+          <Link className="login-link" href="/admin">
+            Admin
+          </Link>
+        )}
+        <button
+          type="button"
+          className="login-link"
+          onClick={() => signOut(auth)}
+        >
+          Sign out
+        </button>
+      </nav>
       <header className="masthead">
         <h1 className="wordmark">Aloud</h1>
         <p className="tagline">a place to think out loud</p>

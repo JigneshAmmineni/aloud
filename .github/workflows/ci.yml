@@ -13,6 +13,22 @@ jobs:
     defaults:
       run:
         working-directory: backend
+    services:
+      # Throwaway Postgres for the FR-31 RLS tests — they must run through a
+      # real NOSUPERUSER role, which SQLite can't express.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: aloud
+          POSTGRES_PASSWORD: aloud
+          POSTGRES_DB: aloud
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U aloud"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
@@ -31,6 +47,8 @@ jobs:
 
       - name: Tests (pytest)
         run: python -m pytest -q
+        env:
+          RLS_TEST_DATABASE_URL: postgresql+asyncpg://aloud:aloud@localhost:5432/aloud
 
   frontend:
     runs-on: ubuntu-latest

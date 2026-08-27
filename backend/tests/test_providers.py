@@ -21,6 +21,7 @@ def _settings(**overrides) -> Settings:
         cartesia_speed=0.85,
         flux_eot_threshold=0.8,
         database_url="sqlite+aiosqlite://",
+        firebase_service_account_path="test-not-a-real-key.json",
     )
     base.update(overrides)
     return Settings(**base)

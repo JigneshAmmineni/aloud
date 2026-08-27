@@ -193,7 +193,9 @@ Caddy `basic_auth` gate, which is removed at rollout.
     values on any failed attempt (mistaken "Sign up" on an existing account
     shows FR-26(e)'s small error with everything still filled in).
   - "Forgot password?" is small hyperlink text (not a button) under the
-    fields, always visible (FR-27's reset entry point).
+    fields, always visible while the form is in sign-in mode (FR-27's reset
+    entry point; signup mode shows "Already have an account?" instead —
+    recovery belongs to sign-in).
   - "Sign up" does not create the account immediately: the form switches to
     signup mode — credentials stay in place, a "Preferred name" field appears,
     and the side-by-side buttons are replaced by a single explicit

@@ -3,7 +3,12 @@
 import os
 from dataclasses import dataclass
 
-_REQUIRED = ("DEEPGRAM_API_KEY", "GOOGLE_API_KEY", "CARTESIA_API_KEY")
+_REQUIRED = (
+    "DEEPGRAM_API_KEY",
+    "GOOGLE_API_KEY",
+    "CARTESIA_API_KEY",
+    "FIREBASE_SERVICE_ACCOUNT_PATH",
+)
 
 # Public Cartesia voice used in Pipecat examples; override with CARTESIA_VOICE_ID.
 _DEFAULT_VOICE_ID = "71a7ad14-091c-4e8e-a314-022ece01c121"
@@ -40,6 +45,7 @@ class Settings:
     cartesia_speed: float  # Cartesia Sonic-3 speech rate; 1.0 = normal
     flux_eot_threshold: float  # Deepgram Flux end-of-turn confidence (0-1)
     database_url: str
+    firebase_service_account_path: str  # C-4; app/auth.py reads the file lazily
 
 
 def load_settings() -> Settings:
@@ -64,4 +70,5 @@ def load_settings() -> Settings:
         flux_eot_threshold=_env_float("FLUX_EOT_THRESHOLD", 0.8),
         database_url=os.getenv("DATABASE_URL")
         or "postgresql+asyncpg://aloud:aloud@localhost:5432/aloud",
+        firebase_service_account_path=os.environ["FIREBASE_SERVICE_ACCOUNT_PATH"],
     )
