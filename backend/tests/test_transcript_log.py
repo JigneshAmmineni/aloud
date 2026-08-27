@@ -1,4 +1,4 @@
-"""Transcript ops log tests (SDD §2.7): frames in → batched rows out."""
+"""Transcript ops log tests (FR-20): frames in → batched, user-scoped rows out."""
 
 import asyncio
 from unittest.mock import MagicMock
@@ -11,10 +11,13 @@ from pipecat.frames.frames import (
 from pipecat.observers.base_observer import FramePushed
 from pipecat.processors.frame_processor import FrameDirection
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from db.models import Base, Session, TranscriptEvent, User
+import db.transcript_log as transcript_log
+from db.engine import init_db, session_factory
+from db.models import Session, TranscriptEvent
+from db.sessions_repo import create_session_row
 from db.transcript_log import TranscriptWriter
+from db.users_repo import provision_user
 
 
 def _push(observer, frame):
@@ -29,22 +32,16 @@ def _push(observer, frame):
     )
 
 
-async def _make_db():
-    engine = create_async_engine("sqlite+aiosqlite://")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with factory() as db:
-        db.add(User(id="local-user"))
-        db.add(Session(id="s-1", user_id="local-user", status="active"))
-        await db.commit()
-    return factory
+async def _setup_db(tmp_path):
+    await init_db(f"sqlite+aiosqlite:///{tmp_path}/transcript_test.db")
+    await provision_user("uid-a", None)
+    await create_session_row("s-1", "uid-a")
 
 
-def test_frames_become_rows_and_duplicates_are_ignored():
+def test_frames_become_rows_and_duplicates_are_ignored(tmp_path):
     async def run():
-        factory = await _make_db()
-        writer = TranscriptWriter("s-1", factory)
+        await _setup_db(tmp_path)
+        writer = TranscriptWriter("s-1", "uid-a")
         observer = writer.observer()
         writer.start()
 
@@ -57,7 +54,7 @@ def test_frames_become_rows_and_duplicates_are_ignored():
 
         await writer.stop()  # final flush
 
-        async with factory() as db:
+        async with session_factory()() as db:
             rows = (
                 (await db.execute(select(TranscriptEvent).order_by(TranscriptEvent.id)))
                 .scalars()
@@ -69,14 +66,15 @@ def test_frames_become_rows_and_duplicates_are_ignored():
         ]
         assert rows[0].text == "hello there"
         assert rows[0].session_id == "s-1"
+        assert rows[0].user_id == "uid-a"  # FR-31: writer stamps its user
 
     asyncio.run(run())
 
 
-def test_session_row_lifecycle():
+def test_session_row_lifecycle(tmp_path):
     async def run():
-        factory = await _make_db()
-        async with factory() as db:
+        await _setup_db(tmp_path)
+        async with session_factory()() as db:
             row = await db.get(Session, "s-1")
             assert row.status == "active"
             assert row.ended_at is None
@@ -84,12 +82,12 @@ def test_session_row_lifecycle():
     asyncio.run(run())
 
 
-def test_large_volume_is_fully_persisted():
+def test_large_volume_is_fully_persisted(tmp_path):
     """Batching (25-row batches / 1s flushes) must not drop rows."""
 
     async def run():
-        factory = await _make_db()
-        writer = TranscriptWriter("s-1", factory)
+        await _setup_db(tmp_path)
+        writer = TranscriptWriter("s-1", "uid-a")
         observer = writer.observer()
         writer.start()
 
@@ -99,7 +97,7 @@ def test_large_volume_is_fully_persisted():
             )
         await writer.stop()
 
-        async with factory() as db:
+        async with session_factory()() as db:
             rows = (await db.execute(select(TranscriptEvent))).scalars().all()
         assert len(rows) == 60
         assert {r.text for r in rows} == {f"utterance {i}" for i in range(60)}
@@ -107,16 +105,17 @@ def test_large_volume_is_fully_persisted():
     asyncio.run(run())
 
 
-def test_db_failure_never_raises_into_the_pipeline():
-    """SDD §2.7: the ops log must not disturb a live conversation. A broken
-    DB drops the batch with an ERROR log — no exception escapes."""
+def test_db_failure_never_raises_into_the_pipeline(monkeypatch):
+    """FR-20 discipline: the ops log must not disturb a live conversation. A
+    broken DB drops the batch with an ERROR log — no exception escapes."""
 
-    class BrokenFactory:
-        def __call__(self):
-            raise RuntimeError("db is down")
+    def broken_scope(user_id):
+        raise RuntimeError("db is down")
+
+    monkeypatch.setattr(transcript_log, "user_scoped_session", broken_scope)
 
     async def run():
-        writer = TranscriptWriter("s-1", BrokenFactory())
+        writer = TranscriptWriter("s-1", "uid-a")
         observer = writer.observer()
         writer.start()
         await _push(

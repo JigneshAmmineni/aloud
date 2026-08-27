@@ -20,10 +20,12 @@ class Base(DeclarativeBase):
 class User(Base):
     __tablename__ = "users"
 
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)  # Firebase uid
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    # FR-24/FR-30: from the verified ID token's `name` claim, length-capped.
+    preferred_name: Mapped[str | None] = mapped_column(String(80))
 
 
 class Session(Base):
@@ -44,6 +46,9 @@ class TranscriptEvent(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"), index=True)
+    # Denormalized from sessions so the FR-31 RLS policy is a direct column
+    # check, not a subquery through another RLS'd table.
+    user_id: Mapped[str | None] = mapped_column(String(64), index=True)
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     role: Mapped[str] = mapped_column(String(8))  # user|agent
     kind: Mapped[str] = mapped_column(String(24))  # final_transcript|agent_text

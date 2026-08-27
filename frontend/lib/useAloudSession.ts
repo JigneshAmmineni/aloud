@@ -12,6 +12,8 @@ import { useCallback, useRef, useState } from "react";
 import { PipecatClient, type TransportState } from "@pipecat-ai/client-js";
 import { SmallWebRTCTransport } from "@pipecat-ai/small-webrtc-transport";
 
+import { authedFetch, getToken } from "@/lib/auth";
+
 export type SessionState = "idle" | "connecting" | "active" | "ending";
 export type VoiceMode = "listening" | "thinking" | "speaking";
 
@@ -54,7 +56,7 @@ export function useAloudSession() {
   const uploadDocument = useCallback(async (file: File) => {
     const form = new FormData();
     form.append("file", file);
-    const res = await fetch("/documents", { method: "POST", body: form });
+    const res = await authedFetch("/documents", { method: "POST", body: form });
     if (!res.ok) {
       const detail = await res
         .json()
@@ -127,7 +129,7 @@ export function useAloudSession() {
       }
       // Bootstrap a session so any attached documents reach the agent, then
       // connect on the session-scoped offer path the backend serves them from.
-      const startRes = await fetch("/start", {
+      const startRes = await authedFetch("/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -136,7 +138,18 @@ export function useAloudSession() {
       });
       if (!startRes.ok) throw new Error("session start failed");
       const { sessionId } = (await startRes.json()) as { sessionId: string };
-      await client.connect({ webrtcUrl: `/sessions/${sessionId}/api/offer` });
+      // The offer + trickle-ICE requests must carry the Bearer token too
+      // (FR-23/FR-29) — handing the transport a Request bakes the header
+      // into every signaling call it derives from it.
+      const token = await getToken();
+      await client.connect({
+        webrtcRequestParams: {
+          endpoint: new Request(`/sessions/${sessionId}/api/offer`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+        },
+      });
     } catch (e) {
       console.error("connect failed", e);
       cleanup();

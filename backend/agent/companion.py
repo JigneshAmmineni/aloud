@@ -19,7 +19,6 @@ from agent.providers import make_llm, make_stt, make_tts
 from agent.sanitizer import make_text_filters
 from agent.tools import make_create_artifact_handler, tool_schemas
 from app.config import Settings
-from db.engine import session_factory
 from db.sessions_repo import create_session_row, end_session_row
 from db.transcript_log import TranscriptWriter
 from obs.latency import make_latency_observer
@@ -59,11 +58,16 @@ def build_pipeline_parts(settings: Settings, documents=None):
 
 
 class CompanionAgent:
-    """One instance per session: builds the pipeline and runs it to completion."""
+    """One instance per session: builds the pipeline and runs it to completion.
 
-    def __init__(self, settings: Settings, documents=None):
+    `user_id` arrives verified from the offer route (the auth seam) and rides
+    session state from here — the session row, transcript writer, and artifact
+    handler all scope by it."""
+
+    def __init__(self, settings: Settings, documents=None, *, user_id: str):
         self._settings = settings
         self._documents = documents or []
+        self._user_id = user_id
 
     async def run(self, webrtc_connection) -> None:
         session_id = webrtc_connection.pc_id
@@ -81,7 +85,7 @@ class CompanionAgent:
         )
         llm.register_function(
             "create_artifact",
-            make_create_artifact_handler(session_id, session_factory()),
+            make_create_artifact_handler(session_id, self._user_id),
         )
 
         pipeline = Pipeline(
@@ -96,7 +100,7 @@ class CompanionAgent:
             ]
         )
 
-        writer = TranscriptWriter(session_id, session_factory())
+        writer = TranscriptWriter(session_id, self._user_id)
 
         task = PipelineTask(
             pipeline,
@@ -125,7 +129,7 @@ class CompanionAgent:
             )
             await task.cancel()
 
-        await create_session_row(session_id)
+        await create_session_row(session_id, self._user_id)
         writer.start()
         log.bind(event="session.started").info("Pipeline starting")
         end_reason = "user"  # tap and connection drop are indistinguishable (resume is descoped)
@@ -137,7 +141,7 @@ class CompanionAgent:
             raise
         finally:
             await writer.stop()
-            await end_session_row(session_id, end_reason)
+            await end_session_row(session_id, self._user_id, end_reason)
             log.bind(event="session.ended", end_reason=end_reason).info(
                 "Pipeline finished"
             )

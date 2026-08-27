@@ -28,8 +28,9 @@ Related docs: [deployment.md](deployment.md) (step-by-step VM runbook),
    ├─▶ Deepgram Flux ─── STT + end-of-turn detection   (wss, outbound)
    ├─▶ Google Gemini ─── LLM (2.5 Flash, thinking off) (https, outbound)
    ├─▶ Cartesia ──────── TTS (Sonic-3)                 (https, outbound)
-   └─▶ Firebase Auth ─── identity (project aloud-c74f5) [being integrated,
-                          spec'd in REQUIREMENTS.md §4.8 — not live yet]
+   └─▶ Firebase Auth ─── identity (project aloud-c74f5): Google + email/
+                          password sign-in; backend verifies Bearer ID tokens
+                          via firebase-admin (REQUIREMENTS.md §4.8)
 
  Supporting systems: GitHub (repo, Actions CI, Claude PR review),
  Let's Encrypt (TLS via Caddy), Google Cloud (VM, IAP SSH).
@@ -50,49 +51,54 @@ dependencies on the voice path, one identity provider (incoming).
 | LLM | Gemini 2.5 Flash | thinking disabled (latency); swappable via `make_llm()` |
 | TTS | Cartesia Sonic-3 | speed 0.85, markdown/identifier sanitizer in front |
 | DB | PostgreSQL 16 | `postgres:16-alpine`; SQLAlchemy async + asyncpg (tests: aiosqlite) |
-| Auth (incoming) | Firebase Auth | Google + email/password; Bearer ID tokens; firebase-admin verification |
+| Auth | Firebase Auth | Google + email/password, open signup; Bearer ID tokens verified in `app/auth.py`; admin via `admin: true` custom claim; RLS on user-owned tables through a dedicated `aloud_app` Postgres role |
 | Reverse proxy | Caddy 2 | TLS (Let's Encrypt), path routing; currently also the interim `basic_auth` gate |
 | Dev/prod runtime | Docker Compose | everything runs in Docker — no host installs (CLAUDE.md rule) |
 
 ### Backend packages (`backend/requirements.txt`)
 
 `pipecat-ai[webrtc,deepgram,google,cartesia]` (pipeline + provider services),
-`pipecat-ai-small-webrtc-prebuilt` (debug UI), `fastapi`, `uvicorn[standard]`,
-`sqlalchemy[asyncio]`, `asyncpg`, `pypdf` (PDF text extraction),
-`python-dotenv`; dev/test: `pytest`, `aiosqlite`, `httpx`, `ruff`.
-Incoming with auth: `firebase-admin`.
+`fastapi`, `firebase-admin` (token verification + account admin),
+`uvicorn[standard]`, `sqlalchemy[asyncio]`, `asyncpg`, `pypdf` (PDF text
+extraction), `python-dotenv`; dev/test: `pytest`, `aiosqlite`, `httpx`, `ruff`.
 
 ### Frontend packages (`frontend/package.json`)
 
-`next`, `react`, `react-dom`, `@pipecat-ai/client-js`,
-`@pipecat-ai/small-webrtc-transport`; dev: `typescript`, `@types/*`.
-Incoming with auth: `firebase`.
+`next`, `react`, `react-dom`, `firebase` (client auth),
+`@pipecat-ai/client-js`, `@pipecat-ai/small-webrtc-transport`;
+dev: `typescript`, `@types/*`.
 
 ## 3. Repository layout
 
 ```
 backend/
-  app/        FastAPI app: main.py (routes, session wiring), config.py,
-              documents.py (upload-time doc store, in-memory)
+  app/        FastAPI app: main.py (routes, session wiring), auth.py (THE
+              auth seam: token verification, admin ops), admin.py (/api/admin
+              router), config.py, documents.py (upload-time doc store)
   agent/      companion.py (CompanionAgent: builds/runs one session's pipeline)
               providers.py (THE provider seam: all SDK construction)
               prompts.py, tools.py (create_artifact), sanitizer.py
-  db/         engine.py, models.py (users, sessions, transcript_events,
-              artifacts), sessions_repo.py, transcript_log.py
+  db/         engine.py (two engines + RLS bootstrap + user_scoped_session),
+              models.py (users, sessions, transcript_events, artifacts),
+              users_repo.py, sessions_repo.py, transcript_log.py
   obs/        logging.py (JSON structured logs), latency.py (per-turn budget
               instrumentation: WARN >1s/stage, ERROR >3s end-to-end)
-  tests/      82 tests, SQLite-backed, no network
-frontend/     Next.js app (single page today; /login and /admin incoming)
-.github/workflows/  ci.yml (ruff+pytest+build), claude.yml (@claude),
-              claude-code-review.yml (tailored auto-review)
+  scripts/    grant_admin.py (mint/revoke the admin claim, local-only)
+  tests/      SQLite-backed suite + Postgres-only RLS tests (test_rls.py)
+frontend/     Next.js app: / (session console), /login, /admin;
+              lib/firebase.ts + lib/auth.tsx (client auth)
+.github/workflows/  ci.yml (ruff+pytest+Postgres service+build),
+              claude.yml (@claude), claude-code-review.yml (auto-review)
 Caddyfile, docker-compose.yml (dev), docker-compose.prod.yml (prod)
 ```
 
 Two architectural seams everything hangs on:
 - **Provider seam:** all STT/LLM/TTS SDK imports/construction live in
   `agent/providers.py` factories. Swapping a provider = one factory + env var.
-- **Auth seam (spec'd):** `get_current_user_id()` will be the only auth-aware
-  code; repos take `user_id: str` and never know where it came from.
+- **Auth seam:** `app/auth.py` is the only auth-aware code — routes take
+  identity from its dependencies, repos take `user_id: str` (no defaults) and
+  never know where it came from, and every DB transaction is scoped through
+  `user_scoped_session(user_id)` (RLS enforced by Postgres underneath).
 
 ## 4. Runtime view (one voice session)
 
@@ -118,7 +124,7 @@ Two architectural seams everything hangs on:
 | Zone | `us-west1-b` (Oregon — close to user, protects the 3s latency budget) |
 | IP / DNS | reserved static external IP; A record for `work-aloud.com` (Cloudflare DNS, grey-cloud/DNS-only — proxy would break UDP) |
 | GCP services | Compute Engine; IAP (SSH tunnel — port 22 not public). No other GCP services in use |
-| Firebase | project `aloud-c74f5` — Auth only (no Hosting/Firestore); web app registered; being integrated |
+| Firebase | project `aloud-c74f5` — Auth only (no Hosting/Firestore): Google + Email/Password providers enabled, email-link off. Service-account key: `backend/<name>.json` locally, `~/aloud/firebase-service-account.json` on the VM (mounted read-only into the backend container) |
 | TLS | Let's Encrypt via Caddy, auto-renewed, cert persisted in a Docker volume |
 | Firewall | tcp 80/443 (web+signaling) · udp 1–65535 (WebRTC media) · tcp 22 from IAP range only · **nothing else** (Postgres/backend ports unreachable from internet) |
 | Cost | ~$14–15/mo (VM+disk+IP) + ~$10/yr domain + per-use provider APIs |
@@ -129,7 +135,7 @@ bridge networking can't forward:
 
 | Container | Image | Role |
 |---|---|---|
-| caddy | caddy:2-alpine | :80/:443 — TLS, path routing (`/api/*,/start,/sessions/*,/healthz` → backend, rest → frontend), interim site-wide `basic_auth` gate (removed when real auth ships) |
+| caddy | caddy:2-alpine | :80/:443 — TLS, path routing (`/api/*,/start,/sessions/*,/healthz` → backend, rest → frontend). The old site-wide `basic_auth` gate is removed — per-user auth lives in the backend |
 | frontend | built from `frontend/Dockerfile` | compiled Next.js on :3000 (loopback-only in practice — not firewalled open) |
 | backend | built from `backend/Dockerfile` | FastAPI + Pipecat on :7860 + UDP media on host interface |
 | db | postgres:16-alpine | :5432, `listen_addresses=127.0.0.1` (loopback only) |
@@ -146,14 +152,18 @@ VM = single point of failure.
 ## 6. Pages & API surface
 
 **Frontend routes:** `/` — the app (Talk button, waveform states, artifact
-panel, document upload). Incoming with auth (§4.8): `/login`, `/admin`.
+panel, document upload; redirects to /login when signed out) · `/login`
+(FR-30: one form for sign-in/sign-up + Google) · `/admin` (account list,
+disable/enable; visible only with the admin claim).
 
-**Backend endpoints** (`backend/app/main.py`): `GET /healthz` ·
-`POST /documents` (upload → in-memory store) · `POST /start` (create session)
-· `POST|PATCH /api/offer` and `POST|PATCH /sessions/{id}/api/offer` (WebRTC
-signaling). Plus the WebRTC UDP media path (not HTTP). Incoming with auth:
-admin endpoints (list/disable/enable users), all routes behind
-`get_current_user_id`.
+**Backend endpoints** (`backend/app/main.py`, `app/admin.py`): `GET /healthz`
+(the only unauthenticated route — infra probe, no user data) ·
+`POST /documents` · `POST /start` (provisions the users row, mints the
+session, `check_revoked`) · `POST|PATCH /api/offer` and
+`POST|PATCH /sessions/{id}/api/offer` (WebRTC signaling, `check_revoked`,
+session-ownership enforced) · `GET /api/admin/users`,
+`POST /api/admin/users/{uid}/disable|enable` (admin claim required). Plus the
+WebRTC UDP media path (not HTTP).
 
 ## 7. Operational processes (runbooks)
 
@@ -163,8 +173,9 @@ admin endpoints (list/disable/enable users), all routes behind
 | Promote code | PR → `main` (CI + review gate) → test on workbench → fast-forward `prod` → deploy from `prod` | live |
 | Logs / debugging | `docker compose logs -f backend` on the VM; JSON events greppable by `session_id`/`event` ([deployment.md §12](deployment.md)) | live |
 | DB access | `psql` in the db container, or SSH port-forward for a GUI — 5432 is never public | live |
-| Add / remove an admin | `python scripts/grant_admin.py <email>` run locally with the Firebase service-account key (custom claim `admin: true`; script refuses unverified emails) | spec'd (FR-28), lands with auth |
-| Disable / re-enable a user | Admin page → disable: sets Firebase `disabled`, revokes refresh tokens; new sessions blocked immediately, API access dies ≤1h (FR-29) | spec'd (FR-29), lands with auth |
+| Add / remove an admin | from `backend/`: `python scripts/grant_admin.py <email>` (or `--revoke`) with the service-account key present — sets the custom claim, refuses unverified emails, revokes the target's tokens so it lands promptly | live |
+| Disable / re-enable a user | `/admin` page → disable: sets Firebase `disabled` + revokes refresh tokens; new sessions blocked immediately, other API access dies ≤1h, a live session survives until it ends (FR-29) | live |
+| First prod deploy of auth | copy the service-account JSON to `~/aloud/firebase-service-account.json` (chmod 600) on the VM before `docker compose -f docker-compose.prod.yml up -d --build` | one-time |
 | Pause spend | `gcloud compute instances stop aloud --zone=us-west1-b` | live |
 
 ## 8. Decision log (condensed ADRs)

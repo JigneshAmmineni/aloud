@@ -22,8 +22,8 @@ from pipecat.frames.frames import (
 )
 from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.processors.frame_processor import FrameDirection
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from db.engine import user_scoped_session
 from db.models import TranscriptEvent
 
 _STOP = object()
@@ -80,11 +80,15 @@ class TranscriptLogObserver(BaseObserver):
 
 
 class TranscriptWriter:
-    """Background task draining the queue into transcript_events in batches."""
+    """Background task draining the queue into transcript_events in batches.
 
-    def __init__(self, session_id: str, db_sessions: async_sessionmaker):
+    Per-session, so per-user: a write batch never spans users, and the writer
+    scopes its transactions with the user_id handed to it at session start —
+    the FR-31 path for writers that bypass the HTTP layer."""
+
+    def __init__(self, session_id: str, user_id: str):
         self._session_id = session_id
-        self._db_sessions = db_sessions
+        self._user_id = user_id
         self._queue: asyncio.Queue = asyncio.Queue()
         self._task: asyncio.Task | None = None
         self._log = logger.bind(session_id=session_id, component="db.transcripts")
@@ -123,10 +127,11 @@ class TranscriptWriter:
 
     async def _flush(self, rows: list[_Row]) -> None:
         try:
-            async with self._db_sessions() as db:
+            async with user_scoped_session(self._user_id) as db:
                 db.add_all(
                     TranscriptEvent(
                         session_id=r.session_id,
+                        user_id=self._user_id,
                         ts=r.ts,
                         role=r.role,
                         kind=r.kind,

@@ -13,7 +13,7 @@ from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.processors.frameworks.rtvi import RTVIServerMessageFrame
 from pipecat.services.llm_service import FunctionCallParams
 
-from db.engine import DEFAULT_USER_ID
+from db.engine import user_scoped_session
 from db.models import Artifact
 
 ARTIFACT_KINDS = ("summary", "action_items", "cleaned_idea")
@@ -51,7 +51,7 @@ def tool_schemas() -> ToolsSchema:
     return ToolsSchema(standard_tools=[CREATE_ARTIFACT_SCHEMA])
 
 
-def make_create_artifact_handler(session_id: str, db_sessions):
+def make_create_artifact_handler(session_id: str, user_id: str):
     """Build the per-session create_artifact handler (registered on the LLM)."""
     log = logger.bind(session_id=session_id, component="agent.tools")
 
@@ -70,13 +70,13 @@ def make_create_artifact_handler(session_id: str, db_sessions):
         created_at = datetime.now(timezone.utc)
         row = Artifact(
             session_id=session_id,
-            user_id=DEFAULT_USER_ID,
+            user_id=user_id,
             kind=kind,
             title=title,
             content=content,
         )
         try:
-            async with db_sessions() as db:
+            async with user_scoped_session(user_id) as db:
                 db.add(row)
                 await db.commit()
                 await db.refresh(row)

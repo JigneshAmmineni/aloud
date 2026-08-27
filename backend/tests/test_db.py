@@ -1,21 +1,23 @@
-"""Schema and DB lifecycle contracts (SDD §3, NFR-6, NFR-7 groundwork)."""
+"""Schema and DB lifecycle contracts (NFR-6, FR-24, FR-31 groundwork)."""
 
 import asyncio
 
 from sqlalchemy import Text, select
 
-from db.engine import DEFAULT_USER_ID, init_db, session_factory
+from db.engine import init_db, session_factory
 from db.models import Base, Session, User
 from db.sessions_repo import create_session_row, end_session_row
+from db.users_repo import provision_user
 
 # Schema snapshot: adding tables/columns (memory layer, artifacts, …) must
 # update this snapshot consciously — that's the point.
 EXPECTED_SCHEMA = {
-    "users": {"id", "created_at"},
+    "users": {"id", "created_at", "preferred_name"},
     "sessions": {"id", "user_id", "started_at", "ended_at", "status", "end_reason"},
     "transcript_events": {
         "id",
         "session_id",
+        "user_id",
         "ts",
         "role",
         "kind",
@@ -53,15 +55,16 @@ def test_sensitive_columns_are_exactly_the_declared_ones():
     assert text_columns == SENSITIVE_COLUMNS
 
 
-def test_init_db_is_idempotent_and_seeds_single_user(tmp_path):
+def test_init_db_is_idempotent_and_seeds_nothing(tmp_path):
+    """FR-24: users appear only through provisioning — no stub rows."""
     url = f"sqlite+aiosqlite:///{tmp_path}/aloud_test.db"
 
     async def run():
         await init_db(url)
-        await init_db(url)  # second boot: no error, no duplicate seed
+        await init_db(url)  # second boot: no error
         async with session_factory()() as db:
             users = (await db.execute(select(User))).scalars().all()
-        assert [u.id for u in users] == [DEFAULT_USER_ID]
+        assert users == []
 
     asyncio.run(run())
 
@@ -71,14 +74,15 @@ def test_session_row_lifecycle(tmp_path):
 
     async def run():
         await init_db(url)
-        await create_session_row("sess-1")
+        await provision_user("uid-a", "Ada")
+        await create_session_row("sess-1", "uid-a")
         async with session_factory()() as db:
             row = await db.get(Session, "sess-1")
             assert row.status == "active"
-            assert row.user_id == DEFAULT_USER_ID
+            assert row.user_id == "uid-a"
             assert row.ended_at is None
 
-        await end_session_row("sess-1", "user")
+        await end_session_row("sess-1", "uid-a", "user")
         async with session_factory()() as db:
             row = await db.get(Session, "sess-1")
             assert row.status == "ended"
@@ -93,6 +97,6 @@ def test_end_session_row_tolerates_unknown_session(tmp_path):
 
     async def run():
         await init_db(url)
-        await end_session_row("never-existed", "error")  # must not raise
+        await end_session_row("never-existed", "uid-a", "error")  # must not raise
 
     asyncio.run(run())

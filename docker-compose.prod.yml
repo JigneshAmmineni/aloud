@@ -14,8 +14,6 @@ services:
     environment:
       - ALOUD_DOMAIN=${ALOUD_DOMAIN}
       - ALOUD_EMAIL=${ALOUD_EMAIL}
-      - ALOUD_AUTH_USER=${ALOUD_AUTH_USER}
-      - ALOUD_AUTH_HASH=${ALOUD_AUTH_HASH}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile
       - caddy_data:/data         # persists the issued cert across restarts
@@ -35,6 +33,12 @@ services:
     env_file: .env
     environment:
       - DATABASE_URL=postgresql+asyncpg://aloud:${POSTGRES_PASSWORD}@127.0.0.1:5432/aloud
+      - FIREBASE_SERVICE_ACCOUNT_PATH=/run/secrets/firebase-key.json
+    volumes:
+      # The service-account JSON stays outside the image (.dockerignore) and
+      # outside git (.gitignore); on the VM it lives next to .env as
+      # ~/aloud/firebase-service-account.json, chmod 600.
+      - ./firebase-service-account.json:/run/secrets/firebase-key.json:ro
     depends_on: [db]
 
   db:
