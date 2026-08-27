@@ -6,9 +6,12 @@ scales horizontally (CURRENT-ARCHITECTURE.md scaling notes). State resets on
 restart, which is fine for abuse throttling.
 
 Caller identity: behind Caddy every TCP peer is localhost, so keying on the
-socket address would throttle all users as one bucket. Caddy sets
-X-Forwarded-For; its first hop is the real client. In dev (no proxy) the
-socket address is the fallback.
+socket address would throttle all users as one bucket. Caddy APPENDS the
+real peer to any X-Forwarded-For the client already sent — so the LAST entry
+is the only one our proxy vouches for; earlier entries are attacker-
+controlled (trusting the first would let a caller mint a fresh identity per
+request and bypass the limit entirely). In dev (no proxy) the socket address
+is the fallback; the backend port is never internet-reachable in prod.
 """
 
 import time
@@ -22,7 +25,8 @@ _SWEEP_THRESHOLD = 1024  # drop stale buckets once the dict grows past this
 def _caller_key(request: Request) -> str:
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
-        return forwarded.split(",")[0].strip()
+        # Last entry = the hop our own proxy appended. Never the first.
+        return forwarded.split(",")[-1].strip()
     return request.client.host if request.client else "unknown"
 
 

@@ -42,12 +42,21 @@ def test_window_expiry_frees_the_bucket():
     assert client.get("/limited").status_code == 200
 
 
-def test_first_forwarded_hop_wins():
-    """With chained proxies, the first X-Forwarded-For entry is the client."""
+def test_last_forwarded_hop_wins_and_spoofed_prefixes_cannot_mint_identities():
+    """Caddy appends the true peer to client-supplied X-Forwarded-For, so
+    only the LAST entry is trustworthy. A caller varying the spoofable
+    prefix must keep hitting the same bucket."""
     client = _app(1, 60.0)
-    headers = {"X-Forwarded-For": "9.9.9.9, 10.0.0.1"}
-    assert client.get("/limited", headers=headers).status_code == 200
     assert (
-        client.get("/limited", headers={"X-Forwarded-For": "9.9.9.9"}).status_code
+        client.get(
+            "/limited", headers={"X-Forwarded-For": "fake-1, 9.9.9.9"}
+        ).status_code
+        == 200
+    )
+    # Different spoofed prefix, same real (last) hop: still rate-limited.
+    assert (
+        client.get(
+            "/limited", headers={"X-Forwarded-For": "fake-2, 9.9.9.9"}
+        ).status_code
         == 429
     )

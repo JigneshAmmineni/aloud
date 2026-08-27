@@ -117,7 +117,18 @@ async def email_check(request: Request):
     email = str(body.get("email", "")).strip()
     if not email:
         raise HTTPException(status_code=400, detail="email is required")
-    registered = await run_in_threadpool(auth.email_exists, email)
+    try:
+        registered = await run_in_threadpool(auth.email_exists, email)
+    except Exception:
+        # Transient Firebase failure on an unauthenticated route: a clean
+        # retryable signal, not a 500.
+        logger.bind(component="app.auth", event="auth.email_check_failed").warning(
+            "email pre-check failed upstream"
+        )
+        raise HTTPException(status_code=503, detail="Try again shortly")
+    logger.bind(
+        component="app.auth", event="auth.email_check", registered=registered
+    ).info("signup availability pre-check")
     return {"registered": registered}
 
 

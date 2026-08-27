@@ -137,6 +137,10 @@ def email_exists(email: str) -> bool:
         return True
     except fb_auth.UserNotFoundError:
         return False
+    except ValueError:
+        # Malformed email — nothing registered under it, and answering
+        # "not registered" reveals nothing.
+        return False
 
 
 # --- Admin account operations (FR-29) — provider-aware, so they live here. ---

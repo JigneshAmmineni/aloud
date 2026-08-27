@@ -127,11 +127,19 @@ export default function LoginPage() {
   const signUpCheck = () =>
     run(async () => {
       if (!validate()) return;
-      const res = await fetch("/api/auth/email-check", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: email.trim() }),
-      });
+      let res: Response;
+      try {
+        res = await fetch("/api/auth/email-check", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: email.trim() }),
+        });
+      } catch {
+        // Network failure gets the pre-check's own copy, not the generic
+        // sign-in error.
+        setError("Couldn't check that email — try again.");
+        return;
+      }
       if (res.status === 429) {
         setError("Too many attempts — wait a minute and try again.");
         return;
