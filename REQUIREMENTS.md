@@ -97,7 +97,9 @@ Caddy `basic_auth` gate, which is removed at rollout.
   `user_id: str` with no default value.
 - **FR-24** On first authenticated request, a `users` row keyed by the
   Firebase `uid` is auto-provisioned in Postgres. The `uid` is the foreign key
-  for all user-owned data. The row stores the user's preferred name — from the
+  for all user-owned data. Provisioning is an atomic upsert keyed on the
+  unique `uid` (e.g. `INSERT ... ON CONFLICT DO NOTHING`), so concurrent
+  first requests cannot race into duplicates or errors. The row stores the user's preferred name — from the
   signup form (FR-30) or the Google profile. (Feeding the name into the
   agent's system prompt is deferred — see §6.)
 - **FR-25** Email/password signup sends Firebase's verification link, but
@@ -129,6 +131,11 @@ Caddy `basic_auth` gate, which is removed at rollout.
     shows "sign in with your original method" (no automatic linking).
   - (g) Email+password sign-in with correct credentials on an account that
     holds a password → signed in (the base case, stated for completeness).
+  - Accepted enumeration exceptions: (e) and (f) necessarily reveal that an
+    email is already registered. Firebase does not suppress either error
+    (documented behavior — enumeration protection covers sign-in, not signup
+    or OAuth collisions), so these are deliberate, documented exceptions to
+    (d)'s non-enumeration rule — not oversights.
 - **FR-27** The user can sign out, landing back on `/login`. Password accounts
   can reset their password via Firebase's emailed reset link; the
   reset-request confirmation is non-enumerating ("If an account exists for
@@ -142,13 +149,16 @@ Caddy `basic_auth` gate, which is removed at rollout.
   admin identifier (email or uid) lives in the repo, env, or DB.
 - **FR-29** Admin capabilities in this feature: list accounts (uid, email,
   providers, created, disabled, last sign-in) and disable/enable an account.
-  Disabling also revokes the user's refresh tokens, and session start
-  (`/start`) verifies with `check_revoked=True`, so a disabled user cannot
-  open a new session; other endpoints may rely on the ≤1h token expiry.
-  Accepted v1 limitation: disabling does not terminate an already-connected
-  voice session (tokens are not re-verified mid-session) — it blocks new
-  requests and new sessions. (Per-user usage metrics belong to the
-  observability feature, not this one.)
+  Disabling also revokes the user's refresh tokens. Deliberate v1 disable
+  semantics, in effect-order:
+  - New sessions are blocked immediately: `/start` verifies with
+    `check_revoked=True` — an accepted extra network round trip on session
+    bootstrap (one-time, off the NFR-1 hot path), paid so lockout is instant.
+  - Other endpoints verify locally, so remaining API access dies when the
+    current token expires (≤1h).
+  - An already-connected voice session is not terminated; it runs until it
+    ends naturally, and no new session can follow it.
+  (Per-user usage metrics belong to the observability feature, not this one.)
 - **FR-30** Frontend: a `/login` page; unauthenticated visits redirect there.
   Layout, top to bottom: email field; password field; two side-by-side buttons
   directly under the password field — "Sign in" (left) and "Sign up" (right),
@@ -181,6 +191,13 @@ Caddy `basic_auth` gate, which is removed at rollout.
   copy follows FR-26(d); an "Admin" nav item renders only when the token
   carries the admin claim (cosmetic — the server enforces regardless). Finer
   visual design is not specified; NFR-3 (mobile browsers) applies.
+- **FR-31** Postgres row-level security is enabled on every table holding
+  user-owned rows (sessions, transcript events, artifacts, and any table this
+  feature adds), with policies restricting access to rows matching the
+  request's verified `user_id`. The implementation PR must include a test
+  proving cross-user rows are not returned even when application-level
+  scoping is bypassed (i.e., a query missing its `WHERE user_id` filter comes
+  back empty, not with another user's rows).
 
 ---
 
@@ -202,8 +219,8 @@ Caddy `basic_auth` gate, which is removed at rollout.
 - **NFR-8** User isolation: no authenticated user can read or write another
   user's data. Every query on user-owned tables is scoped by the verified
   `user_id`, with Postgres row-level security enabled on those tables as
-  defense-in-depth. Auth/scoping changes require a negative test (user A
-  cannot reach user B's data).
+  defense-in-depth (FR-31). Auth/scoping changes require a negative test
+  (user A cannot reach user B's data).
 
 ---
 
