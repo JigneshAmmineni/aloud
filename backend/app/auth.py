@@ -127,6 +127,18 @@ async def get_current_admin(
     return user
 
 
+def email_exists(email: str) -> bool:
+    """Signup pre-check (FR-30). A deliberate, rate-limited enumeration
+    exception per FR-26: signup unavoidably reveals existence via
+    email-already-in-use anyway — this surfaces the same fact one click
+    earlier, before the form expands."""
+    try:
+        fb_auth.get_user_by_email(email, app=_firebase())
+        return True
+    except fb_auth.UserNotFoundError:
+        return False
+
+
 # --- Admin account operations (FR-29) — provider-aware, so they live here. ---
 
 

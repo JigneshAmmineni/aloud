@@ -91,6 +91,47 @@ def test_start_verifies_with_check_revoked_and_binds_session_to_uid(
     assert main.active_sessions[session_id]["user_id"] == "uid-42"
 
 
+def test_email_check_reports_registration_status(client, monkeypatch):
+    """FR-30 signup pre-check: unauthenticated by design, answers from the
+    auth seam. Unique X-Forwarded-For per test keeps rate-limit buckets
+    isolated across the suite."""
+    monkeypatch.setattr(auth_mod, "email_exists", lambda e: e == "taken@x.com")
+    taken = client.post(
+        "/api/auth/email-check",
+        json={"email": "taken@x.com"},
+        headers={"X-Forwarded-For": "10.1.0.1"},
+    )
+    free = client.post(
+        "/api/auth/email-check",
+        json={"email": "free@x.com"},
+        headers={"X-Forwarded-For": "10.1.0.2"},
+    )
+    assert taken.json() == {"registered": True}
+    assert free.json() == {"registered": False}
+
+
+def test_email_check_requires_an_email(client):
+    resp = client.post(
+        "/api/auth/email-check",
+        json={},
+        headers={"X-Forwarded-For": "10.1.0.3"},
+    )
+    assert resp.status_code == 400
+
+
+def test_email_check_is_rate_limited(client, monkeypatch):
+    monkeypatch.setattr(auth_mod, "email_exists", lambda e: False)
+    headers = {"X-Forwarded-For": "10.1.0.4"}
+    statuses = [
+        client.post(
+            "/api/auth/email-check", json={"email": "a@b.com"}, headers=headers
+        ).status_code
+        for _ in range(6)
+    ]
+    assert statuses[:5] == [200] * 5
+    assert statuses[5] == 429
+
+
 def test_ice_patch_verifies_with_check_revoked(client, monkeypatch):
     """FR-29: the trickle-ICE PATCH is part of session establishment and
     pays the revocation check like /start and the offer."""

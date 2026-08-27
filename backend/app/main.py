@@ -33,6 +33,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
+from fastapi.concurrency import run_in_threadpool
 from loguru import logger
 from pipecat.transports.smallwebrtc.connection import IceServer, SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.request_handler import (
@@ -46,6 +47,7 @@ from app import admin, auth
 from app.auth import AuthedUser, get_current_user_checked, get_current_user_id
 from app.config import load_settings
 from app.documents import DocumentError, document_store, extract_text
+from app.ratelimit import rate_limited
 from db.engine import init_db
 from db.users_repo import provision_user
 
@@ -95,6 +97,28 @@ def _owned_session(session_id: str, user_id: str) -> dict:
 @app.get("/healthz")
 async def healthz():
     return {"status": "ok"}
+
+
+@app.post(
+    "/api/auth/email-check",
+    dependencies=[Depends(rate_limited(max_requests=5, window_s=60.0))],
+)
+async def email_check(request: Request):
+    """Signup pre-check (FR-30): is this email already registered?
+
+    Unauthenticated by necessity (the caller has no account yet) — which is
+    why it's rate-limited: it's a deliberate, bounded enumeration exception
+    (FR-26; signup's email-already-in-use reveals the same fact anyway).
+    Path lives under /api/ so Caddy routes it to the backend."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    email = str(body.get("email", "")).strip()
+    if not email:
+        raise HTTPException(status_code=400, detail="email is required")
+    registered = await run_in_threadpool(auth.email_exists, email)
+    return {"registered": registered}
 
 
 @app.post("/documents")

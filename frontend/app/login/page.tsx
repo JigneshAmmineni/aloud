@@ -3,8 +3,9 @@
 /**
  * /login (FR-30). One form serves sign-in and sign-up:
  *   email · password · [Sign in | Sign up] · [Continue with Google]
- * "Sign up" expands the form (preferred name + "Create account") instead of
- * creating anything — the visible email doubles as the confirmation step.
+ * "Sign up" first checks availability (rate-limited backend pre-check) and
+ * only then expands the form (preferred name + "Create account") — nothing
+ * is created until "Create account" is clicked.
  * Errors render inline and never clear the fields. Error copy follows
  * FR-26(d): one generic, non-enumerating message for all failed sign-ins.
  */
@@ -119,6 +120,34 @@ export default function LoginPage() {
       router.replace("/");
     });
 
+  // "Sign up" click: check availability BEFORE expanding the form (FR-30).
+  // The check is a rate-limited backend endpoint (the Admin SDK can answer
+  // without creating anything); creation still happens only at
+  // "Create account".
+  const signUpCheck = () =>
+    run(async () => {
+      if (!validate()) return;
+      const res = await fetch("/api/auth/email-check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: email.trim() }),
+      });
+      if (res.status === 429) {
+        setError("Too many attempts — wait a minute and try again.");
+        return;
+      }
+      if (!res.ok) {
+        setError("Couldn't check that email — try again.");
+        return;
+      }
+      const { registered } = (await res.json()) as { registered: boolean };
+      if (registered) {
+        setError("Already registered — sign in instead.");
+        return;
+      }
+      setSignupMode(true);
+    });
+
   const googleSignIn = () =>
     run(async () => {
       await signInWithPopup(auth, new GoogleAuthProvider());
@@ -197,11 +226,7 @@ export default function LoginPage() {
               type="button"
               className="login-btn"
               disabled={busy}
-              onClick={() => {
-                setError("");
-                setNotice("");
-                setSignupMode(true);
-              }}
+              onClick={signUpCheck}
             >
               Sign up
             </button>

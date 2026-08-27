@@ -91,7 +91,8 @@ VM is flat; Firebase is $0 at this scale.
 backend/
   app/        FastAPI app: main.py (routes, session wiring), auth.py (THE
               auth seam: token verification, admin ops), admin.py (/api/admin
-              router), config.py, documents.py (upload-time doc store)
+              router), ratelimit.py (in-memory per-caller limiter),
+              config.py, documents.py (upload-time doc store)
   agent/      companion.py (CompanionAgent: builds/runs one session's pipeline)
               providers.py (THE provider seam: all SDK construction)
               prompts.py, tools.py (create_artifact), sanitizer.py
@@ -174,7 +175,9 @@ panel, document upload; redirects to /login when signed out) · `/login`
 disable/enable; visible only with the admin claim).
 
 **Backend endpoints** (`backend/app/main.py`, `app/admin.py`): `GET /healthz`
-(the only unauthenticated route — infra probe, no user data) ·
+(unauthenticated infra probe) · `POST /api/auth/email-check` (unauthenticated
+by necessity, rate-limited — the signup availability pre-check, a documented
+FR-26 enumeration exception) ·
 `POST /documents` · `POST /start` (provisions the users row, mints the
 session, `check_revoked`) · `POST|PATCH /api/offer` and
 `POST|PATCH /sessions/{id}/api/offer` (WebRTC signaling, `check_revoked`,
