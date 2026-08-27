@@ -68,6 +68,23 @@ extraction), `python-dotenv`; dev/test: `pytest`, `aiosqlite`, `httpx`, `ruff`.
 `@pipecat-ai/client-js`, `@pipecat-ai/small-webrtc-transport`;
 dev: `typescript`, `@types/*`.
 
+### Provider accounts & usage dashboards
+
+Where the money goes and where to check remaining credits/usage. (Feature 2 —
+observability — will surface per-user consumption in-app; until then these
+consoles are the source of truth.)
+
+| Provider | Used for | Env key | Pricing model | Check usage at |
+|---|---|---|---|---|
+| Deepgram | STT + turn detection (Flux) | `DEEPGRAM_API_KEY` | pay-per-audio-minute against prepaid credits | [console.deepgram.com](https://console.deepgram.com) → Usage |
+| Google Gemini | LLM (2.5 Flash, thinking off) | `GOOGLE_API_KEY` (AI Studio key) | per input/output token | [aistudio.google.com/usage](https://aistudio.google.com/usage); paid-tier detail also under [GCP → APIs → Generative Language API](https://console.cloud.google.com/apis/api/generativelanguage.googleapis.com/metrics) |
+| Cartesia | TTS (Sonic-3) | `CARTESIA_API_KEY` | per-character credits on the subscription tier | [play.cartesia.ai](https://play.cartesia.ai) → Usage/Subscription |
+| Firebase Auth | identity (project `aloud-c74f5`) | service-account JSON | free ≤ 50K MAU (email/password + Google) | [Firebase console → Authentication → Usage](https://console.firebase.google.com/project/aloud-c74f5/authentication/usage) |
+| Google Cloud | the GCE VM, static IP, egress | — | ~$14–15/mo flat | [GCP Billing](https://console.cloud.google.com/billing) · [Compute Engine](https://console.cloud.google.com/compute/instances) |
+
+The three voice providers bill per use and dominate cost at demo scale; the
+VM is flat; Firebase is $0 at this scale.
+
 ## 3. Repository layout
 
 ```
