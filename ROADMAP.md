@@ -131,6 +131,25 @@ live. Still to add, roughly when its prerequisite feature lands:
 - **Evals** (retrieval recall, response quality) join the scheduled/nightly
   lane once features 5–6 provide the data they run on.
 
+## Known risks
+
+Carried over from the retired SDD's risk register — still live, revisit as
+features land:
+
+- **LLM question quality** — the product *is* question quality. Gemini Flash
+  (thinking disabled) is the bet; if it underwhelms, the swap lever is
+  `make_llm()` (Claude Sonnet was the runner-up). Decide after dogfooding,
+  not benchmarks.
+- **Barge-in depends on browser echo cancellation** — known flaky on mobile
+  Safari speakerphone/Bluetooth. Verify on real phones when touching
+  turn-taking.
+- **iOS screen lock kills web audio** — on-the-go use is screen-on only; a
+  native wrapper is the eventual fix, out of scope for now.
+- **Deepgram Flux pricing/quotas** at sustained usage — verify before any
+  public launch.
+- **Eager end-of-turn** (speculative LLM calls) trades cost for latency — a
+  lever to pull only if measurements demand it.
+
 ## Working notes
 
 [auth.md](auth.md) and [memory.md](memory.md) are brainstorming/learning notes,

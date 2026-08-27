@@ -70,4 +70,5 @@ Server-side encryption (key held by us) is added post-MVP. To make this painless
 - [ROADMAP.md](ROADMAP.md) — feature order, vision, and process; PRs implement FRs specced from it
 - [REQUIREMENTS.md](REQUIREMENTS.md) — what the product must do (FR/NFR/constraints)
 - PLAN.md — scrap notes / future directions (deployment options, post-MVP ideas); local-only, gitignored
-- The original design docs (SDD.md, SDD-v2.md) were removed as stale; they live in git history. The implemented code is the design's source of truth.
+- [CURRENT-ARCHITECTURE.md](CURRENT-ARCHITECTURE.md) — living record of the stack, infrastructure, pages, processes, and decision log; update it in the same PR as any change to those
+- The original design docs (SDD.md, SDD-v2.md) were removed as stale; the implemented code is the design's source of truth. They remain readable at commit `a84df1b` (`git show a84df1b:SDD.md`, `git show a84df1b:SDD-v2.md`) — e.g., for future blog posts.
