@@ -27,7 +27,7 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           use_sticky_comment: true # re-reviews update one comment instead of stacking
           claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh run view:*)"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh run view:*),Bash(gh pr comment:*)"
             --max-turns 30
           prompt: |
             Review PR #${{ github.event.pull_request.number }} in ${{ github.repository }}.
@@ -106,8 +106,13 @@ jobs:
                senior-level coding practices, not only blocking problems.
 
             ## Output rules
-            - Post line-specific findings as inline comments on the diff; put
-              the overall summary in the review comment.
+            - Post line-specific findings as inline comments using
+              mcp__github_inline_comment__create_inline_comment with
+              confirmed: true — comments left unconfirmed are silently
+              discarded when the job ends, never posted.
+            - Post the overall summary and the final verdict as a PR comment
+              via `gh pr comment` — text that only reaches the workflow log
+              is invisible to the author.
             - Order findings by severity: blocking issues first, then
               "nit:"-prefixed suggestions. Aim for roughly 10 findings,
               leading with what matters most — a soft cap: exceed it freely
