@@ -1,11 +1,12 @@
 # Aloud — Roadmap
 
-The plan-level source of truth: what gets built, in what order, and why that
-order. Deliberately coarse — each feature gets its detailed, testable
-requirements (numbered FRs with acceptance criteria) added to
-[REQUIREMENTS.md](REQUIREMENTS.md) **just before** that feature starts, not all
-up front. PRs reference the FRs they implement; reviews check the diff against
-them.
+A loosely guiding document: intended feature order, vision, and direction —
+**not** a source of truth for what gets implemented. Each feature starts only
+on the author's explicit instructions, and its contract is the FR section
+added to [REQUIREMENTS.md](REQUIREMENTS.md) at that point (numbered FRs with
+acceptance criteria). PRs reference the FRs they implement; reviews check the
+diff against those FRs, not against this document. Items marked *optional*
+here are aspirational notes and carry no weight in specs or reviews.
 
 ## Vision
 
@@ -34,12 +35,15 @@ Replace the single site-wide password gate with real per-user accounts.
   backend. Repo functions take `user_id: str` and never know where it came from.
 - `user_id` always originates from server-side credential verification, never
   from anything the client sends in a payload.
-- Signup/login, session credential handling, and an account-gating policy
-  (closed signup / whitelist to start).
+- Provider: Firebase Auth — Google sign-in + email/password, open signup.
+  Bearer ID tokens verified server-side via firebase-admin inside the
+  dependency; the seam keeps the provider swappable.
+- Admin controls (gated to admin accounts only): list users, see usage,
+  disable/enable users. The admin surface grows into feature 2.
 - Postgres row-level security turns on when multi-user lands — not deferred.
-- Provider decision (managed e.g. Supabase Auth vs. hand-rolled sessions) is
-  recorded in REQUIREMENTS.md when this feature is specced; the dependency seam
-  makes it swappable either way.
+- *Optional:* account-linking UI — a settings flow to link/unlink providers on
+  one account (e.g., add a password to a Google account). Aspirational note
+  only; not part of any spec or review until explicitly instructed.
 
 ### 2. Observability — per-user usage & admin view
 
