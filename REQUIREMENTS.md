@@ -97,7 +97,9 @@ Caddy `basic_auth` gate, which is removed at rollout.
   `user_id: str` with no default value.
 - **FR-24** On first authenticated request, a `users` row keyed by the
   Firebase `uid` is auto-provisioned in Postgres. The `uid` is the foreign key
-  for all user-owned data.
+  for all user-owned data. The row stores the user's preferred name — from the
+  signup form (FR-30) or the Google profile — and the agent's system prompt
+  receives it so the agent can address the user by name.
 - **FR-25** Email/password signup sends Firebase's verification link, but
   access is **not** gated on it: unverified accounts are fully functional
   (smooth-UX decision for the demo). Accepted consequence: an unverified
@@ -143,13 +145,22 @@ Caddy `basic_auth` gate, which is removed at rollout.
   Layout, top to bottom: email field; password field; two side-by-side buttons
   directly under the password field — "Sign in" (left) and "Sign up" (right),
   their combined width equal to the field width; below them a
-  "Sign in with Google" button with the Google logo, same width as the fields;
-  a "Forgot password?" text link (FR-27's reset entry point). One form serves
-  both sign-in and sign-up. Testable UI notes: signed-out / loading / error
-  states exist; error copy follows FR-26(d); an "Admin" nav item renders only
-  when the token carries the admin claim (cosmetic — the server enforces
-  regardless). Finer visual design is not specified; NFR-3 (mobile browsers)
-  applies.
+  "Sign in with Google" button with the Google logo, same width as the fields.
+  One form serves both sign-in and sign-up. Behavior:
+  - Errors render inline and never clear the form — both fields keep their
+    values on any failed attempt (mistaken "Sign up" on an existing account
+    shows FR-26(e)'s small error with everything still filled in).
+  - "Forgot password?" is not shown initially; it appears below the buttons
+    after a failed sign-in attempt (FR-27's reset entry point).
+  - "Sign up" does not create the account immediately: the form switches to
+    signup mode — credentials stay in place, a "Preferred name" field appears,
+    and the action becomes an explicit "Create account". The still-visible
+    email doubles as the confirmation step; no re-entry, no dialog. The
+    preferred name is saved to the user's profile at creation.
+  Testable UI notes: signed-out / loading / error states exist; sign-in error
+  copy follows FR-26(d); an "Admin" nav item renders only when the token
+  carries the admin claim (cosmetic — the server enforces regardless). Finer
+  visual design is not specified; NFR-3 (mobile browsers) applies.
 
 ---
 
