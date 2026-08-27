@@ -4,7 +4,12 @@ import pytest
 
 from app.config import _env_bool, _env_float, load_settings
 
-_REQUIRED = ("DEEPGRAM_API_KEY", "GOOGLE_API_KEY", "CARTESIA_API_KEY")
+_REQUIRED = (
+    "DEEPGRAM_API_KEY",
+    "GOOGLE_API_KEY",
+    "CARTESIA_API_KEY",
+    "FIREBASE_SERVICE_ACCOUNT_PATH",
+)
 _OPTIONAL = (
     "CARTESIA_VOICE_ID",
     "LLM_MODEL",

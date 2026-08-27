@@ -9,7 +9,7 @@ from sqlalchemy import select
 import agent.tools as tools
 from agent.tools import ARTIFACT_KINDS, make_create_artifact_handler, tool_schemas
 from db.engine import init_db, session_factory
-from db.models import Artifact, Session
+from db.models import Artifact
 from db.sessions_repo import create_session_row
 from db.users_repo import provision_user
 
