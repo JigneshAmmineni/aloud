@@ -1,5 +1,6 @@
 # secrets — never commit; work against .env.example
 .env
+*firebase-adminsdk*.json
 
 # python
 __pycache__/
