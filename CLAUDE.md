@@ -45,7 +45,7 @@ Cloud processing is fine — the privacy policy discloses that voice and transcr
 
 Server-side encryption (key held by us) is added post-MVP. To make this painless:
 - **Keep sensitive columns clearly separated from metadata at schema design time.** Transcripts, summaries, memory entries, and artifacts get their own columns; timestamps, IDs, and session metadata stay unencrypted.
-- Adding `pgcrypto` or app-level AES to bounded columns later is straightforward if the schema is clean. The schema in SDD.md §3 marks every sensitive column.
+- Adding `pgcrypto` or app-level AES to bounded columns later is straightforward if the schema is clean. Sensitive columns are the content-bearing ones in `db/models.py` (transcript text, artifact title/content, and future memory entries).
 
 ---
 
@@ -69,6 +69,5 @@ Server-side encryption (key held by us) is added post-MVP. To make this painless
 
 - [ROADMAP.md](ROADMAP.md) — feature order, vision, and process; PRs implement FRs specced from it
 - [REQUIREMENTS.md](REQUIREMENTS.md) — what the product must do (FR/NFR/constraints)
-- [SDD.md](SDD.md) — software design, Pipecat-based (the version to build)
-- [SDD-v2.md](SDD-v2.md) — alternative fully hand-rolled design, for learning value
 - PLAN.md — scrap notes / future directions (deployment options, post-MVP ideas); local-only, gitignored
+- The original design docs (SDD.md, SDD-v2.md) were removed as stale; they live in git history. The implemented code is the design's source of truth.
