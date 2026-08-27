@@ -96,26 +96,35 @@ Caddy `basic_auth` gate, which is removed at rollout.
   from a request body, query param, or client-set header. Repo functions take
   `user_id: str` with no default value.
 - **FR-24** A `users` row keyed by the Firebase `uid` is auto-provisioned in
-  Postgres by the endpoints that create user-owned rows (`/start`,
-  `/documents`) — not inside `get_current_user_id`, which stays a pure
-  verifier with no DB writes (no per-request write amplification). The `uid` is the foreign key
+  Postgres at `/start` — the one endpoint that begins creating user-owned
+  rows (the upload-time document store is in-memory; no row needed) — not
+  inside `get_current_user_id`, which stays a pure verifier with no DB writes
+  (no per-request write amplification). The `uid` is the foreign key
   for all user-owned data. Provisioning is an atomic upsert keyed on the
   unique `uid`, so concurrent first requests cannot race into duplicates or
-  errors — and when the request carries profile fields (the signup flow's
-  preferred name, FR-30), the upsert backfills them **fill-only**
+  errors — and when the verified token carries profile fields, the upsert
+  backfills them **fill-only**
   (`ON CONFLICT DO UPDATE` with `COALESCE`: a provided value fills a missing
   one; an absent value never overwrites a stored one). Neither ordering —
   nameless provision first or named signup first — can drop or null the name.
-  The row stores the user's preferred name — from the
-  signup form (FR-30) or the Google profile. (Feeding the name into the
-  agent's system prompt is deferred — see §6.)
+  The row stores the user's preferred name, read from the verified ID
+  token's `name` claim — set as the Firebase profile `displayName` by the
+  signup form (FR-30; the client refreshes its token after signup so the
+  claim appears) or by Google's own profile. The name is never read from a
+  request body — same provenance rule as `user_id`. (Feeding the name into
+  the agent's system prompt is deferred — see §6.)
 - **FR-25** Email/password signup sends Firebase's verification link, but
   access is **not** gated on it: unverified accounts are fully functional
-  (smooth-UX decision for the demo). Accepted consequence: an unverified
-  password account that is later claimed by a Google sign-in on the same
-  address loses its password per FR-26(c); the admin grant script still
-  refuses unverified targets per FR-28. Google sign-ins are verified from the
-  start.
+  (smooth-UX decision for the demo). Accepted demo-scale consequences:
+  (a) an unverified password account later claimed by a Google sign-in on the
+  same address loses its password per FR-26(c); (b) the sharper version: an
+  attacker can pre-register someone else's email (unverified but fully
+  functional) and accumulate data under that `uid` — the real owner's later
+  Google sign-in inherits that polluted account. Accepted only while access
+  is a closed demo; **before any public launch**, an FR-26(c) takeover of a
+  never-verified account must purge (or quarantine) that account's prior
+  user-owned rows. The admin grant script still refuses unverified targets
+  per FR-28. Google sign-ins are verified from the start.
 - **FR-26** Sign-in/sign-up behavior per method, under Firebase's default
   one-account-per-email policy with email-enumeration protection ON:
   - (a) Google, new email → account created and signed in.
@@ -218,7 +227,12 @@ Caddy `basic_auth` gate, which is removed at rollout.
   HTTP layer — the per-session background transcript writer today, the memory
   loop later — set `app.user_id` the same way, from the session state they
   were created with at `/start`; they are per-session, so a write batch never
-  spans users. The implementation PR must include a test
+  spans users. RLS only binds if the connecting role cannot bypass it: the
+  application connects as a dedicated `NOSUPERUSER` role with `NOBYPASSRLS`
+  that does not own the tables (or the tables set `FORCE ROW LEVEL
+  SECURITY`) — the compose default `aloud` user is a Postgres superuser,
+  which silently bypasses every policy. The FR-31 test must run through the
+  application's actual connection role. The implementation PR must include a test
   proving cross-user rows are not returned even when application-level
   scoping is bypassed (i.e., a query missing its `WHERE user_id` filter comes
   back empty, not with another user's rows).
