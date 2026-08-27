@@ -100,9 +100,11 @@ Caddy `basic_auth` gate, which is removed at rollout.
   for all user-owned data. Provisioning is an atomic upsert keyed on the
   unique `uid`, so concurrent first requests cannot race into duplicates or
   errors — and when the request carries profile fields (the signup flow's
-  preferred name, FR-30), the upsert backfills them (`ON CONFLICT DO
-  UPDATE`), so a nameless provisioning call landing first cannot permanently
-  drop the name. The row stores the user's preferred name — from the
+  preferred name, FR-30), the upsert backfills them **fill-only**
+  (`ON CONFLICT DO UPDATE` with `COALESCE`: a provided value fills a missing
+  one; an absent value never overwrites a stored one). Neither ordering —
+  nameless provision first or named signup first — can drop or null the name.
+  The row stores the user's preferred name — from the
   signup form (FR-30) or the Google profile. (Feeding the name into the
   agent's system prompt is deferred — see §6.)
 - **FR-25** Email/password signup sends Firebase's verification link, but
@@ -200,7 +202,11 @@ Caddy `basic_auth` gate, which is removed at rollout.
   user-owned rows (sessions, transcript events, artifacts, and any table this
   feature adds), with policies restricting access to rows matching the
   request's verified `user_id` (communicated to Postgres per request via
-  `SET LOCAL app.user_id` in the DB session factory). The implementation PR must include a test
+  `SET LOCAL app.user_id` in the DB session factory). Writers that bypass the
+  HTTP layer — the per-session background transcript writer today, the memory
+  loop later — set `app.user_id` the same way, from the session state they
+  were created with at `/start`; they are per-session, so a write batch never
+  spans users. The implementation PR must include a test
   proving cross-user rows are not returned even when application-level
   scoping is bypassed (i.e., a query missing its `WHERE user_id` filter comes
   back empty, not with another user's rows).
