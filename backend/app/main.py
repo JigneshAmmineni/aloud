@@ -114,17 +114,24 @@ async def email_check(request: Request):
         body = await request.json()
     except Exception:
         body = {}
+    if not isinstance(body, dict):
+        # A valid-JSON non-object body ([], "x", 42, null) must be a clean
+        # 400 on this public route, never an AttributeError 500.
+        body = {}
     email = str(body.get("email", "")).strip()
     if not email:
         raise HTTPException(status_code=400, detail="email is required")
     try:
         registered = await run_in_threadpool(auth.email_exists, email)
-    except Exception:
+    except Exception as e:
         # Transient Firebase failure on an unauthenticated route: a clean
-        # retryable signal, not a 500.
-        logger.bind(component="app.auth", event="auth.email_check_failed").warning(
-            "email pre-check failed upstream"
-        )
+        # retryable signal, not a 500 — with the cause distinguishable in
+        # the server-side log.
+        logger.bind(
+            component="app.auth",
+            event="auth.email_check_failed",
+            error_type=type(e).__name__,
+        ).warning("email pre-check failed upstream")
         raise HTTPException(status_code=503, detail="Try again shortly")
     logger.bind(
         component="app.auth", event="auth.email_check", registered=registered

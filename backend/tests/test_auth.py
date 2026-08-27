@@ -119,6 +119,18 @@ def test_email_check_requires_an_email(client):
     assert resp.status_code == 400
 
 
+@pytest.mark.parametrize("body", [[], "x", 42, None])
+def test_email_check_rejects_non_object_bodies_cleanly(client, body):
+    """Valid JSON that isn't an object must 400, never 500 — this is a
+    public route any anonymous caller can hit."""
+    resp = client.post(
+        "/api/auth/email-check",
+        json=body,
+        headers={"X-Forwarded-For": "10.1.0.6"},
+    )
+    assert resp.status_code == 400
+
+
 def test_email_check_returns_503_when_upstream_fails(client, monkeypatch):
     """A Firebase outage must surface as a retryable error — never as
     'not registered' (which would tell signup every email is available)."""
