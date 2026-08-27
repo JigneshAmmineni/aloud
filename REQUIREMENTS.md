@@ -98,10 +98,13 @@ Caddy `basic_auth` gate, which is removed at rollout.
 - **FR-24** On first authenticated request, a `users` row keyed by the
   Firebase `uid` is auto-provisioned in Postgres. The `uid` is the foreign key
   for all user-owned data.
-- **FR-25** Email/password signups must verify their address: signup sends
-  Firebase's verification link; until `email_verified` is true the app shows a
-  "verify your email" screen and the backend rejects API access (403). Google
-  sign-ins are verified from the start and skip this.
+- **FR-25** Email/password signup sends Firebase's verification link, but
+  access is **not** gated on it: unverified accounts are fully functional
+  (smooth-UX decision for the demo). Accepted consequence: an unverified
+  password account that is later claimed by a Google sign-in on the same
+  address loses its password per FR-26(c); the admin grant script still
+  refuses unverified targets per FR-28. Google sign-ins are verified from the
+  start.
 - **FR-26** Sign-in/sign-up behavior per method, under Firebase's default
   one-account-per-email policy with email-enumeration protection ON:
   - (a) Google, new email → account created and signed in.
@@ -136,12 +139,17 @@ Caddy `basic_auth` gate, which is removed at rollout.
   (`/start`) verifies with `check_revoked=True`, so a disabled user cannot
   open a new session; other endpoints may rely on the ≤1h token expiry.
   (Per-user usage metrics belong to the observability feature, not this one.)
-- **FR-30** Frontend: a `/login` page (Google button, email/password sign-in
-  and signup, password reset); unauthenticated visits redirect there. Testable
-  UI notes: signed-out / loading / error states exist; error copy follows
-  FR-26(d); an "Admin" nav item renders only when the token carries the admin
-  claim (cosmetic — the server enforces regardless). Visual design is not
-  specified here; NFR-3 (mobile browsers) applies.
+- **FR-30** Frontend: a `/login` page; unauthenticated visits redirect there.
+  Layout, top to bottom: email field; password field; two side-by-side buttons
+  directly under the password field — "Sign in" (left) and "Sign up" (right),
+  their combined width equal to the field width; below them a
+  "Sign in with Google" button with the Google logo, same width as the fields;
+  a "Forgot password?" text link (FR-27's reset entry point). One form serves
+  both sign-in and sign-up. Testable UI notes: signed-out / loading / error
+  states exist; error copy follows FR-26(d); an "Admin" nav item renders only
+  when the token carries the admin claim (cosmetic — the server enforces
+  regardless). Finer visual design is not specified; NFR-3 (mobile browsers)
+  applies.
 
 ---
 
