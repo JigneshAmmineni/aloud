@@ -98,8 +98,11 @@ Caddy `basic_auth` gate, which is removed at rollout.
 - **FR-24** On first authenticated request, a `users` row keyed by the
   Firebase `uid` is auto-provisioned in Postgres. The `uid` is the foreign key
   for all user-owned data. Provisioning is an atomic upsert keyed on the
-  unique `uid` (e.g. `INSERT ... ON CONFLICT DO NOTHING`), so concurrent
-  first requests cannot race into duplicates or errors. The row stores the user's preferred name — from the
+  unique `uid`, so concurrent first requests cannot race into duplicates or
+  errors — and when the request carries profile fields (the signup flow's
+  preferred name, FR-30), the upsert backfills them (`ON CONFLICT DO
+  UPDATE`), so a nameless provisioning call landing first cannot permanently
+  drop the name. The row stores the user's preferred name — from the
   signup form (FR-30) or the Google profile. (Feeding the name into the
   agent's system prompt is deferred — see §6.)
 - **FR-25** Email/password signup sends Firebase's verification link, but
@@ -116,7 +119,9 @@ Caddy `basic_auth` gate, which is removed at rollout.
   - (c) Google, where an email+password account already holds that gmail →
     signs into the **same `uid`** (user data intact). If that account was
     never verified, Firebase removes its password credential (documented
-    takeover rule); the app treats this as a normal sign-in, not an error.
+    takeover rule); if it was verified, both providers coexist and the
+    password survives. Either way the app treats this as a normal sign-in,
+    not an error.
   - (d) Email+password sign-in against an account with no password credential
     (Google-born), or with wrong credentials → generic failure
     (`auth/invalid-credential`). The UI shows one non-enumerating message for
@@ -194,7 +199,8 @@ Caddy `basic_auth` gate, which is removed at rollout.
 - **FR-31** Postgres row-level security is enabled on every table holding
   user-owned rows (sessions, transcript events, artifacts, and any table this
   feature adds), with policies restricting access to rows matching the
-  request's verified `user_id`. The implementation PR must include a test
+  request's verified `user_id` (communicated to Postgres per request via
+  `SET LOCAL app.user_id` in the DB session factory). The implementation PR must include a test
   proving cross-user rows are not returned even when application-level
   scoping is bypassed (i.e., a query missing its `WHERE user_id` filter comes
   back empty, not with another user's rows).

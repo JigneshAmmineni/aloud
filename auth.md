@@ -1,3 +1,5 @@
+# Auth — personal notes (brainstorming/learning, not a spec)
+
 The design rule:
 
 Repo functions take a user_id: str and neither know nor care where it came from.

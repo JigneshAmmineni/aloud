@@ -38,8 +38,9 @@ Replace the single site-wide password gate with real per-user accounts.
 - Provider: Firebase Auth — Google sign-in + email/password, open signup.
   Bearer ID tokens verified server-side via firebase-admin inside the
   dependency; the seam keeps the provider swappable.
-- Admin controls (gated to admin accounts only): list users, see usage,
-  disable/enable users. The admin surface grows into feature 2.
+- Admin controls (gated to admin accounts only): list users and
+  disable/enable them. Usage views arrive with feature 2, which grows this
+  admin surface.
 - Postgres row-level security turns on when multi-user lands — not deferred.
 - *Optional:* account-linking UI — a settings flow to link/unlink providers on
   one account (e.g., add a password to a Google account). Aspirational note
@@ -84,8 +85,8 @@ control — the foundation the memory layer builds on.
   token accounting and instrumentation.
 - Spec-time decision: a custom context-management stage inside the Pipecat
   pipeline vs. a custom agent loop replacing the pipeline's LLM stage
-  (STT/TTS/transport stay on Pipecat either way; SDD-v2.md is background for
-  the hand-rolled direction).
+  (STT/TTS/transport stay on Pipecat either way; the old hand-rolled design
+  doc SDD-v2.md, kept in git history, is background for that direction).
 
 ### 5. Memory layer — cross-session memory
 
