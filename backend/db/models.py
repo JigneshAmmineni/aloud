@@ -1,4 +1,4 @@
-"""Schema (SDD §3). Sensitive content columns (🔒, encrypted post-MVP per
+"""Schema (recorded in CURRENT-ARCHITECTURE.md). Sensitive content columns (🔒, encrypted post-MVP per
 NFR-6) are kept separate from metadata — only `transcript_events.text` is
 sensitive in this slice; timestamps/IDs/status stay plaintext so queries and
 dashboards keep working when encryption lands.

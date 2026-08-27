@@ -20,7 +20,7 @@ A voice-first thinking partner for people who process ideas best by talking out 
 | LLM (default) | Gemini Flash — swappable; Claude Sonnet is the runner-up if question quality disappoints |
 | TTS | Cartesia Sonic-3 |
 | DB | PostgreSQL |
-| Auth | TBD (likely Supabase Auth or Auth.js); MVP runs single-user |
+| Auth | Firebase Auth — Google + email/password, Bearer ID tokens verified via firebase-admin in `get_current_user_id`; admin via custom claims (REQUIREMENTS.md §4.8) |
 
 ---
 
@@ -45,7 +45,7 @@ Cloud processing is fine — the privacy policy discloses that voice and transcr
 
 Server-side encryption (key held by us) is added post-MVP. To make this painless:
 - **Keep sensitive columns clearly separated from metadata at schema design time.** Transcripts, summaries, memory entries, and artifacts get their own columns; timestamps, IDs, and session metadata stay unencrypted.
-- Adding `pgcrypto` or app-level AES to bounded columns later is straightforward if the schema is clean. The schema in SDD.md §3 marks every sensitive column.
+- Adding `pgcrypto` or app-level AES to bounded columns later is straightforward if the schema is clean. Sensitive columns are the content-bearing ones in `db/models.py` (transcript text, artifact title/content, and future memory entries).
 
 ---
 
@@ -60,6 +60,7 @@ Server-side encryption (key held by us) is added post-MVP. To make this painless
 
 - Never describe the app as therapy or the agent as a therapist — in code, copy, system prompts, or documentation.
 - All provider SDK usage lives in `agent/providers.py` (factories) behind `CompanionAgent`. No direct SDK calls in route handlers or anywhere else.
+- A `user_id` reaching any repo function or query is only ever the output of server-side credential verification (`get_current_user_id`) — never read from a request body, query param, or client-set header. Repo signatures take `user_id: str` with no default value.
 - DB schema: sensitive content columns must be separable from metadata. Design for encryption even if you don't implement it yet.
 - Every pipeline stage is instrumented: structured logs with `session_id`/`turn_id`, per-stage latency, WARN over 1s per stage, ERROR over 3s end-of-speech → first audio.
 
@@ -69,6 +70,6 @@ Server-side encryption (key held by us) is added post-MVP. To make this painless
 
 - [ROADMAP.md](ROADMAP.md) — feature order, vision, and process; PRs implement FRs specced from it
 - [REQUIREMENTS.md](REQUIREMENTS.md) — what the product must do (FR/NFR/constraints)
-- [SDD.md](SDD.md) — software design, Pipecat-based (the version to build)
-- [SDD-v2.md](SDD-v2.md) — alternative fully hand-rolled design, for learning value
 - PLAN.md — scrap notes / future directions (deployment options, post-MVP ideas); local-only, gitignored
+- [CURRENT-ARCHITECTURE.md](CURRENT-ARCHITECTURE.md) — living record of the stack, infrastructure, pages, processes, and decision log; update it in the same PR as any change to those
+- The original design docs (SDD.md, SDD-v2.md) were removed as stale; the implemented code is the design's source of truth. They remain readable at commit `a84df1b` (`git show a84df1b:SDD.md`, `git show a84df1b:SDD-v2.md`) — e.g., for future blog posts.

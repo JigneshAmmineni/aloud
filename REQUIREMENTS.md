@@ -79,6 +79,164 @@ User explicitly asks for the agent's opinion, alternatives, or next steps. The a
 ### 4.7 Documents
 - **FR-21** Before a session, the user may attach one or more documents (plain text, Markdown, or PDF). The agent reads the attached documents and can reference and discuss them during the session. Attached documents are held in memory for that session only and are not persisted — see §6 (persistence is deferred to the future memory layer).
 
+### 4.8 Authentication & Accounts
+
+Provider decision: **Firebase Auth** — Google sign-in + email/password, open
+signup. Session credential: Firebase ID tokens attached as `Authorization:
+Bearer` on every API request (the client SDK silently refreshes them hourly);
+verified server-side with the `firebase-admin` SDK. Replaces the site-wide
+Caddy `basic_auth` gate, which is removed at rollout.
+
+- **FR-22** Anyone can create an account, no approval step, via (a) "Continue
+  with Google" or (b) email + password signup.
+- **FR-23** Every backend API request resolves to a verified `user_id` through
+  a single FastAPI dependency (`get_current_user_id`): verify the Bearer ID
+  token (signature, issuer, audience, expiry) via `firebase-admin`; `user_id`
+  = the token's `uid`. Missing/invalid token → 401. A `user_id` is never read
+  from a request body, query param, or client-set header. Repo functions take
+  `user_id: str` with no default value.
+- **FR-24** A `users` row keyed by the Firebase `uid` is auto-provisioned in
+  Postgres at `/start` — the one endpoint that begins creating user-owned
+  rows (the upload-time document store is in-memory; no row needed) — not
+  inside `get_current_user_id`, which stays a pure verifier with no DB writes
+  (no per-request write amplification). The `uid` is the foreign key
+  for all user-owned data. Provisioning is an atomic upsert keyed on the
+  unique `uid`, so concurrent first requests cannot race into duplicates or
+  errors — and when the verified token carries profile fields, the upsert
+  backfills them **fill-only**
+  (`ON CONFLICT DO UPDATE` with `COALESCE`: a provided value fills a missing
+  one; an absent value never overwrites a stored one). Neither ordering —
+  nameless provision first or named signup first — can drop or null the name.
+  The row stores the user's preferred name, read from the verified ID
+  token's `name` claim — set as the Firebase profile `displayName` by the
+  signup form (FR-30; the client refreshes its token after signup so the
+  claim appears) or by Google's own profile. The name is never read from a
+  request body — same provenance rule as `user_id`. (Feeding the name into
+  the agent's system prompt is deferred — see §6.)
+- **FR-25** Email/password signup sends Firebase's verification link, but
+  access is **not** gated on it: unverified accounts are fully functional
+  (smooth-UX decision for the demo). Accepted demo-scale consequences:
+  (a) an unverified password account later claimed by a Google sign-in on the
+  same address loses its password per FR-26(c); (b) the sharper version: an
+  attacker can pre-register someone else's email (unverified but fully
+  functional) and accumulate data under that `uid` — the real owner's later
+  Google sign-in inherits that polluted account. Accepted only while access
+  is a closed demo; **before any public launch**, an FR-26(c) takeover of a
+  never-verified account must purge (or quarantine) that account's prior
+  user-owned rows. The admin grant script still refuses unverified targets
+  per FR-28. Google sign-ins are verified from the start.
+- **FR-26** Sign-in/sign-up behavior per method, under Firebase's default
+  one-account-per-email policy with email-enumeration protection ON:
+  - (a) Google, new email → account created and signed in.
+  - (b) Google, existing Google account → signs into the same account.
+  - (c) Google, where an email+password account already holds that gmail →
+    signs into the **same `uid`** (user data intact). If that account was
+    never verified, Firebase removes its password credential (the documented
+    trusted-provider takeover rule — see
+    https://firebase.google.com/docs/auth/web/google-signin and the
+    "verified email addresses" section of
+    https://firebase.google.com/docs/auth/users); if it was verified, both
+    providers coexist and the
+    password survives. Either way the app treats this as a normal sign-in,
+    not an error.
+  - (d) Email+password sign-in against an account with no password credential
+    (Google-born), or with wrong credentials → generic failure
+    (`auth/invalid-credential`). The UI shows one non-enumerating message for
+    all failed sign-ins (e.g. "Sign-in failed. Check your credentials, or try
+    continuing with Google.") and never reveals whether an email is registered
+    or which methods it uses.
+  - (e) Email+password sign-up with an email already in use →
+    `auth/email-already-in-use`, surfaced as "already registered — sign in
+    instead."
+  - (f) Google sign-in asserting a non-gmail address that belongs to an
+    existing account → `auth/account-exists-with-different-credential`; v1
+    shows "sign in with your original method" (no automatic linking).
+  - (g) Email+password sign-in with correct credentials on an account that
+    holds a password → signed in (the base case, stated for completeness).
+  - Accepted enumeration exceptions: (e) and (f) necessarily reveal that an
+    email is already registered. Firebase does not suppress either error
+    (documented behavior — enumeration protection covers sign-in, not signup
+    or OAuth collisions), so these are deliberate, documented exceptions to
+    (d)'s non-enumeration rule — not oversights.
+- **FR-27** The user can sign out, landing back on `/login`. Password accounts
+  can reset their password via Firebase's emailed reset link; the
+  reset-request confirmation is non-enumerating ("If an account exists for
+  this email, a reset link has been sent") regardless of whether the email is
+  registered.
+- **FR-28** Admin access is granted by the Firebase custom claim
+  `admin: true`, checked server-side on every admin request by a second
+  dependency (`get_current_admin`; 403 otherwise). Claims are granted/revoked
+  only by a committed script run locally with the service-account credential;
+  the script must refuse a target account whose `email_verified` is false. No
+  admin identifier (email or uid) lives in the repo, env, or DB.
+- **FR-29** Admin capabilities in this feature: list accounts (uid, email,
+  providers, created, disabled, last sign-in) and disable/enable an account.
+  Disabling also revokes the user's refresh tokens. Deliberate v1 disable
+  semantics, in effect-order:
+  - New sessions are blocked immediately: `/start` and the session-establishment
+    signaling endpoints (`/api/offer`, `/sessions/{id}/api/offer`) verify with
+    `check_revoked=True` — an accepted extra network round trip on session
+    bootstrap (off the NFR-1 hot path), paid so lockout is instant and a
+    disable landing mid-handshake cannot still complete a session.
+  - Other endpoints verify locally, so remaining API access dies when the
+    current token expires (≤1h).
+  - An already-connected voice session is not terminated; it runs until it
+    ends naturally, and no new session can follow it.
+  (Per-user usage metrics belong to the observability feature, not this one.)
+- **FR-30** Frontend: a `/login` page; unauthenticated visits redirect there.
+  Layout, top to bottom: email field; password field; two side-by-side buttons
+  directly under the password field — "Sign in" (left) and "Sign up" (right),
+  their combined width equal to the field width; below them a
+  "Sign in with Google" button with the Google logo, same width as the fields.
+  One form serves both sign-in and sign-up. Behavior:
+  - Errors render inline and never clear the form — both fields keep their
+    values on any failed attempt (mistaken "Sign up" on an existing account
+    shows FR-26(e)'s small error with everything still filled in).
+  - "Forgot password?" is small hyperlink text (not a button) under the
+    fields, always visible (FR-27's reset entry point).
+  - "Sign up" does not create the account immediately: the form switches to
+    signup mode — credentials stay in place, a "Preferred name" field appears,
+    and the side-by-side buttons are replaced by a single explicit
+    "Create account" action. The still-visible email doubles as the
+    confirmation step; no re-entry, no dialog. On success the user is signed
+    in and taken into the app (verification email sent per FR-25); the
+    preferred name — length-limited and escaped wherever displayed — is saved
+    to the user's profile at creation.
+  - In signup mode, "Already have an account?" hyperlink text sits at the
+    bottom of the form; clicking it reverts to sign-in mode with the email and
+    password fields keeping whatever is already typed.
+  - Empty or malformed inputs are rejected inline before any Firebase call;
+    Firebase-side errors (e.g., password too short) surface inline the same
+    way, keeping field values.
+  - Already-signed-in visits to `/login` redirect into the app. If `/login`
+    supports a post-login redirect parameter, it accepts only same-origin
+    paths (no open redirect).
+  Testable UI notes: signed-out / loading / error states exist; sign-in error
+  copy follows FR-26(d); an "Admin" nav item renders only when the token
+  carries the admin claim (cosmetic — the server enforces regardless). Finer
+  visual design is not specified; NFR-3 (mobile browsers) applies.
+- **FR-31** Postgres row-level security is enabled on every table holding
+  user-owned rows (sessions, transcript events, artifacts, and any table this
+  feature adds), with policies restricting access to rows matching the
+  request's verified `user_id` (communicated to Postgres per request via
+  `SET LOCAL app.user_id` in the DB session factory — `SET LOCAL` specifically
+  because it is transaction-scoped: it must run inside the same transaction as
+  the queries it scopes and resets at commit, so a pooled connection can never
+  carry a stale `user_id` into another request. The FR-31 test must cover
+  pooled-connection reuse). Writers that bypass the
+  HTTP layer — the per-session background transcript writer today, the memory
+  loop later — set `app.user_id` the same way, from the session state they
+  were created with at `/start`; they are per-session, so a write batch never
+  spans users. RLS only binds if the connecting role cannot bypass it: the
+  application connects as a dedicated `NOSUPERUSER` role with `NOBYPASSRLS`
+  that does not own the tables (or the tables set `FORCE ROW LEVEL
+  SECURITY`) — the compose default `aloud` user is a Postgres superuser,
+  which silently bypasses every policy. The FR-31 test must run through the
+  application's actual connection role. The implementation PR must include a test
+  proving cross-user rows are not returned even when application-level
+  scoping is bypassed (i.e., a query missing its `WHERE user_id` filter comes
+  back empty, not with another user's rows).
+
 ---
 
 ## 5. Non-Functional Requirements
@@ -96,6 +254,11 @@ User explicitly asks for the agent's opinion, alternatives, or next steps. The a
 - **NFR-5** All voice data and transcripts are processed server-side. The privacy policy must disclose this clearly.
 - **NFR-6** Sensitive session content (transcripts, artifacts, future memory entries) must live in dedicated database columns, separable from session metadata, so that encryption at rest can be added post-MVP without schema rework. The encryption itself is deferred — see §6 Out of Scope.
 - **NFR-7** The user must be able to delete all their data.
+- **NFR-8** User isolation: no authenticated user can read or write another
+  user's data. Every query on user-owned tables is scoped by the verified
+  `user_id`, with Postgres row-level security enabled on those tables as
+  defense-in-depth (FR-31). Auth/scoping changes require a negative test
+  (user A cannot reach user B's data).
 
 ---
 
@@ -106,7 +269,7 @@ The following are explicitly not part of this product:
 - **Web search / real-time information.** The agent does not look things up. It works with what the user brings to the conversation.
 - **Task management / reminders.** Action items surface in conversation but Aloud does not manage follow-through.
 - **Emotional support / mental health.** The agent is a thinking tool, not a wellbeing companion. It must never present itself as a therapist or suggest therapeutic interpretations.
-- **Collaboration.** Sessions are single-user. No shared sessions or multi-user features.
+- **Collaboration.** No shared or multi-participant sessions: a session belongs to exactly one account. (Individual accounts themselves are in scope — §4.8.)
 - **Link ingestion & non-text documents.** The agent reads attached text, Markdown, and PDF documents (FR-21), but it cannot fetch URLs the user shares, and it cannot read scanned/image-only PDFs (no OCR).
 
 ### Deferred — planned, but out of scope for the MVP demo
@@ -118,6 +281,7 @@ The following are explicitly not part of this product:
 - **Brainstorm/critique mode inference** (formerly FR-10; demo stretch goal). Distinct generative vs. analytical behavior, inferred from context or set explicitly.
 - **Session resume** (formerly FR-19 / NFR-4). A dropped connection ends the session; the user starts a new one.
 - **Encryption at rest** (deferred from NFR-6). The schema keeps sensitive content in dedicated columns so encryption can be added post-MVP without rework; the encryption itself is not in the MVP.
+- **Name personalization** (deferred from FR-24). The user's stored preferred name is injected into the agent's system prompt at session start so the agent addresses them by name. Small change once auth lands: `/start` already resolves the user, and the system prompt is already built per session.
 
 ---
 
@@ -126,6 +290,7 @@ The following are explicitly not part of this product:
 - **C-1** Voice I/O pipeline latency is the binding constraint on model and architecture choices. The total budget from end-of-speech to first audio is 3 seconds. Any single component consuming more than ~1 second of that budget is a candidate for replacement.
 - **C-2** The LLM provider must be swappable without rewriting session logic, memory, or API routes. Provider-specific code is isolated to a single agent class.
 - **C-3** The product must never describe itself or its agent as a therapist, counselor, or mental health resource — in UI copy, system prompts, or onboarding.
+- **C-4** Auth secrets (the Firebase service-account key) live outside the repo. Env var names are documented in `.env.example`; values are never committed.
 
 ---
 

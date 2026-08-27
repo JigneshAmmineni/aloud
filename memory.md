@@ -1,4 +1,4 @@
-# Aloud — Tiered Memory Layer (Architecture Sketch)
+# Aloud — Tiered Memory Layer (Personal Notes / Architecture Sketch)
 
 > **Status:** working architecture document. This started as an exploratory sketch
 > of a MemGPT-style tiered memory layer for Aloud's cross-session memory (deferred
