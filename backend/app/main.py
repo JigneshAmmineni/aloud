@@ -16,6 +16,7 @@ Session-establishment endpoints verify with check_revoked=True (FR-29), so a
 disabled account cannot open or complete a new session.
 """
 
+import time
 import uuid
 from contextlib import asynccontextmanager
 
@@ -66,8 +67,18 @@ ICE_SERVERS = [IceServer(urls=["stun:stun.l.google.com:19302"])]
 webrtc_handler = SmallWebRTCRequestHandler(ice_servers=ICE_SERVERS)
 
 # Sessions minted by /start; cleared on process restart. Each maps the
-# unguessable session id -> {"user_id": verified uid, "body": start payload}.
+# unguessable session id -> {"user_id": verified uid, "body": start payload,
+# "created_at": monotonic-ish wall time}. Entries a client never consumed
+# (tab closed between /start and the offer) are purged after a TTL so the
+# dict can't grow without bound.
 active_sessions: dict[str, dict] = {}
+SESSION_ENTRY_TTL_S = 3600
+
+
+def _purge_stale_sessions() -> None:
+    cutoff = time.time() - SESSION_ENTRY_TTL_S
+    for sid in [s for s, v in active_sessions.items() if v["created_at"] < cutoff]:
+        del active_sessions[sid]
 
 
 def _owned_session(session_id: str, user_id: str) -> dict:
@@ -125,10 +136,12 @@ async def start(
     except Exception:
         body = {}
     await provision_user(user.user_id, user.name)
+    _purge_stale_sessions()
     session_id = str(uuid.uuid4())
     active_sessions[session_id] = {
         "user_id": user.user_id,
         "body": body.get("body", {}),
+        "created_at": time.time(),
     }
     result: dict = {"sessionId": session_id}
     if body.get("enableDefaultIceServers"):

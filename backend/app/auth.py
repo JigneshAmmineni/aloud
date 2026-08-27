@@ -15,6 +15,7 @@ Two verification strengths (FR-29):
 """
 
 import os
+import threading
 from dataclasses import dataclass
 
 import firebase_admin
@@ -22,9 +23,11 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from firebase_admin import auth as fb_auth
 from firebase_admin import credentials
+from loguru import logger
 
 _firebase_app: firebase_admin.App | None = None
 _key_path: str | None = None
+_init_lock = threading.Lock()
 
 
 def configure(key_path: str) -> None:
@@ -36,11 +39,18 @@ def configure(key_path: str) -> None:
 
 def _firebase() -> firebase_admin.App:
     """Lazy init so importing this module never requires credentials
-    (tests override the dependencies and must not touch Firebase)."""
+    (tests override the dependencies and must not touch Firebase).
+    Runs on threadpool workers, so the double-checked lock is load-bearing:
+    without it, two concurrent first requests both call initialize_app and
+    the loser's ValueError surfaces as a spurious 401."""
     global _firebase_app
     if _firebase_app is None:
-        path = _key_path or os.environ["FIREBASE_SERVICE_ACCOUNT_PATH"]
-        _firebase_app = firebase_admin.initialize_app(credentials.Certificate(path))
+        with _init_lock:
+            if _firebase_app is None:
+                path = _key_path or os.environ["FIREBASE_SERVICE_ACCOUNT_PATH"]
+                _firebase_app = firebase_admin.initialize_app(
+                    credentials.Certificate(path)
+                )
     return _firebase_app
 
 
@@ -76,9 +86,15 @@ async def _decode(token: str, check_revoked: bool) -> AuthedUser:
         claims = await run_in_threadpool(_verify_token, token, check_revoked)
     except (fb_auth.RevokedIdTokenError, fb_auth.UserDisabledError):
         raise HTTPException(status_code=401, detail="Account disabled or revoked")
-    except Exception:
+    except Exception as e:
         # Expired, malformed, wrong audience/issuer, cert fetch failure — all
-        # collapse to one non-enumerating 401 (FR-26 discipline server-side).
+        # collapse to one non-enumerating 401 (FR-26 discipline server-side),
+        # but the server-side log keeps the real cause distinguishable.
+        logger.bind(
+            component="app.auth",
+            event="auth.verify_failed",
+            error_type=type(e).__name__,
+        ).info("token verification failed")
         raise HTTPException(status_code=401, detail="Invalid credentials")
     return AuthedUser(
         user_id=claims["sub"],

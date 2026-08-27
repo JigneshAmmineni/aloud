@@ -91,6 +91,29 @@ def test_start_verifies_with_check_revoked_and_binds_session_to_uid(
     assert main.active_sessions[session_id]["user_id"] == "uid-42"
 
 
+def test_ice_patch_verifies_with_check_revoked(client, monkeypatch):
+    """FR-29: the trickle-ICE PATCH is part of session establishment and
+    pays the revocation check like /start and the offer."""
+    calls = _fake_verify(
+        monkeypatch, claims={"sub": "uid-42", "email_verified": True}
+    )
+
+    class StubHandler:
+        async def handle_patch_request(self, request):
+            pass
+
+    monkeypatch.setattr(main, "webrtc_handler", StubHandler())
+    session_id = client.post(
+        "/start", json={}, headers={"Authorization": "Bearer t"}
+    ).json()["sessionId"]
+    client.patch(
+        f"/sessions/{session_id}/api/offer",
+        json={"pc_id": "x", "candidates": []},
+        headers={"Authorization": "Bearer t"},
+    )
+    assert calls[-1]["check_revoked"] is True
+
+
 def test_documents_route_uses_cheap_verification(client, monkeypatch):
     calls = _fake_verify(
         monkeypatch,
