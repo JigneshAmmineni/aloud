@@ -98,8 +98,8 @@ Caddy `basic_auth` gate, which is removed at rollout.
 - **FR-24** On first authenticated request, a `users` row keyed by the
   Firebase `uid` is auto-provisioned in Postgres. The `uid` is the foreign key
   for all user-owned data. The row stores the user's preferred name — from the
-  signup form (FR-30) or the Google profile — and the agent's system prompt
-  receives it so the agent can address the user by name.
+  signup form (FR-30) or the Google profile. (Feeding the name into the
+  agent's system prompt is deferred — see §6.)
 - **FR-25** Email/password signup sends Firebase's verification link, but
   access is **not** gated on it: unverified accounts are fully functional
   (smooth-UX decision for the demo). Accepted consequence: an unverified
@@ -150,13 +150,16 @@ Caddy `basic_auth` gate, which is removed at rollout.
   - Errors render inline and never clear the form — both fields keep their
     values on any failed attempt (mistaken "Sign up" on an existing account
     shows FR-26(e)'s small error with everything still filled in).
-  - "Forgot password?" is not shown initially; it appears below the buttons
-    after a failed sign-in attempt (FR-27's reset entry point).
+  - "Forgot password?" is small hyperlink text (not a button) under the
+    fields, always visible (FR-27's reset entry point).
   - "Sign up" does not create the account immediately: the form switches to
     signup mode — credentials stay in place, a "Preferred name" field appears,
     and the action becomes an explicit "Create account". The still-visible
     email doubles as the confirmation step; no re-entry, no dialog. The
     preferred name is saved to the user's profile at creation.
+  - In signup mode, "Already have an account?" hyperlink text sits at the
+    bottom of the form; clicking it reverts to sign-in mode with the email and
+    password fields keeping whatever is already typed.
   Testable UI notes: signed-out / loading / error states exist; sign-in error
   copy follows FR-26(d); an "Admin" nav item renders only when the token
   carries the admin claim (cosmetic — the server enforces regardless). Finer
@@ -206,6 +209,7 @@ The following are explicitly not part of this product:
 - **Brainstorm/critique mode inference** (formerly FR-10; demo stretch goal). Distinct generative vs. analytical behavior, inferred from context or set explicitly.
 - **Session resume** (formerly FR-19 / NFR-4). A dropped connection ends the session; the user starts a new one.
 - **Encryption at rest** (deferred from NFR-6). The schema keeps sensitive content in dedicated columns so encryption can be added post-MVP without rework; the encryption itself is not in the MVP.
+- **Name personalization** (deferred from FR-24). The user's stored preferred name is injected into the agent's system prompt at session start so the agent addresses them by name. Small change once auth lands: `/start` already resolves the user, and the system prompt is already built per session.
 
 ---
 
