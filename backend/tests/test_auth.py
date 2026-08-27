@@ -35,11 +35,11 @@ def _fake_verify(monkeypatch, claims=None, error=None):
 PROTECTED = [
     ("post", "/documents"),
     ("post", "/start"),
-    ("post", "/api/offer"),
-    ("patch", "/api/offer"),
     ("post", "/sessions/any/api/offer"),
     ("patch", "/sessions/any/api/offer"),
     ("get", "/api/admin/users"),
+    ("post", "/api/admin/users/some-uid/disable"),
+    ("post", "/api/admin/users/some-uid/enable"),
 ]
 
 
@@ -110,16 +110,42 @@ def test_admin_route_403s_without_admin_claim(client, monkeypatch):
     assert resp.status_code == 403
 
 
+def test_admin_write_routes_403_without_admin_claim(client, monkeypatch):
+    """The privileged, state-mutating actions get their own negative test."""
+    _fake_verify(monkeypatch, claims={"sub": "uid-1", "email_verified": True})
+    for action in ("disable", "enable"):
+        resp = client.post(
+            f"/api/admin/users/uid-2/{action}",
+            headers={"Authorization": "Bearer t"},
+        )
+        assert resp.status_code == 403
+
+
 def test_admin_route_allows_admin_claim(client, monkeypatch):
     _fake_verify(
         monkeypatch,
         claims={"sub": "uid-1", "email_verified": True, "admin": True},
     )
-    monkeypatch.setattr(auth_mod, "list_accounts", lambda: [{"uid": "uid-1"}])
     monkeypatch.setattr(main.admin, "list_accounts", lambda: [{"uid": "uid-1"}])
     resp = client.get("/api/admin/users", headers={"Authorization": "Bearer t"})
     assert resp.status_code == 200
     assert resp.json()["users"] == [{"uid": "uid-1"}]
+
+
+def test_admin_disable_route_invokes_account_op(client, monkeypatch):
+    _fake_verify(
+        monkeypatch,
+        claims={"sub": "uid-1", "email_verified": True, "admin": True},
+    )
+    calls = []
+    monkeypatch.setattr(
+        main.admin, "set_account_disabled", lambda uid, disabled: calls.append((uid, disabled))
+    )
+    resp = client.post(
+        "/api/admin/users/uid-2/disable", headers={"Authorization": "Bearer t"}
+    )
+    assert resp.status_code == 200
+    assert calls == [("uid-2", True)]
 
 
 def test_admin_claim_must_be_exactly_true(client, monkeypatch):

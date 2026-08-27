@@ -76,17 +76,6 @@ def test_start_tolerates_missing_body(client, auth_as):
     assert "sessionId" in resp.json()
 
 
-def test_offer_returns_answer_from_handler(client, stub_handler, auth_as):
-    auth_as()
-    resp = client.post("/api/offer", json={"sdp": "v=0...", "type": "offer"})
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["type"] == "answer"
-    assert body["pc_id"] == "pc-test-1"
-    assert len(stub_handler.web_requests) == 1
-    assert stub_handler.web_requests[0].sdp == "v=0..."
-
-
 def test_session_scoped_offer_requires_known_session(client, stub_handler, auth_as):
     auth_as()
     resp = client.post(
@@ -106,6 +95,16 @@ def test_session_scoped_offer_with_valid_session(client, stub_handler, auth_as):
     )
     assert resp.status_code == 200
     assert resp.json()["pc_id"] == "pc-test-1"
+    assert stub_handler.web_requests[0].sdp == "v=0..."
+
+
+def test_session_scoped_patch_requires_known_session(client, stub_handler, auth_as):
+    auth_as()
+    resp = client.patch(
+        "/sessions/nope/api/offer", json={"pc_id": "x", "candidates": []}
+    )
+    assert resp.status_code == 404
+    assert stub_handler.patch_requests == []
 
 
 def test_users_cannot_operate_each_others_sessions(client, stub_handler, auth_as):
@@ -127,9 +126,13 @@ def test_users_cannot_operate_each_others_sessions(client, stub_handler, auth_as
     assert stub_handler.patch_requests == []
 
 
-def test_ice_candidate_patch(client, stub_handler, auth_as):
-    auth_as()
-    resp = client.patch("/api/offer", json={"pc_id": "pc-test-1", "candidates": []})
+def test_ice_candidate_patch_on_owned_session(client, stub_handler, auth_as):
+    auth_as("uid-a")
+    session_id = client.post("/start", json={}).json()["sessionId"]
+    resp = client.patch(
+        f"/sessions/{session_id}/api/offer",
+        json={"pc_id": "pc-test-1", "candidates": []},
+    )
     assert resp.status_code == 200
     assert resp.json() == {"status": "success"}
     assert len(stub_handler.patch_requests) == 1

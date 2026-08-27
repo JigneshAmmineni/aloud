@@ -6,10 +6,11 @@ infrastructure liveness probe carrying no user data.
 
 Signaling follows the Pipecat client contract:
   POST  /start      — session bootstrap (returns sessionId + optional ICE config)
-  POST  /api/offer  — SDP offer/answer (SmallWebRTCRequestHandler, handles renegotiation)
-  PATCH /api/offer  — trickle ICE candidates
-  /sessions/{id}/api/offer — same, on the session-scoped path Pipecat clients
-                             use after /start (mirrors Pipecat Cloud's proxy)
+  POST  /sessions/{id}/api/offer  — SDP offer/answer (handles renegotiation)
+  PATCH /sessions/{id}/api/offer  — trickle ICE candidates
+Only the session-scoped paths exist: every offer is bound to a session the
+verified user owns (the sessionless /api/offer variant was removed with the
+prebuilt debug client — it had no ownership to enforce).
 
 Session-establishment endpoints verify with check_revoked=True (FR-29), so a
 disabled account cannot open or complete a new session.
@@ -40,8 +41,8 @@ from pipecat.transports.smallwebrtc.request_handler import (
 )
 
 from agent.companion import CompanionAgent
-from app import admin
-from app.auth import AuthedUser, get_current_user, get_current_user_checked
+from app import admin, auth
+from app.auth import AuthedUser, get_current_user_checked, get_current_user_id
 from app.config import load_settings
 from app.documents import DocumentError, document_store, extract_text
 from db.engine import init_db
@@ -52,6 +53,7 @@ settings = load_settings()  # fail fast at boot, naming any missing env vars
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    auth.configure(settings.firebase_service_account_path)
     await init_db(settings.database_url)
     yield
 
@@ -85,7 +87,7 @@ async def healthz():
 @app.post("/documents")
 async def upload_document(
     file: UploadFile = File(...),
-    user: AuthedUser = Depends(get_current_user),
+    user_id: str = Depends(get_current_user_id),
 ):
     """Accept a .txt/.md/.pdf upload, extract its text, and stash it in the
     ephemeral store under the requesting user. Returns metadata (id + char
@@ -96,7 +98,7 @@ async def upload_document(
         text = extract_text(filename, file.content_type, data)
     except DocumentError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    doc = document_store.add(user.user_id, filename, file.content_type or "", text)
+    doc = document_store.add(user_id, filename, file.content_type or "", text)
     logger.bind(
         component="app.documents",
         event="document.uploaded",
@@ -157,24 +159,6 @@ async def _handle_offer(
         request=request,
         webrtc_connection_callback=webrtc_connection_callback,
     )
-
-
-@app.post("/api/offer")
-async def offer(
-    request: SmallWebRTCRequest,
-    background_tasks: BackgroundTasks,
-    user: AuthedUser = Depends(get_current_user_checked),
-):
-    return await _handle_offer(request, background_tasks, user.user_id)
-
-
-@app.patch("/api/offer")
-async def ice_candidate(
-    request: SmallWebRTCPatchRequest,
-    user: AuthedUser = Depends(get_current_user_checked),
-):
-    await webrtc_handler.handle_patch_request(request)
-    return {"status": "success"}
 
 
 @app.post("/sessions/{session_id}/api/offer")

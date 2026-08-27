@@ -84,6 +84,10 @@ async def _bootstrap_rls(engine: AsyncEngine, app_password: str) -> None:
         # Pre-auth databases: add columns create_all won't retrofit.
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_name VARCHAR(80);",
         "ALTER TABLE transcript_events ADD COLUMN IF NOT EXISTS user_id VARCHAR(64);",
+        # create_all skips existing tables, so the pre-auth DB needs the
+        # index the model declares — RLS filters on this column every query.
+        "CREATE INDEX IF NOT EXISTS ix_transcript_events_user_id"
+        " ON transcript_events (user_id);",
         """
         UPDATE transcript_events te SET user_id = s.user_id
         FROM sessions s WHERE te.session_id = s.id AND te.user_id IS NULL;
@@ -116,10 +120,17 @@ async def init_db(database_url: str) -> None:
         await conn.run_sync(Base.metadata.create_all)
 
     if _bootstrap_engine.dialect.name == "postgresql":
-        # The app role reuses the DB password: the separation that matters
-        # here is privileges (NOBYPASSRLS), not a second secret.
-        app_password = url.password or ""
-        await _bootstrap_rls(_bootstrap_engine, app_password)
+        # The app role reuses the DB password — accepted tradeoff: both
+        # credentials live in the same .env on the same host, so the
+        # separation that matters here is privileges (NOBYPASSRLS), not a
+        # second secret. But never a BLANK secret: fail fast rather than
+        # silently creating a passwordless login role.
+        if not url.password:
+            raise RuntimeError(
+                "DATABASE_URL has no password — refusing to create the "
+                f"{APP_ROLE} role without one."
+            )
+        await _bootstrap_rls(_bootstrap_engine, url.password)
         _app_engine = create_async_engine(
             url.set(username=APP_ROLE), echo=False
         )

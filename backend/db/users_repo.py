@@ -36,9 +36,3 @@ async def provision_user(user_id: str, preferred_name: str | None) -> None:
         )
         await db.execute(stmt)
         await db.commit()
-
-
-async def get_preferred_name(user_id: str) -> str | None:
-    async with session_factory()() as db:
-        row = await db.get(User, user_id)
-        return row.preferred_name if row else None

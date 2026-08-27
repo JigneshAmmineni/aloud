@@ -184,17 +184,6 @@ export default function LoginPage() {
           />
         )}
 
-        {!signupMode && (
-          <button
-            type="button"
-            className="login-link"
-            onClick={resetPassword}
-            disabled={busy}
-          >
-            Forgot password?
-          </button>
-        )}
-
         {signupMode ? (
           <button className="login-btn primary full" type="submit" disabled={busy}>
             Create account
@@ -217,6 +206,19 @@ export default function LoginPage() {
               Sign up
             </button>
           </div>
+        )}
+
+        {/* FR-30: the buttons sit directly under the password field; this
+            link is "under the fields" too, just after the button row. */}
+        {!signupMode && (
+          <button
+            type="button"
+            className="login-link"
+            onClick={resetPassword}
+            disabled={busy}
+          >
+            Forgot password?
+          </button>
         )}
 
         <button

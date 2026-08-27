@@ -19,10 +19,19 @@ from dataclasses import dataclass
 
 import firebase_admin
 from fastapi import Depends, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from firebase_admin import auth as fb_auth
 from firebase_admin import credentials
 
 _firebase_app: firebase_admin.App | None = None
+_key_path: str | None = None
+
+
+def configure(key_path: str) -> None:
+    """Called once from the app lifespan with Settings' validated path, so
+    this module doesn't re-derive config from the environment."""
+    global _key_path
+    _key_path = key_path
 
 
 def _firebase() -> firebase_admin.App:
@@ -30,7 +39,7 @@ def _firebase() -> firebase_admin.App:
     (tests override the dependencies and must not touch Firebase)."""
     global _firebase_app
     if _firebase_app is None:
-        path = os.environ["FIREBASE_SERVICE_ACCOUNT_PATH"]
+        path = _key_path or os.environ["FIREBASE_SERVICE_ACCOUNT_PATH"]
         _firebase_app = firebase_admin.initialize_app(credentials.Certificate(path))
     return _firebase_app
 
@@ -59,9 +68,12 @@ def _verify_token(token: str, check_revoked: bool) -> dict:
     )
 
 
-def _decode(token: str, check_revoked: bool) -> AuthedUser:
+async def _decode(token: str, check_revoked: bool) -> AuthedUser:
     try:
-        claims = _verify_token(token, check_revoked)
+        # firebase-admin is synchronous (check_revoked even does a network
+        # round trip); run it in the threadpool so it never blocks the event
+        # loop that is also processing every live voice pipeline's frames.
+        claims = await run_in_threadpool(_verify_token, token, check_revoked)
     except (fb_auth.RevokedIdTokenError, fb_auth.UserDisabledError):
         raise HTTPException(status_code=401, detail="Account disabled or revoked")
     except Exception:
@@ -78,12 +90,12 @@ def _decode(token: str, check_revoked: bool) -> AuthedUser:
 
 
 async def get_current_user(request: Request) -> AuthedUser:
-    return _decode(_bearer_token(request), check_revoked=False)
+    return await _decode(_bearer_token(request), check_revoked=False)
 
 
 async def get_current_user_checked(request: Request) -> AuthedUser:
     """FR-29: session-establishment verification — instant disable lockout."""
-    return _decode(_bearer_token(request), check_revoked=True)
+    return await _decode(_bearer_token(request), check_revoked=True)
 
 
 async def get_current_user_id(user: AuthedUser = Depends(get_current_user)) -> str:
