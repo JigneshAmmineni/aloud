@@ -68,9 +68,11 @@ webrtc_handler = SmallWebRTCRequestHandler(ice_servers=ICE_SERVERS)
 
 # Sessions minted by /start; cleared on process restart. Each maps the
 # unguessable session id -> {"user_id": verified uid, "body": start payload,
-# "created_at": monotonic-ish wall time}. Entries a client never consumed
-# (tab closed between /start and the offer) are purged after a TTL so the
-# dict can't grow without bound.
+# "created_at": wall time}. Entries are purged after a TTL regardless of
+# consumption, bounding growth. Accepted consequence: a session older than
+# the TTL that needs to renegotiate (ICE restart) gets a 404 and the user
+# re-taps Talk — the same UX as the descoped session-resume (FR-19), and the
+# baked-in Bearer token would have expired by then anyway.
 active_sessions: dict[str, dict] = {}
 SESSION_ENTRY_TTL_S = 3600
 

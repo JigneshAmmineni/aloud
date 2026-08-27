@@ -64,3 +64,59 @@ def test_rls_scopes_and_blocks_cross_user_access():
             assert await db.get(Session, sess_b) is None
 
     asyncio.run(run())
+
+
+def test_rls_context_does_not_leak_across_pooled_connection_reuse():
+    """FR-31's explicit mandate: SET LOCAL must reset at transaction end so
+    a POOLED CONNECTION REUSED by a different user carries no stale context.
+    A pool of exactly one connection forces every transaction here onto the
+    same physical connection — reuse is guaranteed, not incidental."""
+    from sqlalchemy.engine.url import make_url
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from db.engine import APP_ROLE
+
+    uid_a, uid_b = f"rlsp-a-{uuid.uuid4()}", f"rlsp-b-{uuid.uuid4()}"
+    sess_a, sess_b = f"s-{uuid.uuid4()}", f"s-{uuid.uuid4()}"
+
+    async def run():
+        await init_db(PG_URL)  # bootstrap roles/policies as usual
+        await provision_user(uid_a, None)
+        await provision_user(uid_b, None)
+        await create_session_row(sess_a, uid_a)
+        await create_session_row(sess_b, uid_b)
+
+        url = make_url(PG_URL).set(username=APP_ROLE)
+        one_conn = create_async_engine(url, pool_size=1, max_overflow=0)
+        factory = async_sessionmaker(one_conn, expire_on_commit=False)
+        try:
+            from sqlalchemy import func as sa_func
+
+            # Transaction 1: user A's context on THE connection.
+            async with factory() as db:
+                await db.execute(
+                    select(sa_func.set_config("app.user_id", uid_a, True))
+                )
+                rows = (await db.execute(select(Session))).scalars().all()
+                assert uid_a in {r.user_id for r in rows}
+                await db.commit()
+
+            # Transaction 2, same physical connection, NO context set:
+            # a stale app.user_id from transaction 1 would return A's rows.
+            async with factory() as db:
+                rows = (await db.execute(select(Session))).scalars().all()
+                assert rows == []
+
+            # Transaction 3, same connection, user B's context: only B's.
+            async with factory() as db:
+                await db.execute(
+                    select(sa_func.set_config("app.user_id", uid_b, True))
+                )
+                rows = (await db.execute(select(Session))).scalars().all()
+                user_ids = {r.user_id for r in rows}
+                assert uid_b in user_ids
+                assert uid_a not in user_ids
+        finally:
+            await one_conn.dispose()
+
+    asyncio.run(run())
