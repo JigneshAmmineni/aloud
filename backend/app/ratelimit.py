@@ -18,6 +18,7 @@ import time
 from collections import deque
 
 from fastapi import HTTPException, Request
+from loguru import logger
 
 _SWEEP_THRESHOLD = 1024  # drop stale buckets once the dict grows past this
 
@@ -41,6 +42,11 @@ def rate_limited(max_requests: int, window_s: float):
         while bucket and now - bucket[0] > window_s:
             bucket.popleft()
         if len(bucket) >= max_requests:
+            logger.bind(
+                component="app.ratelimit",
+                event="ratelimit.rejected",
+                path=request.url.path,
+            ).warning("rate limit exceeded")
             raise HTTPException(
                 status_code=429, detail="Too many requests — try again shortly"
             )

@@ -126,7 +126,12 @@ export default function LoginPage() {
   // "Create account".
   const signUpCheck = () =>
     run(async () => {
-      if (!validate()) return;
+      // Only the email matters for the availability check; the password is
+      // validated at "Create account".
+      if (!email.trim() || !/.+@.+\..+/.test(email.trim())) {
+        setError("Enter a valid email address.");
+        return;
+      }
       let res: Response;
       try {
         res = await fetch("/api/auth/email-check", {

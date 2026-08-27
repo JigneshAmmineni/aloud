@@ -119,6 +119,22 @@ def test_email_check_requires_an_email(client):
     assert resp.status_code == 400
 
 
+def test_email_check_returns_503_when_upstream_fails(client, monkeypatch):
+    """A Firebase outage must surface as a retryable error — never as
+    'not registered' (which would tell signup every email is available)."""
+
+    def boom(email):
+        raise RuntimeError("firebase unreachable")
+
+    monkeypatch.setattr(auth_mod, "email_exists", boom)
+    resp = client.post(
+        "/api/auth/email-check",
+        json={"email": "a@b.com"},
+        headers={"X-Forwarded-For": "10.1.0.5"},
+    )
+    assert resp.status_code == 503
+
+
 def test_email_check_is_rate_limited(client, monkeypatch):
     monkeypatch.setattr(auth_mod, "email_exists", lambda e: False)
     headers = {"X-Forwarded-For": "10.1.0.4"}
