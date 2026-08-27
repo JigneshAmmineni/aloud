@@ -79,6 +79,70 @@ User explicitly asks for the agent's opinion, alternatives, or next steps. The a
 ### 4.7 Documents
 - **FR-21** Before a session, the user may attach one or more documents (plain text, Markdown, or PDF). The agent reads the attached documents and can reference and discuss them during the session. Attached documents are held in memory for that session only and are not persisted — see §6 (persistence is deferred to the future memory layer).
 
+### 4.8 Authentication & Accounts
+
+Provider decision: **Firebase Auth** — Google sign-in + email/password, open
+signup. Session credential: Firebase ID tokens attached as `Authorization:
+Bearer` on every API request (the client SDK silently refreshes them hourly);
+verified server-side with the `firebase-admin` SDK. Replaces the site-wide
+Caddy `basic_auth` gate, which is removed at rollout.
+
+- **FR-22** Anyone can create an account, no approval step, via (a) "Continue
+  with Google" or (b) email + password signup.
+- **FR-23** Every backend API request resolves to a verified `user_id` through
+  a single FastAPI dependency (`get_current_user_id`): verify the Bearer ID
+  token (signature, issuer, audience, expiry) via `firebase-admin`; `user_id`
+  = the token's `uid`. Missing/invalid token → 401. A `user_id` is never read
+  from a request body, query param, or client-set header. Repo functions take
+  `user_id: str` with no default value.
+- **FR-24** On first authenticated request, a `users` row keyed by the
+  Firebase `uid` is auto-provisioned in Postgres. The `uid` is the foreign key
+  for all user-owned data.
+- **FR-25** Email/password signups must verify their address: signup sends
+  Firebase's verification link; until `email_verified` is true the app shows a
+  "verify your email" screen and the backend rejects API access (403). Google
+  sign-ins are verified from the start and skip this.
+- **FR-26** Sign-in/sign-up behavior per method, under Firebase's default
+  one-account-per-email policy with email-enumeration protection ON:
+  - (a) Google, new email → account created and signed in.
+  - (b) Google, existing Google account → signs into the same account.
+  - (c) Google, where an email+password account already holds that gmail →
+    signs into the **same `uid`** (user data intact). If that account was
+    never verified, Firebase removes its password credential (documented
+    takeover rule); the app treats this as a normal sign-in, not an error.
+  - (d) Email+password sign-in against an account with no password credential
+    (Google-born), or with wrong credentials → generic failure
+    (`auth/invalid-credential`). The UI shows one non-enumerating message for
+    all failed sign-ins (e.g. "Sign-in failed. Check your credentials, or try
+    continuing with Google.") and never reveals whether an email is registered
+    or which methods it uses.
+  - (e) Email+password sign-up with an email already in use →
+    `auth/email-already-in-use`, surfaced as "already registered — sign in
+    instead."
+  - (f) Google sign-in asserting a non-gmail address that belongs to an
+    existing account → `auth/account-exists-with-different-credential`; v1
+    shows "sign in with your original method" (no automatic linking).
+- **FR-27** The user can sign out. Password accounts can reset their password
+  via Firebase's emailed reset link.
+- **FR-28** Admin access is granted by the Firebase custom claim
+  `admin: true`, checked server-side on every admin request by a second
+  dependency (`get_current_admin`; 403 otherwise). Claims are granted/revoked
+  only by a committed script run locally with the service-account credential;
+  the script must refuse a target account whose `email_verified` is false. No
+  admin identifier (email or uid) lives in the repo, env, or DB.
+- **FR-29** Admin capabilities in this feature: list accounts (uid, email,
+  providers, created, disabled, last sign-in) and disable/enable an account.
+  Disabling also revokes the user's refresh tokens, and session start
+  (`/start`) verifies with `check_revoked=True`, so a disabled user cannot
+  open a new session; other endpoints may rely on the ≤1h token expiry.
+  (Per-user usage metrics belong to the observability feature, not this one.)
+- **FR-30** Frontend: a `/login` page (Google button, email/password sign-in
+  and signup, password reset); unauthenticated visits redirect there. Testable
+  UI notes: signed-out / loading / error states exist; error copy follows
+  FR-26(d); an "Admin" nav item renders only when the token carries the admin
+  claim (cosmetic — the server enforces regardless). Visual design is not
+  specified here; NFR-3 (mobile browsers) applies.
+
 ---
 
 ## 5. Non-Functional Requirements
@@ -96,6 +160,11 @@ User explicitly asks for the agent's opinion, alternatives, or next steps. The a
 - **NFR-5** All voice data and transcripts are processed server-side. The privacy policy must disclose this clearly.
 - **NFR-6** Sensitive session content (transcripts, artifacts, future memory entries) must live in dedicated database columns, separable from session metadata, so that encryption at rest can be added post-MVP without schema rework. The encryption itself is deferred — see §6 Out of Scope.
 - **NFR-7** The user must be able to delete all their data.
+- **NFR-8** User isolation: no authenticated user can read or write another
+  user's data. Every query on user-owned tables is scoped by the verified
+  `user_id`, with Postgres row-level security enabled on those tables as
+  defense-in-depth. Auth/scoping changes require a negative test (user A
+  cannot reach user B's data).
 
 ---
 
@@ -106,7 +175,7 @@ The following are explicitly not part of this product:
 - **Web search / real-time information.** The agent does not look things up. It works with what the user brings to the conversation.
 - **Task management / reminders.** Action items surface in conversation but Aloud does not manage follow-through.
 - **Emotional support / mental health.** The agent is a thinking tool, not a wellbeing companion. It must never present itself as a therapist or suggest therapeutic interpretations.
-- **Collaboration.** Sessions are single-user. No shared sessions or multi-user features.
+- **Collaboration.** No shared or multi-participant sessions: a session belongs to exactly one account. (Individual accounts themselves are in scope — §4.8.)
 - **Link ingestion & non-text documents.** The agent reads attached text, Markdown, and PDF documents (FR-21), but it cannot fetch URLs the user shares, and it cannot read scanned/image-only PDFs (no OCR).
 
 ### Deferred — planned, but out of scope for the MVP demo
@@ -126,6 +195,7 @@ The following are explicitly not part of this product:
 - **C-1** Voice I/O pipeline latency is the binding constraint on model and architecture choices. The total budget from end-of-speech to first audio is 3 seconds. Any single component consuming more than ~1 second of that budget is a candidate for replacement.
 - **C-2** The LLM provider must be swappable without rewriting session logic, memory, or API routes. Provider-specific code is isolated to a single agent class.
 - **C-3** The product must never describe itself or its agent as a therapist, counselor, or mental health resource — in UI copy, system prompts, or onboarding.
+- **C-4** Auth secrets (the Firebase service-account key) live outside the repo. Env var names are documented in `.env.example`; values are never committed.
 
 ---
 

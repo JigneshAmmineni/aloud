@@ -20,7 +20,7 @@ A voice-first thinking partner for people who process ideas best by talking out 
 | LLM (default) | Gemini Flash — swappable; Claude Sonnet is the runner-up if question quality disappoints |
 | TTS | Cartesia Sonic-3 |
 | DB | PostgreSQL |
-| Auth | TBD (likely Supabase Auth or Auth.js); MVP runs single-user |
+| Auth | Firebase Auth — Google + email/password, Bearer ID tokens verified via firebase-admin in `get_current_user_id`; admin via custom claims (REQUIREMENTS.md §4.8) |
 
 ---
 
