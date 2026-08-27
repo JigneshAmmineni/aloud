@@ -95,8 +95,10 @@ Caddy `basic_auth` gate, which is removed at rollout.
   = the token's `uid`. Missing/invalid token → 401. A `user_id` is never read
   from a request body, query param, or client-set header. Repo functions take
   `user_id: str` with no default value.
-- **FR-24** On first authenticated request, a `users` row keyed by the
-  Firebase `uid` is auto-provisioned in Postgres. The `uid` is the foreign key
+- **FR-24** A `users` row keyed by the Firebase `uid` is auto-provisioned in
+  Postgres by the endpoints that create user-owned rows (`/start`,
+  `/documents`) — not inside `get_current_user_id`, which stays a pure
+  verifier with no DB writes (no per-request write amplification). The `uid` is the foreign key
   for all user-owned data. Provisioning is an atomic upsert keyed on the
   unique `uid`, so concurrent first requests cannot race into duplicates or
   errors — and when the request carries profile fields (the signup flow's
@@ -120,8 +122,12 @@ Caddy `basic_auth` gate, which is removed at rollout.
   - (b) Google, existing Google account → signs into the same account.
   - (c) Google, where an email+password account already holds that gmail →
     signs into the **same `uid`** (user data intact). If that account was
-    never verified, Firebase removes its password credential (documented
-    takeover rule); if it was verified, both providers coexist and the
+    never verified, Firebase removes its password credential (the documented
+    trusted-provider takeover rule — see
+    https://firebase.google.com/docs/auth/web/google-signin and the
+    "verified email addresses" section of
+    https://firebase.google.com/docs/auth/users); if it was verified, both
+    providers coexist and the
     password survives. Either way the app treats this as a normal sign-in,
     not an error.
   - (d) Email+password sign-in against an account with no password credential
@@ -158,9 +164,11 @@ Caddy `basic_auth` gate, which is removed at rollout.
   providers, created, disabled, last sign-in) and disable/enable an account.
   Disabling also revokes the user's refresh tokens. Deliberate v1 disable
   semantics, in effect-order:
-  - New sessions are blocked immediately: `/start` verifies with
+  - New sessions are blocked immediately: `/start` and the session-establishment
+    signaling endpoints (`/api/offer`, `/sessions/{id}/api/offer`) verify with
     `check_revoked=True` — an accepted extra network round trip on session
-    bootstrap (one-time, off the NFR-1 hot path), paid so lockout is instant.
+    bootstrap (off the NFR-1 hot path), paid so lockout is instant and a
+    disable landing mid-handshake cannot still complete a session.
   - Other endpoints verify locally, so remaining API access dies when the
     current token expires (≤1h).
   - An already-connected voice session is not terminated; it runs until it
@@ -202,7 +210,11 @@ Caddy `basic_auth` gate, which is removed at rollout.
   user-owned rows (sessions, transcript events, artifacts, and any table this
   feature adds), with policies restricting access to rows matching the
   request's verified `user_id` (communicated to Postgres per request via
-  `SET LOCAL app.user_id` in the DB session factory). Writers that bypass the
+  `SET LOCAL app.user_id` in the DB session factory — `SET LOCAL` specifically
+  because it is transaction-scoped: it must run inside the same transaction as
+  the queries it scopes and resets at commit, so a pooled connection can never
+  carry a stale `user_id` into another request. The FR-31 test must cover
+  pooled-connection reuse). Writers that bypass the
   HTTP layer — the per-session background transcript writer today, the memory
   loop later — set `app.user_id` the same way, from the session state they
   were created with at `/start`; they are per-session, so a write batch never
