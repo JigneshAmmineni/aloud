@@ -205,26 +205,27 @@ production" → Run workflow** (`.github/workflows/deploy.yml`):
    commit must be *on main's history*. This is the gate-integrity rule —
    nothing that skipped PR review/CI can reach production, and no arbitrary
    branch can be deployed.
-2. **Move the `prod` pointer.** `git push origin +<SHA>:refs/heads/prod` —
-   the `+` is a force-push, deliberately: `prod` is not a line of
-   development, it's a **bookmark meaning "this exact commit is what's
-   live."** Deploying forward moves it forward; rolling back moves it
-   backward. Either way, `git log prod` on any machine always tells you
-   what production is running.
-3. **Reach the VM.** The runner authenticates to GCP as the
+2. **Reach the VM.** The runner authenticates to GCP as the
    `aloud-deployer` service account and opens an **IAP tunnel** to the VM's
    port 22 (the same Google-authenticated path used for manual SSH — port 22
    is never open to the internet). It then SSHes through the tunnel as the
    normal VM user (`jigne`) using a dedicated deploy key.
-4. **Update the box.** On the VM: `git fetch`, `git checkout prod`,
+3. **Update the box.** On the VM: `git fetch`, `git checkout prod`,
    `git reset --hard <SHA>` — *reset*, not *pull*, because a pull can only
    move forward; reset makes the working copy exactly the chosen commit in
    either direction (this is what makes rollback the same button). Then
    `docker compose -f docker-compose.prod.yml up -d --build`: only images
    whose inputs changed rebuild; Postgres data and the TLS cert live in
    named volumes and are untouched.
-5. **Verify.** The workflow polls `https://work-aloud.com/healthz` until it
+4. **Verify.** The workflow polls `https://work-aloud.com/healthz` until it
    returns 200 (or fails the run with a rollback hint after ~2 minutes).
+5. **Move the `prod` pointer — last, only after verification.**
+   `git push origin +<SHA>:refs/heads/prod` — the `+` is a force-push,
+   deliberately: `prod` is not a line of development, it's a **bookmark
+   meaning "this exact commit is verified live."** Deploying forward moves
+   it forward; rolling back moves it backward; a failed run leaves it
+   untouched. Either way, `git log prod` on any machine tells you what
+   production is running.
 
 **The pieces and where they live:**
 
