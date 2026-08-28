@@ -259,9 +259,14 @@ principles govern every FR below:
 2. **Usage and metadata, never content.** No admin surface — page, endpoint,
    or shipped log at production settings — exposes transcript text, artifact
    content, or document content (NFR-9).
-3. **Capture never touches the voice hot path.** All measurement follows the
-   transcript writer's pattern: pipeline observers enqueue, background
-   writers batch, write failures log and drop (NFR-10).
+3. **Capture never touches the voice hot path.** The rule is
+   architecture-agnostic (NFR-10): the hot path only ever *enqueues* —
+   an instant, in-memory operation — while separate background writers
+   batch the queue into the database, and a failed write logs and drops
+   rather than retrying into the conversation. Today's tap points are
+   pipeline observers (the transcript writer is the exemplar); in a future
+   custom agent loop they become direct recorder calls — the mechanism
+   changes, the rule doesn't.
 
 - **FR-32** Every session records its raw usage in an append-only
   `usage_events` table (metadata only — no sensitive columns), captured by a
@@ -362,7 +367,7 @@ raw rows older than 90 days.
 ### 5.1 Latency
 - **NFR-1** Time from end-of-user-speech to first audio from the agent must be under 3 seconds under normal network conditions.
 - **NFR-2** Audio must stream as it is generated. The agent must not wait until its full response is ready before speaking.
-- **NFR-10** Measurement must be free: usage and metrics capture (§4.9) adds no synchronous work to the voice hot path — observers enqueue, background writers batch, and a failed metrics write logs an error and drops the batch rather than disturbing a live session (the FR-20 transcript-writer discipline, applied to all capture).
+- **NFR-10** Measurement must be free: capture (§4.9) adds no synchronous work to the voice hot path. The principle, independent of pipeline architecture: code on the hot path only ever enqueues to memory; background writers batch queues into the database; a failed write logs an error and drops the batch rather than disturbing a live session. (The FR-20 transcript writer is the exemplar of this discipline, not its definition — it applies equally to a future custom agent loop, where observers become direct recorder calls.)
 
 ### 5.2 Availability & Reliability
 - **NFR-3** The app is a web application. It must function correctly in mobile browsers on iOS and Android, and in desktop browsers. No native app installation required.
