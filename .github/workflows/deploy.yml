@@ -1,0 +1,136 @@
+# Continuous delivery: one button deploys a chosen main commit to the VM.
+#
+#   Actions tab → "Deploy to production" → Run workflow
+#     ref blank  → deploys the tip of main
+#     ref = SHA  → deploys that commit (must be on main) — this is also the
+#                  ROLLBACK path: pick any older main commit and run.
+#
+# What it does: validates the commit is on main (nothing skips the PR gate),
+# opens an IAP tunnel with a tunnel-only service account, SSHes to the VM as
+# the deploy user, hard-resets the checkout and rebuilds the compose stack,
+# health-checks the live site — and only then force-moves the `prod` branch
+# pointer, so `prod` always reflects a VERIFIED deploy (a failed run leaves
+# it untouched).
+#
+# Rollback caveat: DB schema migrations are NOT reversed. Rolling back past
+# a release that migrated the schema may need manual DB attention first.
+#
+# Secrets: GCP_DEPLOYER_SA_KEY (service account with iap.tunnelResourceAccessor
+# + compute.viewer only), VM_SSH_PRIVATE_KEY (dedicated deploy key for the VM
+# user). The heavy suite / talk-through promotion gate (ROADMAP "Process
+# infrastructure") remains a manual pre-flight for now.
+
+name: Deploy to production
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit SHA on main to deploy (blank = tip of main)"
+        required: false
+        default: ""
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+env:
+  GCP_PROJECT: aloud-498522
+  VM_NAME: aloud
+  VM_ZONE: us-west1-b
+  VM_USER: jigne
+  SITE: https://work-aloud.com
+
+permissions:
+  contents: write # moves the prod branch pointer
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # A hung tunnel/build must not hold the concurrency group hostage —
+    # rollback uses this same button and has to stay available.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve and validate the commit
+        id: resolve
+        env:
+          # Via env, never inline ${{ }} in the script: workflow_dispatch
+          # inputs are untrusted text and inline interpolation is script-
+          # injectable.
+          REF_INPUT: ${{ inputs.ref }}
+        run: |
+          SHA=$(git rev-parse "${REF_INPUT:-origin/main}")
+          if ! git merge-base --is-ancestor "$SHA" origin/main; then
+            echo "::error::$SHA is not a commit on main — only gate-passed commits deploy."
+            exit 1
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Deploying $(git log -1 --oneline "$SHA")" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_DEPLOYER_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Open IAP tunnel to the VM
+        run: |
+          gcloud compute start-iap-tunnel "$VM_NAME" 22 \
+            --project="$GCP_PROJECT" --zone="$VM_ZONE" \
+            --local-host-port=localhost:2222 &
+          TUNNEL_PID=$!
+          for i in $(seq 1 20); do
+            sleep 2
+            if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
+              echo "::error::IAP tunnel process died — check GCP_DEPLOYER_SA_KEY and the service account's IAP/compute roles."
+              exit 1
+            fi
+            (exec 3<>/dev/tcp/localhost/2222) 2>/dev/null && exec 3>&- && break
+          done
+
+      - name: Deploy on the VM
+        env:
+          DEPLOY_SHA: ${{ steps.resolve.outputs.sha }}
+        run: |
+          echo "${{ secrets.VM_SSH_PRIVATE_KEY }}" > deploy_key
+          chmod 600 deploy_key
+          ssh -i deploy_key -p 2222 \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o ServerAliveInterval=30 \
+            "$VM_USER@localhost" bash -s -- "$DEPLOY_SHA" <<'REMOTE'
+          set -euo pipefail
+          SHA="$1"
+          cd ~/aloud
+          git fetch origin
+          git checkout prod
+          git reset --hard "$SHA"
+          docker compose -f docker-compose.prod.yml up -d --build
+          echo "deployed: $(git rev-parse HEAD)"
+          REMOTE
+
+      - name: Remove the deploy key from the runner
+        if: always()
+        run: rm -f deploy_key
+
+      - name: Verify the live site
+        run: |
+          sleep 10
+          for i in $(seq 1 12); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" "$SITE/healthz" || true)
+            [ "$code" = "200" ] && break
+            sleep 10
+          done
+          if [ "$code" != "200" ]; then
+            echo "::error::healthz returned $code after deploy — investigate (containers may still be starting, or the deploy broke; roll back by re-running with the previous SHA). The prod pointer was NOT moved."
+            exit 1
+          fi
+          echo "healthz 200 — live at $SITE ($(date -u))" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Point prod at the verified commit
+        # Last, on purpose: prod only ever records deploys that passed the
+        # health check — a failed run leaves the pointer untouched.
+        run: git push origin "+${{ steps.resolve.outputs.sha }}:refs/heads/prod"

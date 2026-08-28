@@ -128,12 +128,13 @@ counts, latency, purpose (voice turn / memory loop / compression), linked to
 Per-PR CI (ruff + pytest, frontend build) and the tailored Claude review are
 live. Still to add, roughly when its prerequisite feature lands:
 
-- **Promotion gate (main → prod):** before `prod` fast-forwards to `main`,
-  run the heavy suite per-PR CI deliberately skips — golden-audio E2E through
-  the real providers (recorded utterances with known content; assert loosely:
-  transcript keywords, a response produced, tool fired, latency within
-  budget) — plus a manual talk-through. Later, a deploy workflow keyed off
-  `prod` completes the pipeline.
+- **Promotion gate (main → prod):** before promoting, run the heavy suite
+  per-PR CI deliberately skips — golden-audio E2E through the real providers
+  (recorded utterances with known content; assert loosely: transcript
+  keywords, a response produced, tool fired, latency within budget) — plus a
+  manual talk-through. (The deploy itself is done: the "Deploy to
+  production" workflow ships any chosen main commit — and rolls back — at a
+  click; this gate would run inside it before the VM step.)
 - **Evals** (retrieval recall, response quality) join the scheduled/nightly
   lane once features 5–6 provide the data they run on.
 

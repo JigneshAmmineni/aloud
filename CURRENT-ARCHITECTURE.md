@@ -189,14 +189,66 @@ WebRTC UDP media path (not HTTP).
 
 | Process | How | Status |
 |---|---|---|
-| Deploy an update | SSH to VM → `git pull` → `docker compose -f docker-compose.prod.yml up -d --build` ([deployment.md §13](deployment.md)) | live (manual; CD workflow planned — ROADMAP "Process infrastructure") |
-| Promote code | PR → `main` (CI + review gate) → test on workbench → fast-forward `prod` → deploy from `prod` | live |
+| Deploy / promote / roll back | Actions → **"Deploy to production"** → Run workflow. Blank ref = tip of `main`; an older main SHA = rollback (same button). Moves the `prod` pointer, IAP-tunnels to the VM (tunnel-only deployer SA), hard-resets + rebuilds, health-checks the site. Manual path still works ([deployment.md §13](deployment.md)). Rollback does not reverse DB migrations | live |
+| Promote code | PR → `main` (CI + review gate) → test on workbench → run the deploy workflow (it moves `prod` itself) | live |
 | Logs / debugging | `docker compose logs -f backend` on the VM; JSON events greppable by `session_id`/`event` ([deployment.md §12](deployment.md)) | live |
 | DB access | `psql` in the db container, or SSH port-forward for a GUI — 5432 is never public | live |
 | Add / remove an admin | from `backend/`: `python scripts/grant_admin.py <email>` (or `--revoke`) with the service-account key present — sets the custom claim, refuses unverified emails, revokes the target's tokens so it lands promptly | live |
 | Disable / re-enable a user | `/admin` page → disable: sets Firebase `disabled` + revokes refresh tokens; new sessions blocked immediately, other API access dies ≤1h, a live session survives until it ends (FR-29) | live |
 | First prod deploy of auth | copy the service-account JSON to `~/aloud/firebase-service-account.json` (chmod 600) on the VM before `docker compose -f docker-compose.prod.yml up -d --build` | one-time |
 | Pause spend | `gcloud compute instances stop aloud --zone=us-west1-b` | live |
+
+### The deploy button, in detail
+
+What happens, start to finish, when you click **Actions → "Deploy to
+production" → Run workflow** (`.github/workflows/deploy.yml`):
+
+1. **Resolve & validate.** The workflow takes your `ref` input (blank = tip
+   of `main`) and checks `git merge-base --is-ancestor <SHA> main`: the
+   commit must be *on main's history*. This is the gate-integrity rule —
+   nothing that skipped PR review/CI can reach production, and no arbitrary
+   branch can be deployed.
+2. **Reach the VM.** The runner authenticates to GCP as the
+   `aloud-deployer` service account and opens an **IAP tunnel** to the VM's
+   port 22 (the same Google-authenticated path used for manual SSH — port 22
+   is never open to the internet). It then SSHes through the tunnel as the
+   normal VM user (`jigne`) using a dedicated deploy key.
+3. **Update the box.** On the VM: `git fetch`, `git checkout prod`,
+   `git reset --hard <SHA>` — *reset*, not *pull*, because a pull can only
+   move forward; reset makes the working copy exactly the chosen commit in
+   either direction (this is what makes rollback the same button). Then
+   `docker compose -f docker-compose.prod.yml up -d --build`: only images
+   whose inputs changed rebuild; Postgres data and the TLS cert live in
+   named volumes and are untouched.
+4. **Verify.** The workflow polls `https://work-aloud.com/healthz` until it
+   returns 200 (or fails the run with a rollback hint after ~2 minutes).
+5. **Move the `prod` pointer — last, only after verification.**
+   `git push origin +<SHA>:refs/heads/prod` — the `+` is a force-push,
+   deliberately: `prod` is not a line of development, it's a **bookmark
+   meaning "this exact commit is verified live."** Deploying forward moves
+   it forward; rolling back moves it backward; a failed run leaves it
+   untouched. Either way, `git log prod` on any machine tells you what
+   production is running.
+
+**The pieces and where they live:**
+
+| Piece | What it is | Where |
+|---|---|---|
+| `deploy.yml` | the workflow itself (steps above) | `.github/workflows/`, versioned like all code |
+| `aloud-deployer` | GCP service account, deliberately minimal: `iap.tunnelResourceAccessor` + `compute.viewer` ONLY — it can open the tunnel but cannot modify, stop, or reconfigure the VM | GCP IAM (project `aloud-498522`) |
+| `GCP_DEPLOYER_SA_KEY` | that service account's JSON key | GitHub repo secret |
+| `VM_SSH_PRIVATE_KEY` | a dedicated ed25519 deploy key (generated for CD, not your personal key) | GitHub repo secret; its public half is one line in `~/.ssh/authorized_keys` on the VM (comment `aloud-cd-deploy`) |
+| Concurrency guard | `concurrency: production-deploy` — two clicks can't deploy simultaneously | in the workflow |
+| GCP services involved | Compute Engine (the VM) + IAP (the tunnel) — nothing new was provisioned for CD beyond the service account | — |
+
+**Rollback**: same button, paste an older `main` SHA. Two caveats: DB schema
+migrations are **not** reversed (rolling back past a release that changed the
+schema may need manual DB attention first), and in-flight voice sessions die
+when the backend container restarts (true of every deploy).
+
+**Revoking CD access** if a secret ever leaks: delete the two GitHub secrets,
+delete the `aloud-deployer` SA (GCP console → IAM → Service Accounts), and
+remove the `aloud-cd-deploy` line from the VM's `~/.ssh/authorized_keys`.
 
 ## 8. Decision log (condensed ADRs)
 
