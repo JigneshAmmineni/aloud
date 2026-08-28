@@ -263,19 +263,26 @@ principles govern every FR below:
    architecture-agnostic (NFR-10): the hot path only ever *enqueues* —
    an instant, in-memory operation — while separate background writers
    batch the queue into the database, and a failed write logs and drops
-   rather than retrying into the conversation. Today's tap points are
-   pipeline observers (the transcript writer is the exemplar); in a future
-   custom agent loop they become direct recorder calls — the mechanism
-   changes, the rule doesn't.
+   rather than retrying into the conversation. Dropped-batch error logs
+   carry `session_id` (and `turn_id` where applicable) per CLAUDE.md's
+   instrumentation rule. Today's tap points are pipeline observers (the
+   transcript writer is the exemplar); in a future custom agent loop they
+   become direct recorder calls — the mechanism changes, the rule doesn't.
 
 - **FR-32** Every session records its raw usage in an append-only
   `usage_events` table (metadata only — no sensitive columns), captured by a
   per-session pipeline observer from the usage metrics the pipeline already
   emits and batch-written through the user-scoped path (per-session, so
   per-user; RLS applies): LLM prompt and completion tokens per inference,
-  TTS characters per utterance. STT usage is recorded at session end as the
-  session's audio duration (connect → disconnect, in seconds) — a proxy for
-  Flux's streamed-time billing, and flagged as such wherever displayed.
+  TTS characters per utterance, and an `artifact_created` event (metadata
+  only — kind, never title/content) whenever the create_artifact tool
+  succeeds, so admin views can count artifacts without touching the
+  content-bearing table (FR-38). STT usage is recorded at session end as the
+  session's audio duration (connect → disconnect, in seconds; the session
+  row's start/end timestamps are written in the pipeline's cleanup path, so
+  ungraceful disconnects are covered the same as a clean "End" tap) — a
+  proxy for Flux's streamed-time billing, and flagged as such wherever
+  displayed.
   Required dimensions per event: `user_id`, `session_id`, timestamp, stage,
   unit, quantity. Accepted consequence of batching + end-of-session STT
   recording: a process death mid-session (crash, OOM, deploy restart) loses
@@ -289,7 +296,10 @@ principles govern every FR below:
   first-audio ms, per-stage TTFB ms) written from the breakdowns the latency
   observer already computes, via the same background-writer pattern. This is
   the queryable substrate for percentiles (FR-37) and session drill-down
-  (FR-36).
+  (FR-36). Barge-in semantics: a turn interrupted *before* any agent audio
+  produces no row (there is no end-of-speech → first-audio to measure); a
+  turn interrupted mid-response records normally — its first-audio moment
+  already happened.
 - **FR-34** Cost derivation: a provider-rates config (documented in
   `.env.example`: STT per audio-minute, LLM per 1M input and output tokens,
   TTS per 1M characters) converts raw units to dollars at read time. No cost
@@ -302,7 +312,10 @@ principles govern every FR below:
   in/out, TTS characters, estimated cost, last-active (from DB aggregates).
   The Firebase merge is batched — one accounts fetch per page load, joined
   in memory — never a per-row Admin SDK lookup (a hidden N+1 against a
-  quota'd API).
+  quota'd API). Search mechanics follow from that: email/name matching runs
+  over the fetched-and-merged in-memory set (Postgres has no email column),
+  which is fine at current account counts; mirroring emails into `users`
+  is the revisit if the account list ever outgrows a single fetch.
 - **FR-36** Session history and drill-down: per user, a sessions list
   (started, duration, end reason, artifact count, per-stage usage, median and
   worst turn latency); per session, the turn-by-turn latency series and
@@ -313,7 +326,11 @@ principles govern every FR below:
   users today / last 7 days, estimated spend by provider (7d / 30d),
   turn-latency p50/p95 over 24h, and count of NFR-1 budget breaches over
   24h. For error inspection it links out to Cloud Logging / Error Reporting
-  (FR-39) rather than rebuilding them in-app.
+  (FR-39) rather than rebuilding them in-app. Deliberate narrowing of the
+  roadmap's "per-user error rates": the in-app signal is each user's count
+  of `end_reason = 'error'` sessions (visible in FR-36's session list);
+  finer-grained error analysis lives in Cloud Logging, and richer per-user
+  error attribution waits for LLM tracing (feature 6).
 - **FR-38** Admin cross-user reads use an explicit, auditable, and
   **narrow** RLS escape:
   - Scope: the `OR current_setting('app.is_admin', true) = 'true'` clause is
@@ -322,30 +339,45 @@ principles govern every FR below:
     (`transcript_events`, `artifacts`) never receive it: even with the admin
     context set, a query against them returns zero rows, giving NFR-9 the
     same DB-level backstop that FR-31 gives NFR-8. Where admin views need
-    metadata *about* content rows (FR-36's artifact count), a dedicated
-    metadata-only database view (id, session_id, user_id, created_at,
-    kind — no 🔒 columns) carries its own admin-readable policy instead.
+    metadata *about* content rows (FR-36's artifact count), the count comes
+    from FR-32's `artifact_created` usage events — never from the
+    `artifacts` table. (A metadata-only database view was considered and
+    rejected: Postgres views execute with owner privileges by default —
+    a superuser-owned view silently bypasses RLS for every caller — and
+    `security_invoker` views would inherit the caller's zero-row policy;
+    counting from the already-admin-scoped events table avoids the entire
+    ownership-semantics class of bugs.)
   - The setting is applied transaction-locally (like `app.user_id`) only by
     an `admin_scoped_session()` helper that only admin routes (behind
     FR-28's `get_current_admin`) may use.
   - Read-only is DB-enforced, not conventional: `admin_scoped_session()`
     issues `SET TRANSACTION READ ONLY`, so an accidental write through the
     admin context fails at the database.
+  - Admin query functions are a distinct family from the user-scoped repo
+    layer — CLAUDE.md's "repo signatures take `user_id: str`, no default"
+    rule applies to the user-scoped family and is not misapplied here.
   - Tests must prove: (a) normal user-scoped sessions remain isolated
     exactly as before, (b) a session with neither context still returns
     zero rows, (c) the admin context reads across users on the scoped
     tables, (d) the admin context gets zero rows from `transcript_events`
     and `artifacts`, and admin API responses never serialize content
-    columns, (e) a write attempted through the admin context fails.
+    columns, (e) a write attempted through the admin context fails,
+    (f) `app.is_admin` cannot leak across pooled-connection reuse (the
+    FR-31 pooled-reuse test, repeated for this setting — a leak here
+    grants cross-user reads).
 - **FR-39** Ops — logs leave the box: the VM's containers ship stdout to
   GCP Cloud Logging (Docker `gcplogs` logging driver in the prod compose;
   the structured-log JSON was designed for this — its `severity` field maps
   to Cloud Logging levels, `session_id`/`event`/`user_id` become queryable
   `jsonPayload` fields). ERROR-severity entries surface in GCP Error
-  Reporting automatically. The on-call flow (Logs Explorer queries for a
-  session_id, Error Reporting triage) is documented in
-  CURRENT-ARCHITECTURE.md. Prod stays at `LOG_LEVEL=INFO`, which carries no
-  transcript text (NFR-9's shipped-logs half).
+  Reporting automatically. Implementation must begin with a spike verifying
+  the driver actually promotes our JSON into queryable `jsonPayload` fields
+  (the claim the whole on-call flow rests on); if it ships strings instead,
+  the fallback is the GCP Ops Agent with a structured-log parser config.
+  The verified on-call flow (Logs Explorer queries for a session_id, Error
+  Reporting triage) is then documented in CURRENT-ARCHITECTURE.md. Prod
+  stays at `LOG_LEVEL=INFO`, which carries no transcript text (NFR-9's
+  shipped-logs half).
 - **FR-40** Ops — uptime alerting: a GCP Monitoring uptime check probes
   `https://work-aloud.com/healthz` (multi-region, 5-minute cadence) with an
   alert policy that emails the admin when it fails. Configuration recorded
