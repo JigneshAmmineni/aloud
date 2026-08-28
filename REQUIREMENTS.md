@@ -324,6 +324,31 @@ principles govern every FR below:
   in CURRENT-ARCHITECTURE.md, including how to verify the alert actually
   fires (a deliberate one-time test).
 
+- **FR-41** Admin UI structure — every view is a URL-addressable page (deep
+  links are how ops work gets shared; no modals or expanding rows for
+  primary navigation):
+  - `/admin` — the Overview tab (FR-37), the default landing view.
+  - `/admin/users` — the user list (FR-35): a search input at the top
+    (filters as you type, debounced), a table with sortable column headers
+    (click to sort, click again to reverse), pagination controls below.
+    Each row keeps FR-29's disable/enable button.
+  - Clicking anywhere else on a user row opens `/admin/users/{uid}` — that
+    user's session history (FR-36): account summary at top (email, name,
+    status, totals), sessions table below, newest first.
+  - Clicking a session row opens `/admin/sessions/{session_id}` — the
+    drill-down (FR-36): session summary (duration, end reason, usage,
+    estimated cost) and the per-turn latency table, with turns exceeding
+    the NFR-1 budget visually flagged.
+  - A persistent tab bar (Overview | Users) on all admin pages plus a
+    breadcrumb trail (Users → {email} → session) for the drill-down path;
+    "← back" affordances follow the breadcrumb. The "Admin" nav entry from
+    FR-30 points at `/admin`.
+  - Empty, loading, and error states exist on every view; all admin pages
+    are gated exactly as FR-30's admin nav (cosmetic client check, server
+    enforcement per FR-38). Finer visual design is not specified; NFR-3
+    (mobile browsers) applies, though admin pages are desktop-first —
+    tables may scroll horizontally on phones rather than reflow.
+
 Retention: `usage_events` and `turn_metrics` are kept indefinitely — at
 current scale they grow by kilobytes per session, and raw usage is the audit
 trail. Revisit trigger (recorded here deliberately): when either table
