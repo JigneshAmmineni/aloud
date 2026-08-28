@@ -277,7 +277,13 @@ principles govern every FR below:
   session's audio duration (connect → disconnect, in seconds) — a proxy for
   Flux's streamed-time billing, and flagged as such wherever displayed.
   Required dimensions per event: `user_id`, `session_id`, timestamp, stage,
-  unit, quantity.
+  unit, quantity. Accepted consequence of batching + end-of-session STT
+  recording: a process death mid-session (crash, OOM, deploy restart) loses
+  that session's in-flight usage rows outright — acceptable because usage
+  here is best-effort telemetry, not a billing record (provider consoles
+  remain the invoice truth, FR-34's figures are labeled estimates). A
+  periodic-checkpoint design is the upgrade if usage ever becomes
+  billing-grade.
 - **FR-33** Per-turn latency is persisted, not just logged: a `turn_metrics`
   table (`user_id`, `session_id`, `turn_id`, timestamp, end-of-speech →
   first-audio ms, per-stage TTFB ms) written from the breakdowns the latency
@@ -294,6 +300,9 @@ principles govern every FR below:
   email/name/uid substring, sortable, paginated. Per-user columns: account
   status (from Firebase), sessions count, total audio minutes, LLM tokens
   in/out, TTS characters, estimated cost, last-active (from DB aggregates).
+  The Firebase merge is batched — one accounts fetch per page load, joined
+  in memory — never a per-row Admin SDK lookup (a hidden N+1 against a
+  quota'd API).
 - **FR-36** Session history and drill-down: per user, a sessions list
   (started, duration, end reason, artifact count, per-stage usage, median and
   worst turn latency); per session, the turn-by-turn latency series and
@@ -305,15 +314,29 @@ principles govern every FR below:
   turn-latency p50/p95 over 24h, and count of NFR-1 budget breaches over
   24h. For error inspection it links out to Cloud Logging / Error Reporting
   (FR-39) rather than rebuilding them in-app.
-- **FR-38** Admin cross-user reads use an explicit, auditable RLS escape:
-  every FR-31 policy is extended with
-  `OR current_setting('app.is_admin', true) = 'true'`, and that setting is
-  applied (transaction-locally, like `app.user_id`) only by an
-  `admin_scoped_session()` helper that only admin routes (behind
-  `get_current_admin`) may use. Admin sessions are read-only by
-  construction. Tests must prove: (a) normal user-scoped sessions remain
-  isolated exactly as before, (b) a session with neither context still
-  returns zero rows, (c) the admin context reads across users.
+- **FR-38** Admin cross-user reads use an explicit, auditable, and
+  **narrow** RLS escape:
+  - Scope: the `OR current_setting('app.is_admin', true) = 'true'` clause is
+    added ONLY to the policies of the tables the admin surface needs —
+    `sessions`, `usage_events`, `turn_metrics`. The content-bearing tables
+    (`transcript_events`, `artifacts`) never receive it: even with the admin
+    context set, a query against them returns zero rows, giving NFR-9 the
+    same DB-level backstop that FR-31 gives NFR-8. Where admin views need
+    metadata *about* content rows (FR-36's artifact count), a dedicated
+    metadata-only database view (id, session_id, user_id, created_at,
+    kind — no 🔒 columns) carries its own admin-readable policy instead.
+  - The setting is applied transaction-locally (like `app.user_id`) only by
+    an `admin_scoped_session()` helper that only admin routes (behind
+    FR-28's `get_current_admin`) may use.
+  - Read-only is DB-enforced, not conventional: `admin_scoped_session()`
+    issues `SET TRANSACTION READ ONLY`, so an accidental write through the
+    admin context fails at the database.
+  - Tests must prove: (a) normal user-scoped sessions remain isolated
+    exactly as before, (b) a session with neither context still returns
+    zero rows, (c) the admin context reads across users on the scoped
+    tables, (d) the admin context gets zero rows from `transcript_events`
+    and `artifacts`, and admin API responses never serialize content
+    columns, (e) a write attempted through the admin context fails.
 - **FR-39** Ops — logs leave the box: the VM's containers ship stdout to
   GCP Cloud Logging (Docker `gcplogs` logging driver in the prod compose;
   the structured-log JSON was designed for this — its `severity` field maps
@@ -328,7 +351,6 @@ principles govern every FR below:
   alert policy that emails the admin when it fails. Configuration recorded
   in CURRENT-ARCHITECTURE.md, including how to verify the alert actually
   fires (a deliberate one-time test).
-
 - **FR-41** Admin UI structure — every view is a URL-addressable page (deep
   links are how ops work gets shared; no modals or expanding rows for
   primary navigation):
@@ -349,10 +371,12 @@ principles govern every FR below:
     "← back" affordances follow the breadcrumb. The "Admin" nav entry from
     FR-30 points at `/admin`.
   - Empty, loading, and error states exist on every view; all admin pages
-    are gated exactly as FR-30's admin nav (cosmetic client check, server
-    enforcement per FR-38). Finer visual design is not specified; NFR-3
-    (mobile browsers) applies, though admin pages are desktop-first —
-    tables may scroll horizontally on phones rather than reflow.
+    are gated exactly as FR-30's admin nav (cosmetic client check; server
+    enforcement is FR-28's `get_current_admin` on every endpoint, with
+    FR-38 scoping what those endpoints can read). Finer visual design is
+    not specified; NFR-3 (mobile browsers) applies, though admin pages are
+    desktop-first — tables may scroll horizontally on phones rather than
+    reflow.
 
 Retention: `usage_events` and `turn_metrics` are kept indefinitely — at
 current scale they grow by kilobytes per session, and raw usage is the audit
