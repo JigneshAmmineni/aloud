@@ -274,10 +274,11 @@ principles govern every FR below:
   per-session pipeline observer from the usage metrics the pipeline already
   emits and batch-written through the user-scoped path (per-session, so
   per-user; RLS applies): LLM prompt and completion tokens per inference,
-  TTS characters per utterance, and an `artifact_created` event (metadata
-  only — kind, never title/content) whenever the create_artifact tool
-  succeeds, so admin views can count artifacts without touching the
-  content-bearing table (FR-38). STT usage is recorded at session end as the
+  TTS characters per utterance, and an `artifact_created` event
+  (`stage = 'artifact'`, `unit = 'count'`, `quantity = 1`; the artifact's
+  kind rides along as metadata — never title/content) whenever the
+  create_artifact tool succeeds, so admin views can count artifacts without
+  touching the content-bearing table (FR-38). STT usage is recorded at session end as the
   session's audio duration (connect → disconnect, in seconds; the session
   row's start/end timestamps are written in the pipeline's cleanup path, so
   ungraceful disconnects are covered the same as a clean "End" tap) — a
@@ -295,24 +296,36 @@ principles govern every FR below:
   backend went away — routine deploys cause this too, so it is deliberately
   NOT labeled an error and does not pollute FR-37's error signal, which
   counts only `end_reason = 'error'`), its
-  `ended_at` inferred from the session's latest recorded event (falling
-  back to `started_at`), and its STT usage event emitted from that inferred
-  duration. Accepted residual loss: the final in-flight batch and the
+  `ended_at` inferred deterministically as the maximum timestamp across
+  that session's `transcript_events`, `usage_events`, and `turn_metrics`
+  rows (falling back to `started_at` when none exist), and its STT usage
+  event emitted from that inferred duration. Accepted residual loss: the final in-flight batch and the
   imprecision of the inferred crash time — acceptable because usage here is
   best-effort telemetry, not a billing record (provider consoles remain the
   invoice truth; FR-34's figures are labeled estimates).
 - **FR-33** Per-turn latency is persisted, not just logged: a `turn_metrics`
   table (`user_id`, `session_id`, `turn_id`, timestamp, end-of-speech →
   first-audio ms, per-stage TTFB ms) written from the breakdowns the latency
-  observer already computes, via the same background-writer pattern. This is
+  observer already computes, via the same background-writer pattern.
+  Turn identity — currently a schema aspiration nothing populates — is
+  sourced from Pipecat's turn tracking, which the pipeline already enables
+  (`enable_turn_tracking=True`): its tracker emits numbered turn
+  start/end events that an observer maps onto every captured row, and turn
+  boundaries under barge-in follow the tracker's own semantics (an
+  interruption ends the turn). The implementation starts with a spike
+  confirming the tracker's events carry a usable turn number; if they
+  don't, the fallback is a per-session monotonic counter incremented on the
+  tracker's turn-start event. This is
   the queryable substrate for percentiles (FR-37) and session drill-down
   (FR-36). Barge-in semantics: a turn interrupted *before* any agent audio
   produces no `turn_metrics` row (there is no end-of-speech → first-audio
-  to measure), but any LLM tokens it consumed before the interruption ARE
-  still recorded in `usage_events` — they were spent; FR-36's per-turn
-  table must therefore be driven from the union of both tables (latency
-  may be absent for a turn that still has cost), never an inner join from
-  latency. A turn interrupted mid-response records normally — its
+  to measure), but any LLM tokens it consumed — and any TTS characters
+  already submitted for synthesis (sentence-level chunks may be billed
+  before the interruption lands) — ARE still recorded in `usage_events`:
+  the rule is *spent is recorded*, whichever stage spent it. FR-36's
+  per-turn table must therefore be driven from the union of both tables
+  (latency may be absent for a turn that still has cost), never an inner
+  join from latency. A turn interrupted mid-response records normally — its
   first-audio moment already happened.
 - **FR-34** Cost derivation: a provider-rates config (documented in
   `.env.example`: STT per audio-minute, LLM per 1M input and output tokens,
@@ -368,8 +381,11 @@ principles govern every FR below:
     counting from the already-admin-scoped events table avoids the entire
     ownership-semantics class of bugs.)
   - The setting is applied transaction-locally (like `app.user_id`) only by
-    an `admin_scoped_session()` helper that only admin routes (behind
-    FR-28's `get_current_admin`) may use.
+    an `admin_scoped_session()` helper whose admin-only constraint is
+    structural, not conventional: its required argument is the `AuthedUser`
+    produced by FR-28's `get_current_admin`, and it raises unless
+    `is_admin` is true — a forgotten gate is a loud error, mirroring the
+    no-default-`user_id` discipline.
   - Read-only is DB-enforced, not conventional: `admin_scoped_session()`
     issues `SET TRANSACTION READ ONLY`, so an accidental write through the
     admin context fails at the database.
@@ -398,9 +414,13 @@ principles govern every FR below:
   (the claim the whole on-call flow rests on); if it ships strings instead,
   the fallback is the GCP Ops Agent with a structured-log parser config.
   The verified on-call flow (Logs Explorer queries for a session_id, Error
-  Reporting triage) is then documented in CURRENT-ARCHITECTURE.md. Prod
-  stays at `LOG_LEVEL=INFO`, which carries no transcript text (NFR-9's
-  shipped-logs half).
+  Reporting triage) is then documented in CURRENT-ARCHITECTURE.md.
+  Because shipped logs are persistent and external, INFO-only is enforced
+  by default, not by a hand-typed env line: this FR flips the code's
+  `LOG_LEVEL` fallback from DEBUG to INFO (and `.env.example` to match) —
+  DEBUG becomes the explicit dev opt-in, so the safe state is the default
+  state and no forgotten prod `.env` entry can ship transcript text
+  (NFR-9's shipped-logs half).
 - **FR-40** Ops — uptime alerting: a GCP Monitoring uptime check probes
   `https://work-aloud.com/healthz` (multi-region, 5-minute cadence) with an
   alert policy that emails the admin when it fails. Configuration recorded
