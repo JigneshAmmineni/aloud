@@ -337,7 +337,7 @@ principles govern every FR below:
   email/name/uid substring, sortable, paginated. Per-user columns: account
   status (from Firebase), sessions count, total audio minutes, LLM tokens
   in/out, TTS characters, estimated cost, last-active (from DB aggregates).
-  The Firebase merge is batched — one Admin SDK `list_users` call per
+  The Firebase merge is batched — one paginated `list_users` traversal per
   admin-list API request, joined in memory — never a per-row lookup (a
   hidden N+1 against a quota'd API). Search mechanics follow from that: email/name matching runs
   over the fetched-and-merged in-memory set (Postgres has no email column),
@@ -362,13 +362,17 @@ principles govern every FR below:
   error attribution waits for LLM tracing (feature 6).
 - **FR-38** Admin cross-user reads use an explicit, auditable, and
   **narrow** RLS escape:
-  - Scope: the `OR current_setting('app.is_admin', true) = 'true'` clause is
-    added ONLY to the **`USING` (read) half** of the policies — never
-    `WITH CHECK` — and only on the tables the admin surface needs:
-    `sessions`, `usage_events`, `turn_metrics`. Writes under admin context
-    therefore fail at two independent layers: the policy's unchanged
-    `WITH CHECK` and the transaction's `READ ONLY` mode (below) — neither
-    is a single point of failure for the other. The content-bearing tables
+  - Scope: the `OR current_setting('app.is_admin', true) = 'true'` clause
+    lives on a **dedicated `FOR SELECT` policy** — never on the policies
+    governing writes — and only on the tables the admin surface needs:
+    `sessions`, `usage_events`, `turn_metrics`. The INSERT/UPDATE/DELETE
+    policies keep their user-only predicates. This split exists because
+    Postgres consults only `USING` for `DELETE` (never `WITH CHECK`), so an
+    admin clause on a generic all-commands policy would let admin-context
+    deletes pass RLS. With the split, every write command under admin
+    context fails at two independent layers — the untouched write policies
+    and the transaction's `READ ONLY` mode (below) — neither a single point
+    of failure for the other. The content-bearing tables
     (`transcript_events`, `artifacts`) never receive it: even with the admin
     context set, a query against them returns zero rows, giving NFR-9 the
     same DB-level backstop that FR-31 gives NFR-8. Where admin views need
@@ -397,10 +401,12 @@ principles govern every FR below:
     (b) a context with neither setting still returns zero rows, (c) the
     admin context reads across users on the scoped tables, (d) the admin
     context gets zero rows from `transcript_events` and `artifacts`, and
-    admin API responses never serialize content columns, (e) a write
-    attempted through the admin context fails — and, on a non-READ-ONLY
-    transaction with `app.is_admin` set, a cross-user write is still
-    rejected by `WITH CHECK` (proving the two layers independently),
+    admin API responses never serialize content columns, (e) writes
+    attempted through the admin context fail — covering INSERT, UPDATE,
+    **and DELETE** — and, on a non-READ-ONLY transaction with
+    `app.is_admin` set, a cross-user INSERT/UPDATE is rejected by
+    `WITH CHECK` and a cross-user DELETE matches zero rows (proving the
+    policy layer guards every command independently of READ ONLY),
     (f) `app.is_admin` cannot leak across pooled-connection reuse (the
     FR-31 pooled-reuse test, repeated for this setting — a leak here
     grants cross-user reads).
@@ -409,10 +415,12 @@ principles govern every FR below:
   the structured-log JSON was designed for this — its `severity` field maps
   to Cloud Logging levels, `session_id`/`event`/`user_id` become queryable
   `jsonPayload` fields). ERROR-severity entries surface in GCP Error
-  Reporting automatically. Implementation must begin with a spike verifying
-  the driver actually promotes our JSON into queryable `jsonPayload` fields
-  (the claim the whole on-call flow rests on); if it ships strings instead,
-  the fallback is the GCP Ops Agent with a structured-log parser config.
+  Reporting. Implementation must begin with a spike verifying BOTH claims
+  this flow rests on: that the driver promotes our JSON into queryable
+  `jsonPayload` fields (fallback: the GCP Ops Agent with a structured-log
+  parser config), and that our ERROR-severity entries actually surface in
+  Error Reporting, which has its own format expectations (fallback: a
+  log-based alert on `severity >= ERROR`, which needs no special format).
   The verified on-call flow (Logs Explorer queries for a session_id, Error
   Reporting triage) is then documented in CURRENT-ARCHITECTURE.md.
   Because shipped logs are persistent and external, INFO-only is enforced
