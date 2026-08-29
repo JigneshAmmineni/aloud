@@ -291,7 +291,10 @@ principles govern every FR below:
   throughout the session, a process death (crash, OOM, deploy restart)
   loses only the final unflushed batch. Sessions orphaned by such a death
   are recovered by a **boot-time sweep**: on backend startup, any session
-  still marked `active` is closed with `end_reason = 'crashed'`, its
+  still marked `active` is closed with `end_reason = 'interrupted'` (the
+  backend went away — routine deploys cause this too, so it is deliberately
+  NOT labeled an error and does not pollute FR-37's error signal, which
+  counts only `end_reason = 'error'`), its
   `ended_at` inferred from the session's latest recorded event (falling
   back to `started_at`), and its STT usage event emitted from that inferred
   duration. Accepted residual loss: the final in-flight batch and the
@@ -304,9 +307,13 @@ principles govern every FR below:
   observer already computes, via the same background-writer pattern. This is
   the queryable substrate for percentiles (FR-37) and session drill-down
   (FR-36). Barge-in semantics: a turn interrupted *before* any agent audio
-  produces no row (there is no end-of-speech → first-audio to measure); a
-  turn interrupted mid-response records normally — its first-audio moment
-  already happened.
+  produces no `turn_metrics` row (there is no end-of-speech → first-audio
+  to measure), but any LLM tokens it consumed before the interruption ARE
+  still recorded in `usage_events` — they were spent; FR-36's per-turn
+  table must therefore be driven from the union of both tables (latency
+  may be absent for a turn that still has cost), never an inner join from
+  latency. A turn interrupted mid-response records normally — its
+  first-audio moment already happened.
 - **FR-34** Cost derivation: a provider-rates config (documented in
   `.env.example`: STT per audio-minute, LLM per 1M input and output tokens,
   TTS per 1M characters) converts raw units to dollars at read time. No cost
@@ -317,9 +324,9 @@ principles govern every FR below:
   email/name/uid substring, sortable, paginated. Per-user columns: account
   status (from Firebase), sessions count, total audio minutes, LLM tokens
   in/out, TTS characters, estimated cost, last-active (from DB aggregates).
-  The Firebase merge is batched — one accounts fetch per page load, joined
-  in memory — never a per-row Admin SDK lookup (a hidden N+1 against a
-  quota'd API). Search mechanics follow from that: email/name matching runs
+  The Firebase merge is batched — one Admin SDK `list_users` call per
+  admin-list API request, joined in memory — never a per-row lookup (a
+  hidden N+1 against a quota'd API). Search mechanics follow from that: email/name matching runs
   over the fetched-and-merged in-memory set (Postgres has no email column),
   which is fine at current account counts; mirroring emails into `users`
   is the revisit if the account list ever outgrows a single fetch.
@@ -343,8 +350,12 @@ principles govern every FR below:
 - **FR-38** Admin cross-user reads use an explicit, auditable, and
   **narrow** RLS escape:
   - Scope: the `OR current_setting('app.is_admin', true) = 'true'` clause is
-    added ONLY to the policies of the tables the admin surface needs —
-    `sessions`, `usage_events`, `turn_metrics`. The content-bearing tables
+    added ONLY to the **`USING` (read) half** of the policies — never
+    `WITH CHECK` — and only on the tables the admin surface needs:
+    `sessions`, `usage_events`, `turn_metrics`. Writes under admin context
+    therefore fail at two independent layers: the policy's unchanged
+    `WITH CHECK` and the transaction's `READ ONLY` mode (below) — neither
+    is a single point of failure for the other. The content-bearing tables
     (`transcript_events`, `artifacts`) never receive it: even with the admin
     context set, a query against them returns zero rows, giving NFR-9 the
     same DB-level backstop that FR-31 gives NFR-8. Where admin views need
@@ -365,12 +376,15 @@ principles govern every FR below:
   - Admin query functions are a distinct family from the user-scoped repo
     layer — CLAUDE.md's "repo signatures take `user_id: str`, no default"
     rule applies to the user-scoped family and is not misapplied here.
-  - Tests must prove: (a) normal user-scoped sessions remain isolated
-    exactly as before, (b) a session with neither context still returns
-    zero rows, (c) the admin context reads across users on the scoped
-    tables, (d) the admin context gets zero rows from `transcript_events`
-    and `artifacts`, and admin API responses never serialize content
-    columns, (e) a write attempted through the admin context fails,
+  - Tests must prove ("context" below = a database transaction, not a voice
+    session): (a) user-scoped contexts remain isolated exactly as before,
+    (b) a context with neither setting still returns zero rows, (c) the
+    admin context reads across users on the scoped tables, (d) the admin
+    context gets zero rows from `transcript_events` and `artifacts`, and
+    admin API responses never serialize content columns, (e) a write
+    attempted through the admin context fails — and, on a non-READ-ONLY
+    transaction with `app.is_admin` set, a cross-user write is still
+    rejected by `WITH CHECK` (proving the two layers independently),
     (f) `app.is_admin` cannot leak across pooled-connection reuse (the
     FR-31 pooled-reuse test, repeated for this setting — a leak here
     grants cross-user reads).
@@ -423,7 +437,8 @@ Retention: `usage_events` and `turn_metrics` are kept indefinitely — at
 current scale they grow by kilobytes per session, and raw usage is the audit
 trail. Revisit trigger (recorded here deliberately): when either table
 passes ~1M rows or the database exceeds ~1 GB, add monthly rollups and purge
-raw rows older than 90 days.
+raw rows older than 90 days. Both tables are user-keyed and therefore join
+NFR-7's delete-all-my-data cascade whenever that FR is implemented.
 
 ---
 
@@ -432,7 +447,7 @@ raw rows older than 90 days.
 ### 5.1 Latency
 - **NFR-1** Time from end-of-user-speech to first audio from the agent must be under 3 seconds under normal network conditions.
 - **NFR-2** Audio must stream as it is generated. The agent must not wait until its full response is ready before speaking.
-- **NFR-10** Measurement must be free: capture (§4.9) adds no synchronous work to the voice hot path. The principle, independent of pipeline architecture: code on the hot path only ever enqueues to memory; background writers batch queues into the database; a failed write logs an error and drops the batch rather than disturbing a live session. (The FR-20 transcript writer is the exemplar of this discipline, not its definition — it applies equally to a future custom agent loop, where observers become direct recorder calls.)
+- **NFR-10** Measurement must be free: capture (§4.9) adds no synchronous work to the voice hot path. The principle, independent of pipeline architecture: code on the hot path only ever enqueues to memory; background writers batch queues into the database; a failed write logs an error and drops the batch rather than disturbing a live session. Test approach: the same split the transcript-writer tests use — observers/recorders are tested against a fake queue with no database available (proving the enqueue path touches nothing), and writers are exercised separately, including the broken-database case completing without raising. (The FR-20 transcript writer is the exemplar of this discipline, not its definition — it applies equally to a future custom agent loop, where observers become direct recorder calls.)
 
 ### 5.2 Availability & Reliability
 - **NFR-3** The app is a web application. It must function correctly in mobile browsers on iOS and Android, and in desktop browsers. No native app installation required.
