@@ -52,6 +52,7 @@ Server-side encryption (key held by us) is added post-MVP. To make this painless
 ## Workflow rules
 
 - **Everything runs in Docker.** Never install packages or dependencies on the host machine — no venvs, no global pip/npm installs. Run backend commands (tests, lint, one-off scripts) inside the compose services, e.g. `docker compose run --rm backend python -m pytest -q`; the frontend service manages its own `node_modules` volume. Dependency changes go in `requirements.txt` / `package.json` so the Docker images pick them up.
+- **When a review lands, the summary leads.** First output a concise summary of the findings with an assessment (real vs. churn; what will be fixed vs. pushed back on), then proceed to fix autonomously in the same turn — the user reads along and vetoes afterward. The unpushed commit is the veto window. Never fix-then-summarize; never summarize-then-wait.
 - **NEVER pre-emptively push or open PRs — no exceptions.** Commits at reasonable checkpoints are fine on Claude's own judgment. Pushes and PRs are not: only *suggest* them and wait for explicit approval, **every time** — a batch of pending commits gets one suggestion, and each subsequent push needs its own approval. Broad instructions like "work end-to-end," "be agentic," or "resolve issues on your own" do NOT override this rule; only an explicit "push" / "open the PR" does. (Every push to an open PR re-runs the Claude review — pushes cost money and are the user's call.)
 
 ---
