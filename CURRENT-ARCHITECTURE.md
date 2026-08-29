@@ -244,13 +244,19 @@ production" → Run workflow** (`.github/workflows/deploy.yml`):
    port 22 (the same Google-authenticated path used for manual SSH — port 22
    is never open to the internet). It then SSHes through the tunnel as the
    normal VM user (`jigne`) using a dedicated deploy key.
-3. **Update the box.** On the VM: `git fetch`, `git checkout prod`,
-   `git reset --hard <SHA>` — *reset*, not *pull*, because a pull can only
-   move forward; reset makes the working copy exactly the chosen commit in
-   either direction (this is what makes rollback the same button). Then
-   `docker compose -f docker-compose.prod.yml up -d --build`: only images
-   whose inputs changed rebuild; Postgres data and the TLS cert live in
-   named volumes and are untouched.
+3. **Update the box.** On the VM, first disk hygiene: `docker image prune -f`
+   + `docker builder prune -f --keep-storage=4GB`. Run *before* the build on
+   purpose: the outgoing release is still tagged and running at that moment,
+   so only images at least two releases old (untagged, unused) qualify —
+   deploying vN keeps vN-1's layers around and sweeps vN-2 and older. Both
+   prunes are garbage collectors (in-use/tagged images skipped, nothing-to-do
+   = clean no-op), so the step is idempotent. Then `git fetch`,
+   `git checkout prod`, `git reset --hard <SHA>` — *reset*, not *pull*,
+   because a pull can only move forward; reset makes the working copy exactly
+   the chosen commit in either direction (this is what makes rollback the
+   same button). Then `docker compose -f docker-compose.prod.yml up -d
+   --build`: only images whose inputs changed rebuild; Postgres data and the
+   TLS cert live in named volumes and are untouched.
 4. **Verify.** The workflow polls `https://work-aloud.com/healthz` until it
    returns 200 (or fails the run with a rollback hint after ~2 minutes).
 5. **Move the `prod` pointer — last, only after verification.**

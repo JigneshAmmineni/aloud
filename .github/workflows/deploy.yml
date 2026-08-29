@@ -105,6 +105,13 @@ jobs:
           set -euo pipefail
           SHA="$1"
           cd ~/aloud
+          # Disk hygiene, BEFORE the build so the previous release survives:
+          # right now the outgoing version is still tagged+running, so only
+          # older, untagged leftovers qualify. Both prunes are garbage
+          # collectors — in-use/tagged images are skipped, nothing-to-do is
+          # a clean no-op — so this is safe to re-run on every deploy.
+          docker image prune -f
+          docker builder prune -f --keep-storage=4GB
           git fetch origin
           git checkout prod
           git reset --hard "$SHA"
