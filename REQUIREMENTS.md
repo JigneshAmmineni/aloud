@@ -275,10 +275,10 @@ principles govern every FR below:
   emits and batch-written through the user-scoped path (per-session, so
   per-user; RLS applies): LLM prompt and completion tokens per inference,
   TTS characters per utterance, and an `artifact_created` event
-  (`stage = 'artifact'`, `unit = 'count'`, `quantity = 1`; the artifact's
-  kind rides along as metadata — never title/content) whenever the
-  create_artifact tool succeeds, so admin views can count artifacts without
-  touching the content-bearing table (FR-38). STT usage is recorded at session end as the
+  (`stage = 'artifact'`, `unit = 'count'`, `quantity = 1`, `detail` = the
+  artifact's `kind` — never title/content) whenever the create_artifact
+  tool succeeds, so admin views can count artifacts without touching the
+  content-bearing table (FR-38). STT usage is recorded at session end as the
   session's audio duration (connect → disconnect, in seconds; the session
   row's start/end timestamps are written in the pipeline's cleanup path, so
   ungraceful disconnects are covered the same as a clean "End" tap) — a
@@ -286,8 +286,11 @@ principles govern every FR below:
   displayed.
   Required dimensions per event: `user_id`, `session_id`, `turn_id`
   (nullable — session-level events like the STT record have none),
-  timestamp, stage, unit, quantity. `turn_id` is what makes per-turn cost
-  visible (FR-36).
+  timestamp, `stage` (the event's *source* — `stt` | `llm` | `tts` |
+  `artifact`; a source label, not strictly a pipeline stage), `unit`,
+  `quantity`, and a nullable `detail` field for event-specific metadata
+  (the artifact `kind` lives here; never content). `turn_id` is what makes
+  per-turn cost visible (FR-36).
   Crash behavior: because LLM/TTS events are written in ~1-second batches
   throughout the session, a process death (crash, OOM, deploy restart)
   loses only the final unflushed batch. Sessions orphaned by such a death
@@ -299,7 +302,12 @@ principles govern every FR below:
   `ended_at` inferred deterministically as the maximum timestamp across
   that session's `transcript_events`, `usage_events`, and `turn_metrics`
   rows (falling back to `started_at` when none exist), and its STT usage
-  event emitted from that inferred duration. Accepted residual loss: the final in-flight batch and the
+  event emitted from that inferred duration. The sweep is correct only
+  while the backend runs as a single instance (today's deployment — a
+  booting instance can safely assume every `active` session is orphaned);
+  a scaled-out backend must scope the sweep to sessions the booting
+  instance owns, which joins the session-affinity work already noted in
+  CURRENT-ARCHITECTURE.md's scaling notes. Accepted residual loss: the final in-flight batch and the
   imprecision of the inferred crash time — acceptable because usage here is
   best-effort telemetry, not a billing record (provider consoles remain the
   invoice truth; FR-34's figures are labeled estimates).
