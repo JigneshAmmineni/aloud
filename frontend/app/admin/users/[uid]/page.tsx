@@ -17,6 +17,7 @@ import {
   fmtInt,
   fmtMinutes,
   fmtWhen,
+  useAdminReady,
   type CostEstimate,
   type Usage,
 } from "../../shell";
@@ -46,6 +47,7 @@ type Response = { account: Account | null; sessions: SessionRow[] };
 
 export default function AdminUserSessionsPage() {
   const router = useRouter();
+  const ready = useAdminReady();
   const { uid } = useParams<{ uid: string }>();
   const [data, setData] = useState<Response | null>(null);
   const [error, setError] = useState("");
@@ -62,8 +64,8 @@ export default function AdminUserSessionsPage() {
   }, [uid]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    if (ready) load();
+  }, [ready, load]);
 
   const who = data?.account?.email ?? uid;
   const totalCost = data

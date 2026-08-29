@@ -15,6 +15,15 @@ import { useAuth } from "@/lib/auth";
 
 export type Crumb = { label: string; href?: string };
 
+/** True once Firebase auth has initialized AND the user is an admin. Pages
+ * must gate their data fetches on this: on a hard reload the component
+ * mounts before auth is ready, and an ungated fetch goes out tokenless →
+ * 401 → a sticky error state. */
+export function useAdminReady(): boolean {
+  const { user, loading, isAdmin } = useAuth();
+  return !loading && !!user && isAdmin;
+}
+
 export type CostEstimate = { stt: number; llm: number; tts: number; total: number };
 
 /** usage maps "stage.unit" -> quantity (the backend aggregate shape). */

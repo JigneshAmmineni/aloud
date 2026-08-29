@@ -19,6 +19,7 @@ import {
   fmtDuration,
   fmtInt,
   fmtWhen,
+  useAdminReady,
   type CostEstimate,
   type Usage,
 } from "../../shell";
@@ -55,6 +56,7 @@ function fmtStages(stages: Record<string, number> | null): string {
 }
 
 function SessionDetail() {
+  const ready = useAdminReady();
   const { id } = useParams<{ id: string }>();
   const from = useSearchParams().get("from");
   const [data, setData] = useState<Detail | null>(null);
@@ -76,8 +78,8 @@ function SessionDetail() {
   }, [id]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    if (ready) load();
+  }, [ready, load]);
 
   // Breadcrumb: Users → {email} → session. The email travels as a search
   // param from the user page; a pasted deep link falls back to the uid.

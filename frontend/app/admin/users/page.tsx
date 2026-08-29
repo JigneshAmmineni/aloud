@@ -17,6 +17,7 @@ import {
   fmtInt,
   fmtMinutes,
   fmtWhen,
+  useAdminReady,
   type CostEstimate,
   type Usage,
 } from "../shell";
@@ -52,6 +53,7 @@ const SORTABLE: Record<string, string> = {
 
 export default function AdminUsersPage() {
   const router = useRouter();
+  const ready = useAdminReady();
   const [q, setQ] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
   const [sort, setSort] = useState("last_active");
@@ -95,8 +97,8 @@ export default function AdminUsersPage() {
   }, [debouncedQ, sort, order, page]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    if (ready) load();
+  }, [ready, load]);
 
   const onSort = (key: string) => {
     const serverKey = SORTABLE[key];

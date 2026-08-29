@@ -95,7 +95,10 @@ def make_create_artifact_handler(session_id: str, user_id: str):
                     )
                 )
                 await db.commit()
-                await db.refresh(row)
+                # No refresh: row.id is already populated by the INSERT's
+                # RETURNING at flush, and a refresh AFTER commit would run in
+                # a new transaction whose RLS user context has evaporated
+                # (transaction-local set_config) — zero rows, loud failure.
         except Exception as e:
             log.bind(event="tool.create_artifact_failed").error(
                 f"artifact save failed: {e}"

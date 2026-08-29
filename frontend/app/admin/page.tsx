@@ -10,7 +10,13 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { authedFetch } from "@/lib/auth";
-import { AdminShell, fmtInt, type CostEstimate, type Usage } from "./shell";
+import {
+  AdminShell,
+  fmtInt,
+  useAdminReady,
+  type CostEstimate,
+  type Usage,
+} from "./shell";
 
 const GCP_PROJECT = "aloud-498522";
 const LOGS_URL = `https://console.cloud.google.com/logs/query?project=${GCP_PROJECT}`;
@@ -47,6 +53,7 @@ function Spend({ label, cost }: { label: string; cost: CostEstimate }) {
 }
 
 export default function AdminOverviewPage() {
+  const ready = useAdminReady();
   const [data, setData] = useState<Overview | null>(null);
   const [error, setError] = useState("");
 
@@ -62,8 +69,8 @@ export default function AdminOverviewPage() {
   }, []);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    if (ready) load();
+  }, [ready, load]);
 
   const lat = data?.turn_latency_24h;
 

@@ -284,6 +284,60 @@ def test_admin_context_cannot_write():
     asyncio.run(run())
 
 
+def test_create_artifact_handler_succeeds_under_real_rls():
+    """Regression: the handler once refreshed its row AFTER commit — the
+    transaction-local RLS context had evaporated, the refresh SELECT matched
+    zero rows, and every artifact save failed on Postgres while sqlite tests
+    stayed green. The handler must run cleanly under real policies."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from agent.tools import make_create_artifact_handler
+    from db.models import Artifact as ArtifactModel
+
+    async def run():
+        uid = f"art-{uuid.uuid4()}"
+        sess = f"s-{uuid.uuid4()}"
+        await init_db(PG_URL)
+        await provision_user(uid, None)
+        await create_session_row(sess, uid)
+
+        params = MagicMock()
+        params.arguments = {"title": "T", "kind": "summary", "content": "body"}
+        params.llm.push_frame = AsyncMock()
+        params.result_callback = AsyncMock()
+        await make_create_artifact_handler(sess, uid)(params)
+
+        assert params.result_callback.call_args.args[0]["status"] == "created"
+        async with user_scoped_session(uid) as db:
+            rows = (
+                (
+                    await db.execute(
+                        select(ArtifactModel).where(ArtifactModel.session_id == sess)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(rows) == 1
+        # the in-transaction artifact.count event landed too (FR-32/FR-38)
+        async with user_scoped_session(uid) as db:
+            events = (
+                (
+                    await db.execute(
+                        select(UsageEvent).where(
+                            UsageEvent.session_id == sess,
+                            UsageEvent.stage == "artifact",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(events) == 1
+
+    asyncio.run(run())
+
+
 def test_admin_setting_does_not_leak_across_pooled_connection_reuse():
     """(f): the FR-31 pooled-reuse test repeated for app.is_admin — a leak
     here would grant cross-user READS to the next transaction on the
