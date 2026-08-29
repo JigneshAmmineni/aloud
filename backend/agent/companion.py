@@ -1,5 +1,7 @@
 """CompanionAgent: builds and runs one session's pipeline (SDD §2.3, §2.4)."""
 
+import time
+
 from loguru import logger
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
@@ -22,6 +24,15 @@ from app.config import Settings
 from db.sessions_repo import create_session_row, end_session_row
 from db.transcript_log import TranscriptWriter
 from obs.latency import make_latency_observer
+from obs.usage import UsageMetricsObserver, UsageRecorder
+
+# FR-37's "live sessions now": an in-process count of running pipelines
+# (single-instance truth; resets on deploy — accepted in the spec).
+_live_sessions = 0
+
+
+def live_session_count() -> int:
+    return _live_sessions
 
 
 def build_pipeline_parts(settings: Settings, documents=None):
@@ -101,6 +112,7 @@ class CompanionAgent:
         )
 
         writer = TranscriptWriter(session_id, self._user_id)
+        recorder = UsageRecorder(session_id, self._user_id)
 
         task = PipelineTask(
             pipeline,
@@ -110,10 +122,22 @@ class CompanionAgent:
             ),
             # observers go on the task, NOT PipelineParams — the params model
             # silently ignores unknown fields
-            observers=[make_latency_observer(session_id), writer.observer()],
+            observers=[
+                make_latency_observer(session_id, recorder),
+                writer.observer(),
+                UsageMetricsObserver(recorder),
+            ],
             enable_turn_tracking=True,
             conversation_id=session_id,
         )
+
+        # FR-33: turn identity comes from the pipeline's own turn tracker.
+        turn_tracker = task.turn_tracking_observer
+        if turn_tracker is not None:
+
+            @turn_tracker.event_handler("on_turn_started")
+            async def on_turn_started(_obs, turn_number: int):
+                recorder.current_turn = turn_number
 
         @transport.event_handler("on_client_connected")
         async def on_client_connected(transport, client):
@@ -131,6 +155,10 @@ class CompanionAgent:
 
         await create_session_row(session_id, self._user_id)
         writer.start()
+        recorder.start()
+        global _live_sessions
+        _live_sessions += 1
+        session_started = time.monotonic()
         log.bind(event="session.started").info("Pipeline starting")
         end_reason = "user"  # tap and connection drop are indistinguishable (resume is descoped)
         try:
@@ -140,6 +168,11 @@ class CompanionAgent:
             end_reason = "error"
             raise
         finally:
+            _live_sessions -= 1
+            # FR-32: STT usage = streamed-time proxy, recorded at session end
+            # (crash-orphaned sessions are covered by the boot sweep).
+            recorder.record_stt_seconds(time.monotonic() - session_started)
+            await recorder.stop()
             await writer.stop()
             await end_session_row(session_id, self._user_id, end_reason)
             log.bind(event="session.ended", end_reason=end_reason).info(

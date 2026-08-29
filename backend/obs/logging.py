@@ -48,6 +48,10 @@ def _sink(message) -> None:
 
 
 def setup_logging() -> None:
-    """Replace loguru's default sink with the JSON sink. Call once at boot."""
+    """Replace loguru's default sink with the JSON sink. Call once at boot.
+
+    The fallback is INFO, not DEBUG (FR-39): logs ship to a persistent
+    external store, and DEBUG carries transcript text — the safe state must
+    be the default state. DEBUG is the explicit dev opt-in via LOG_LEVEL."""
     logger.remove()
-    logger.add(_sink, level=os.getenv("LOG_LEVEL", "DEBUG"))
+    logger.add(_sink, level=os.getenv("LOG_LEVEL", "INFO"))

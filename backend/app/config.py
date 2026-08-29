@@ -46,6 +46,13 @@ class Settings:
     flux_eot_threshold: float  # Deepgram Flux end-of-turn confidence (0-1)
     database_url: str
     firebase_service_account_path: str  # C-4; app/auth.py reads the file lazily
+    # FR-34 provider rates — cost is DERIVED from these at read time, never
+    # stored. Defaults of 0.0 mean "not configured": estimates show $0 until
+    # real rates from the provider consoles are set in .env.
+    rate_stt_per_minute: float
+    rate_llm_per_1m_tokens_in: float
+    rate_llm_per_1m_tokens_out: float
+    rate_tts_per_1m_chars: float
 
 
 def load_settings() -> Settings:
@@ -71,4 +78,8 @@ def load_settings() -> Settings:
         database_url=os.getenv("DATABASE_URL")
         or "postgresql+asyncpg://aloud:aloud@localhost:5432/aloud",
         firebase_service_account_path=os.environ["FIREBASE_SERVICE_ACCOUNT_PATH"],
+        rate_stt_per_minute=_env_float("RATE_STT_PER_MINUTE", 0.0),
+        rate_llm_per_1m_tokens_in=_env_float("RATE_LLM_PER_1M_TOKENS_IN", 0.0),
+        rate_llm_per_1m_tokens_out=_env_float("RATE_LLM_PER_1M_TOKENS_OUT", 0.0),
+        rate_tts_per_1m_chars=_env_float("RATE_TTS_PER_1M_CHARS", 0.0),
     )

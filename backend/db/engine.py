@@ -38,7 +38,18 @@ APP_ROLE = "aloud_app"
 # Tables holding user-owned rows (FR-31). users is deliberately absent:
 # provisioning must insert before any per-user context exists, rows are
 # keyed by uid, and the admin surface reads accounts from Firebase.
-_RLS_TABLES = ("sessions", "transcript_events", "artifacts")
+_RLS_TABLES = (
+    "sessions",
+    "transcript_events",
+    "artifacts",
+    "usage_events",
+    "turn_metrics",
+)
+
+# FR-38: ONLY these tables' FOR SELECT policies carry the admin escape.
+# The content-bearing tables (transcript_events, artifacts) never do —
+# admin context reads zero rows from them, backing NFR-9 at the DB layer.
+_ADMIN_READ_TABLES = ("sessions", "usage_events", "turn_metrics")
 
 _bootstrap_engine: AsyncEngine | None = None
 _app_engine: AsyncEngine | None = None
@@ -79,7 +90,8 @@ async def _bootstrap_rls(engine: AsyncEngine, app_password: str) -> None:
         """,
         f"GRANT USAGE ON SCHEMA public TO {APP_ROLE};",
         f"GRANT SELECT, INSERT, UPDATE, DELETE ON users, sessions,"
-        f" transcript_events, artifacts TO {APP_ROLE};",
+        f" transcript_events, artifacts, usage_events, turn_metrics"
+        f" TO {APP_ROLE};",
         f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {APP_ROLE};",
         # Pre-auth databases: add columns create_all won't retrofit.
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_name VARCHAR(80);",
@@ -93,18 +105,35 @@ async def _bootstrap_rls(engine: AsyncEngine, app_password: str) -> None:
         FROM sessions s WHERE te.session_id = s.id AND te.user_id IS NULL;
         """,
     ]
+    # FR-38: command-scoped policies. The split exists because Postgres
+    # consults only USING for DELETE (never WITH CHECK), so an admin clause
+    # on a generic all-commands policy would let admin-context deletes pass
+    # RLS. With a dedicated FOR SELECT policy, every write command keeps
+    # user-only predicates — cross-user writes fail at the policy layer
+    # independently of the admin transaction's READ ONLY mode.
+    user_pred = "user_id = current_setting('app.user_id', true)"
+    admin_pred = "current_setting('app.is_admin', true) = 'true'"
     for table in _RLS_TABLES:
+        read_pred = (
+            f"({user_pred} OR {admin_pred})"
+            if table in _ADMIN_READ_TABLES
+            else user_pred
+        )
         statements += [
             f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;",
             # FORCE is defense-in-depth: even the owner gets policies applied.
             f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY;",
             f"DROP POLICY IF EXISTS user_isolation ON {table};",
+            f"DROP POLICY IF EXISTS p_select ON {table};",
+            f"DROP POLICY IF EXISTS p_insert ON {table};",
+            f"DROP POLICY IF EXISTS p_update ON {table};",
+            f"DROP POLICY IF EXISTS p_delete ON {table};",
             # current_setting(..., true) -> NULL when unset: no context, no rows.
-            f"""
-            CREATE POLICY user_isolation ON {table}
-                USING (user_id = current_setting('app.user_id', true))
-                WITH CHECK (user_id = current_setting('app.user_id', true));
-            """,
+            f"CREATE POLICY p_select ON {table} FOR SELECT USING ({read_pred});",
+            f"CREATE POLICY p_insert ON {table} FOR INSERT WITH CHECK ({user_pred});",
+            f"CREATE POLICY p_update ON {table} FOR UPDATE"
+            f" USING ({user_pred}) WITH CHECK ({user_pred});",
+            f"CREATE POLICY p_delete ON {table} FOR DELETE USING ({user_pred});",
         ]
     async with engine.begin() as conn:
         for stmt in statements:

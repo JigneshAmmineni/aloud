@@ -9,7 +9,7 @@ churning.
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -55,6 +55,38 @@ class TranscriptEvent(Base):
     text: Mapped[str] = mapped_column(Text)  # 🔒 sensitive
     turn_id: Mapped[int | None] = mapped_column(Integer)
     latency_ms: Mapped[int | None] = mapped_column(Integer)
+
+
+class UsageEvent(Base):
+    """FR-32: append-only raw usage. Metadata only — no sensitive columns
+    (the `detail` field carries labels like an artifact kind, never content).
+    Cost is never stored; it is derived from these units at read time."""
+
+    __tablename__ = "usage_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    session_id: Mapped[str] = mapped_column(String(128), index=True)
+    turn_id: Mapped[int | None] = mapped_column(Integer)  # null: session-level
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    stage: Mapped[str] = mapped_column(String(16))  # stt|llm|tts|artifact
+    unit: Mapped[str] = mapped_column(String(24))  # seconds|tokens_in|tokens_out|characters|count
+    quantity: Mapped[float] = mapped_column(Float)
+    detail: Mapped[str | None] = mapped_column(String(64))  # e.g. artifact kind
+
+
+class TurnMetric(Base):
+    """FR-33: per-turn latency, persisted. Metadata only."""
+
+    __tablename__ = "turn_metrics"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    session_id: Mapped[str] = mapped_column(String(128), index=True)
+    turn_id: Mapped[int] = mapped_column(Integer)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    eot_to_first_audio_ms: Mapped[int] = mapped_column(Integer)
+    stages_ms: Mapped[dict | None] = mapped_column(JSON)  # per-stage TTFBs (names+ms)
 
 
 class Artifact(Base):

@@ -49,6 +49,7 @@ from app.config import load_settings
 from app.documents import DocumentError, document_store, extract_text
 from app.ratelimit import rate_limited
 from db.engine import init_db
+from db.sessions_repo import sweep_orphaned_sessions
 from db.users_repo import provision_user
 
 settings = load_settings()  # fail fast at boot, naming any missing env vars
@@ -58,6 +59,9 @@ settings = load_settings()  # fail fast at boot, naming any missing env vars
 async def lifespan(app: FastAPI):
     auth.configure(settings.firebase_service_account_path)
     await init_db(settings.database_url)
+    # FR-32 boot sweep: close sessions orphaned by the previous process's
+    # death and emit their inferred STT usage — before serving traffic.
+    await sweep_orphaned_sessions()
     yield
 
 

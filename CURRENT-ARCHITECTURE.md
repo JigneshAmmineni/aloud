@@ -97,13 +97,18 @@ backend/
               providers.py (THE provider seam: all SDK construction)
               prompts.py, tools.py (create_artifact), sanitizer.py
   db/         engine.py (two engines + RLS bootstrap + user_scoped_session),
-              models.py (users, sessions, transcript_events, artifacts),
-              users_repo.py, sessions_repo.py, transcript_log.py
+              models.py (users, sessions, transcript_events, artifacts,
+              usage_events, turn_metrics), users_repo.py, sessions_repo.py
+              (incl. the FR-32 boot sweep), transcript_log.py,
+              batch_writer.py (shared NFR-10 background writer),
+              admin_repo.py (FR-38 admin_scoped_session + cross-user reads)
   obs/        logging.py (JSON structured logs), latency.py (per-turn budget
-              instrumentation: WARN >1s/stage, ERROR >3s end-to-end)
+              instrumentation: WARN >1s/stage, ERROR >3s end-to-end),
+              usage.py (FR-32/33 usage + turn-metric capture)
   scripts/    grant_admin.py (mint/revoke the admin claim, local-only)
   tests/      SQLite-backed suite + Postgres-only RLS tests (test_rls.py)
-frontend/     Next.js app: / (session console), /login, /admin;
+frontend/     Next.js app: / (session console), /login, /admin (overview),
+              /admin/users (+ /[uid]), /admin/sessions/[id];
               lib/firebase.ts + lib/auth.tsx (client auth)
 .github/workflows/  ci.yml (ruff+pytest+Postgres service+build),
               claude.yml (@claude), claude-code-review.yml (auto-review)
@@ -117,6 +122,13 @@ Two architectural seams everything hangs on:
   identity from its dependencies, repos take `user_id: str` (no defaults) and
   never know where it came from, and every DB transaction is scoped through
   `user_scoped_session(user_id)` (RLS enforced by Postgres underneath).
+  Cross-user reads exist only behind `db/admin_repo.py`'s
+  `admin_scoped_session(admin)` — structurally admin-gated, transaction-local
+  `app.is_admin`, DB-enforced read-only, and blind to content tables (FR-38).
+  The single exception is the boot-time orphan sweep, which runs on the
+  RLS-exempt bootstrap engine — legitimate only because it executes before
+  the app serves traffic; **maintenance rule: no request-path code may ever
+  touch the bootstrap engine.**
 
 ## 4. Runtime view (one voice session)
 
@@ -126,10 +138,18 @@ Two architectural seams everything hangs on:
    audio flows browser ↔ backend directly over UDP (bypasses Caddy).
 3. Turn loop: Flux detects end-of-turn → transcript frame → LLM streams tokens
    → sentence-level TTS → audio streams out. Barge-in interrupts mid-response.
-4. Observers off the hot path: latency breakdown per turn (structured logs,
-   session_id/turn_id), transcript rows batch-written to Postgres (ops log
-   only — never injected into context, never user-facing).
-5. Session ends (tap End / disconnect) → row closed, transcripts flushed.
+4. Observers off the hot path: latency breakdown per turn (structured logs +
+   a `turn_metrics` row, FR-33), transcript rows batch-written to Postgres
+   (ops log only — never injected into context, never user-facing), and
+   usage capture (FR-32: LLM tokens + TTS characters from the pipeline's own
+   metrics frames, stamped with the tracker's turn number). All three ride
+   the same `BackgroundBatchWriter`: hot path enqueues, batches flush ~1s,
+   failures log and drop (NFR-10).
+5. Session ends (tap End / disconnect) → row closed, transcripts + usage
+   flushed, STT seconds recorded as the session's audio duration (the
+   streamed-time proxy). Sessions orphaned by a process death are closed as
+   `interrupted` by the boot-time sweep, which also emits their inferred STT
+   usage (FR-32).
 
 ## 5. Deployment & cloud infrastructure
 
@@ -171,8 +191,13 @@ VM = single point of failure.
 
 **Frontend routes:** `/` — the app (Talk button, waveform states, artifact
 panel, document upload; redirects to /login when signed out) · `/login`
-(FR-30: one form for sign-in/sign-up + Google) · `/admin` (account list,
-disable/enable; visible only with the admin claim).
+(FR-30: one form for sign-in/sign-up + Google) · admin pages (FR-41, all
+URL-addressable, tab bar + breadcrumbs, admin claim required): `/admin`
+(overview: live sessions, sessions/users today+7d, estimated spend, latency
+p50/p95 + NFR-1 breaches, GCP link-outs) · `/admin/users` (searchable/
+sortable/paginated user list + disable/enable) · `/admin/users/{uid}`
+(session history) · `/admin/sessions/{id}` (per-turn latency + cost
+drill-down — usage only, never content, NFR-9).
 
 **Backend endpoints** (`backend/app/main.py`, `app/admin.py`): `GET /healthz`
 (unauthenticated infra probe) · `POST /api/auth/email-check` (unauthenticated
@@ -181,9 +206,11 @@ FR-26 enumeration exception) ·
 `POST /documents` · `POST /start` (provisions the users row, mints the
 session, `check_revoked`) · `POST|PATCH /api/offer` and
 `POST|PATCH /sessions/{id}/api/offer` (WebRTC signaling, `check_revoked`,
-session-ownership enforced) · `GET /api/admin/users`,
-`POST /api/admin/users/{uid}/disable|enable` (admin claim required). Plus the
-WebRTC UDP media path (not HTTP).
+session-ownership enforced) · admin API (admin claim; cross-user reads via
+FR-38's read-only `admin_scoped_session`): `GET /api/admin/users`,
+`GET /api/admin/users/{uid}/sessions`, `GET /api/admin/sessions/{id}`,
+`GET /api/admin/overview`, `POST /api/admin/users/{uid}/disable|enable`.
+Plus the WebRTC UDP media path (not HTTP).
 
 ## 7. Operational processes (runbooks)
 
@@ -194,7 +221,11 @@ WebRTC UDP media path (not HTTP).
 | Logs / debugging | `docker compose logs -f backend` on the VM; JSON events greppable by `session_id`/`event` ([deployment.md §12](deployment.md)) | live |
 | DB access | `psql` in the db container, or SSH port-forward for a GUI — 5432 is never public | live |
 | Add / remove an admin | from `backend/`: `python scripts/grant_admin.py <email>` (or `--revoke`) with the service-account key present — sets the custom claim, refuses unverified emails, revokes the target's tokens so it lands promptly | live |
-| Disable / re-enable a user | `/admin` page → disable: sets Firebase `disabled` + revokes refresh tokens; new sessions blocked immediately, other API access dies ≤1h, a live session survives until it ends (FR-29) | live |
+| Disable / re-enable a user | `/admin/users` page → disable: sets Firebase `disabled` + revokes refresh tokens; new sessions blocked immediately, other API access dies ≤1h, a live session survives until it ends (FR-29) | live |
+| "User X says it broke at 3pm" | `/admin/users` → the user → their sessions (end reason, latency, usage) → the session's per-turn table; for stack traces, Logs Explorer filtered by the `session_id` (FR-36/39) | live (in-app half) |
+| Usage / cost review | `/admin` overview (spend 7d/30d, estimated at current `.env` rates — provider consoles are the invoice truth, FR-34); per-user costs on `/admin/users` | live |
+| Ship logs off the VM | GCP Ops Agent on the VM tails container stdout with a structured-log parser (the `gcplogs` Docker driver was spiked and rejected — it ships our JSON as an unparsed string). Verify: Logs Explorer, filter `jsonPayload.session_id` | **pending: agent install** |
+| Uptime alerting | GCP Monitoring uptime check on `https://work-aloud.com/healthz` (multi-region, 5-min cadence) + email alert policy; verify once by stopping Caddy briefly (FR-40) | **pending: check creation** |
 | First prod deploy of auth | copy the service-account JSON to `~/aloud/firebase-service-account.json` (chmod 600) on the VM before `docker compose -f docker-compose.prod.yml up -d --build` | one-time |
 | Pause spend | `gcloud compute instances stop aloud --zone=us-west1-b` | live |
 

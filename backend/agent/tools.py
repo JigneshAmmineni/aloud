@@ -14,7 +14,7 @@ from pipecat.processors.frameworks.rtvi import RTVIServerMessageFrame
 from pipecat.services.llm_service import FunctionCallParams
 
 from db.engine import user_scoped_session
-from db.models import Artifact
+from db.models import Artifact, UsageEvent
 
 ARTIFACT_KINDS = ("summary", "action_items", "cleaned_idea")
 
@@ -78,6 +78,22 @@ def make_create_artifact_handler(session_id: str, user_id: str):
         try:
             async with user_scoped_session(user_id) as db:
                 db.add(row)
+                # FR-32/FR-38: the metadata-only artifact_created event —
+                # admin views count artifacts from usage_events, never from
+                # the content-bearing table. Same transaction: count and
+                # artifact can't diverge.
+                db.add(
+                    UsageEvent(
+                        user_id=user_id,
+                        session_id=session_id,
+                        turn_id=None,
+                        ts=created_at,
+                        stage="artifact",
+                        unit="count",
+                        quantity=1.0,
+                        detail=kind,
+                    )
+                )
                 await db.commit()
                 await db.refresh(row)
         except Exception as e:

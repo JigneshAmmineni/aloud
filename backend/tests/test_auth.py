@@ -221,7 +221,12 @@ def test_admin_route_allows_admin_claim(client, monkeypatch):
     monkeypatch.setattr(main.admin, "list_accounts", lambda: [{"uid": "uid-1"}])
     resp = client.get("/api/admin/users", headers={"Authorization": "Bearer t"})
     assert resp.status_code == 200
-    assert resp.json()["users"] == [{"uid": "uid-1"}]
+    # the route enriches each account with FR-35 aggregates (zeroed here —
+    # no DB rows); the account itself must pass through
+    users = resp.json()["users"]
+    assert len(users) == 1
+    assert users[0]["uid"] == "uid-1"
+    assert users[0]["sessions"] == 0
 
 
 def test_admin_disable_route_invokes_account_op(client, monkeypatch):
