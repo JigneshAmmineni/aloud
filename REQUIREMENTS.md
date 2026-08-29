@@ -284,13 +284,18 @@ principles govern every FR below:
   proxy for Flux's streamed-time billing, and flagged as such wherever
   displayed.
   Required dimensions per event: `user_id`, `session_id`, timestamp, stage,
-  unit, quantity. Accepted consequence of batching + end-of-session STT
-  recording: a process death mid-session (crash, OOM, deploy restart) loses
-  that session's in-flight usage rows outright — acceptable because usage
-  here is best-effort telemetry, not a billing record (provider consoles
-  remain the invoice truth, FR-34's figures are labeled estimates). A
-  periodic-checkpoint design is the upgrade if usage ever becomes
-  billing-grade.
+  unit, quantity.
+  Crash behavior: because LLM/TTS events are written in ~1-second batches
+  throughout the session, a process death (crash, OOM, deploy restart)
+  loses only the final unflushed batch. Sessions orphaned by such a death
+  are recovered by a **boot-time sweep**: on backend startup, any session
+  still marked `active` is closed with `end_reason = 'crashed'`, its
+  `ended_at` inferred from the session's latest recorded event (falling
+  back to `started_at`), and its STT usage event emitted from that inferred
+  duration. Accepted residual loss: the final in-flight batch and the
+  imprecision of the inferred crash time — acceptable because usage here is
+  best-effort telemetry, not a billing record (provider consoles remain the
+  invoice truth; FR-34's figures are labeled estimates).
 - **FR-33** Per-turn latency is persisted, not just logged: a `turn_metrics`
   table (`user_id`, `session_id`, `turn_id`, timestamp, end-of-speech →
   first-audio ms, per-stage TTFB ms) written from the breakdowns the latency
