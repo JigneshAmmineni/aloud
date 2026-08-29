@@ -16,6 +16,7 @@ with `logger.bind(...)` at call sites and land at the top level of the line.
 import json
 import os
 import sys
+import traceback
 
 from loguru import logger
 
@@ -43,7 +44,13 @@ def _sink(message) -> None:
         if key != "component":
             line[key] = value
     if record["exception"]:
-        line["exception"] = str(record["exception"])
+        # A real formatted traceback, not the namedtuple repr: GCP Error
+        # Reporting only groups entries carrying a recognizable stack trace
+        # (verified by spike — plain ERROR one-liners don't group, FR-39).
+        exc = record["exception"]
+        line["stack_trace"] = "".join(
+            traceback.format_exception(exc.type, exc.value, exc.traceback)
+        )
     print(json.dumps(line, default=str), file=sys.stdout, flush=True)
 
 

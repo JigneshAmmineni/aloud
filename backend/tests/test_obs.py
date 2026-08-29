@@ -53,6 +53,24 @@ def test_all_loguru_levels_have_mappings():
         assert _SEVERITY[name] in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 
 
+def test_exception_ships_as_formatted_stack_trace(capsys):
+    """FR-39: GCP Error Reporting groups an entry only if it carries a real
+    stack trace (spike-verified) — the sink must emit the formatted traceback,
+    never the loguru namedtuple repr."""
+    logger.remove()
+    logger.add(_sink, level="DEBUG")
+    try:
+        raise RuntimeError("obs boom")
+    except RuntimeError:
+        logger.exception("caught for the log")
+    out = capsys.readouterr().out.strip().splitlines()
+    line = json.loads(out[-1])
+    assert line["severity"] == "ERROR"
+    assert line["message"] == "caught for the log"
+    assert "Traceback (most recent call last):" in line["stack_trace"]
+    assert "RuntimeError: obs boom" in line["stack_trace"]
+
+
 def test_flux_turn_frames_drive_latency_events():
     """Flux emits UserStoppedSpeaking (not VAD frames); the observer must
     still measure end-of-speech -> bot speech and emit both log events."""

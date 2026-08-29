@@ -33,7 +33,9 @@ Related docs: [deployment.md](deployment.md) (step-by-step VM runbook),
                           via firebase-admin (REQUIREMENTS.md §4.8)
 
  Supporting systems: GitHub (repo, Actions CI, Claude PR review),
- Let's Encrypt (TLS via Caddy), Google Cloud (VM, IAP SSH).
+ Let's Encrypt (TLS via Caddy), Google Cloud (VM, IAP SSH; Cloud
+ Logging/Monitoring — log shipping via the VM's Ops Agent, uptime check,
+ email alerts).
 ```
 
 One human-facing product surface (the web app), three paid AI provider
@@ -161,7 +163,7 @@ Two architectural seams everything hangs on:
 | Compute | 1× GCE VM `aloud` — `e2-small` (2 vCPU shared, 2 GB RAM) + 2 GB swap, 20 GB disk, Debian 12 |
 | Zone | `us-west1-b` (Oregon — close to user, protects the 3s latency budget) |
 | IP / DNS | reserved static external IP; A record for `work-aloud.com` (Cloudflare DNS, grey-cloud/DNS-only — proxy would break UDP) |
-| GCP services | Compute Engine; IAP (SSH tunnel — port 22 not public). No other GCP services in use |
+| GCP services | Compute Engine; IAP (SSH tunnel — port 22 not public); Cloud Logging (container logs shipped by the VM's **Ops Agent**, JSON parsed into `jsonPayload`); Cloud Monitoring (host metrics from the same agent; `aloud-healthz` uptime check; email alert policies: uptime failure + root disk >80%). Nothing else |
 | Firebase | project `aloud-c74f5` — Auth only (no Hosting/Firestore): Google + Email/Password providers enabled, email-link off. Service-account key: `backend/<name>.json` locally, `~/aloud/firebase-service-account.json` on the VM (mounted read-only into the backend container) |
 | TLS | Let's Encrypt via Caddy, auto-renewed, cert persisted in a Docker volume |
 | Firewall | tcp 80/443 (web+signaling) · udp 1–65535 (WebRTC media) · tcp 22 from IAP range only · **nothing else** (Postgres/backend ports unreachable from internet) |
@@ -218,14 +220,15 @@ Plus the WebRTC UDP media path (not HTTP).
 |---|---|---|
 | Deploy / promote / roll back | Actions → **"Deploy to production"** → Run workflow. Blank ref = tip of `main`; an older main SHA = rollback (same button). Moves the `prod` pointer, IAP-tunnels to the VM (tunnel-only deployer SA), hard-resets + rebuilds, health-checks the site. Manual path still works ([deployment.md §13](deployment.md)). Rollback does not reverse DB migrations | live |
 | Promote code | PR → `main` (CI + review gate) → test on workbench → run the deploy workflow (it moves `prod` itself) | live |
-| Logs / debugging | `docker compose logs -f backend` on the VM; JSON events greppable by `session_id`/`event` ([deployment.md §12](deployment.md)) | live |
+| Logs / debugging | Primary: [Logs Explorer](https://console.cloud.google.com/logs/query?project=aloud-498522) — the VM's Ops Agent ships every container's stdout, our JSON parsed into queryable fields. The on-call query: `logName="projects/aloud-498522/logs/docker_containers" AND jsonPayload.session_id="<id>"` (also filter `jsonPayload.event`, `severity>=ERROR`). Verified 2026-08-29 with spike containers. Local/immediate: `docker compose logs -f backend` on the VM still works ([deployment.md §12](deployment.md)) | live |
+| Error triage | Exceptions with stack traces group in [Error Reporting](https://console.cloud.google.com/errors?project=aloud-498522) (verified: traceback-bearing ERROR entries create groups; plain one-line ERRORs — e.g. NFR-1 latency breaches — do NOT, by Error Reporting's format rules: find those in Logs Explorer `severity>=ERROR`, and breach counts on the `/admin` overview) | live |
 | DB access | `psql` in the db container, or SSH port-forward for a GUI — 5432 is never public | live |
 | Add / remove an admin | from `backend/`: `python scripts/grant_admin.py <email>` (or `--revoke`) with the service-account key present — sets the custom claim, refuses unverified emails, revokes the target's tokens so it lands promptly | live |
 | Disable / re-enable a user | `/admin/users` page → disable: sets Firebase `disabled` + revokes refresh tokens; new sessions blocked immediately, other API access dies ≤1h, a live session survives until it ends (FR-29) | live |
 | "User X says it broke at 3pm" | `/admin/users` → the user → their sessions (end reason, latency, usage) → the session's per-turn table; for stack traces, Logs Explorer filtered by the `session_id` (FR-36/39) | live (in-app half) |
 | Usage / cost review | `/admin` overview (spend 7d/30d, estimated at current `.env` rates — provider consoles are the invoice truth, FR-34); per-user costs on `/admin/users` | live |
-| Ship logs off the VM | GCP Ops Agent on the VM tails container stdout with a structured-log parser (the `gcplogs` Docker driver was spiked and rejected — it ships our JSON as an unparsed string). Verify: Logs Explorer, filter `jsonPayload.session_id` | **pending: agent install** |
-| Uptime alerting | GCP Monitoring uptime check on `https://work-aloud.com/healthz` (multi-region, 5-min cadence) + email alert policy; verify once by stopping Caddy briefly (FR-40) | **pending: check creation** |
+| Ship logs off the VM | GCP Ops Agent (v2.70) on the VM tails `/var/lib/docker/containers/*/*-json.log`; config at `/etc/google-cloud-ops-agent/config.yaml` (parse Docker wrapper → parse inner app JSON → promote `severity`). The `gcplogs` Docker driver was spiked and rejected — it ships our JSON as an unparsed string. Reinstall/reconfigure: rerun the setup (idempotent) | live (installed 2026-08-29) |
+| Uptime alerting | Cloud Monitoring uptime check `aloud-healthz` (HTTPS `work-aloud.com/healthz`, all regions, 5-min cadence) → alert policy "Uptime failure" → email channel (admin gmail). Disk: "Disk > 80%" policy on `agent.googleapis.com/disk/percent_used` (`/dev/sda1`, state=used, 15-min sustained), same channel (FR-40) | live; **deliberate fire-test pending** (stop Caddy ~10 min, confirm the email arrives) |
 | First prod deploy of auth | copy the service-account JSON to `~/aloud/firebase-service-account.json` (chmod 600) on the VM before `docker compose -f docker-compose.prod.yml up -d --build` | one-time |
 | Pause spend | `gcloud compute instances stop aloud --zone=us-west1-b` | live |
 
