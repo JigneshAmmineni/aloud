@@ -283,8 +283,10 @@ principles govern every FR below:
   ungraceful disconnects are covered the same as a clean "End" tap) — a
   proxy for Flux's streamed-time billing, and flagged as such wherever
   displayed.
-  Required dimensions per event: `user_id`, `session_id`, timestamp, stage,
-  unit, quantity.
+  Required dimensions per event: `user_id`, `session_id`, `turn_id`
+  (nullable — session-level events like the STT record have none),
+  timestamp, stage, unit, quantity. `turn_id` is what makes per-turn cost
+  visible (FR-36).
   Crash behavior: because LLM/TTS events are written in ~1-second batches
   throughout the session, a process death (crash, OOM, deploy restart)
   loses only the final unflushed batch. Sessions orphaned by such a death
@@ -323,7 +325,9 @@ principles govern every FR below:
   is the revisit if the account list ever outgrows a single fetch.
 - **FR-36** Session history and drill-down: per user, a sessions list
   (started, duration, end reason, artifact count, per-stage usage, median and
-  worst turn latency); per session, the turn-by-turn latency series and
+  worst turn latency); per session, a turn-by-turn table joining latency
+  (FR-33) with that turn's usage and estimated cost (FR-32's `turn_id`
+  events) — "this question cost 2,400 tokens and took 1.8s" — plus session
   usage totals. The drill-down answers "user X says it broke at 3pm"
   without ever showing what was said (NFR-9).
 - **FR-37** Admin overview tab, the at-a-glance view: live sessions right
