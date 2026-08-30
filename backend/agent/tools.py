@@ -122,8 +122,10 @@ def make_create_artifact_handler(session_id: str, user_id: str):
                 }
             )
         )
+        # No title in the log line: artifacts.title is a 🔒 sensitive column,
+        # and INFO-level lines ship to Cloud Logging (FR-39/NFR-9).
         log.bind(event="tool.invoked", tool="create_artifact", kind=kind).info(
-            f"artifact saved: {title!r}"
+            f"artifact saved ({kind}, {len(content)} chars)"
         )
         await params.result_callback(
             {

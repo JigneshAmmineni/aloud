@@ -18,6 +18,9 @@ import {
   type Usage,
 } from "./shell";
 
+// Deliberately hardcoded: a project id is deployment identity, not a secret
+// (it's in every console URL, usable only by authorized GCP accounts), and
+// these are admin-only convenience links — not worth NEXT_PUBLIC_* plumbing.
 const GCP_PROJECT = "aloud-498522";
 const LOGS_URL = `https://console.cloud.google.com/logs/query?project=${GCP_PROJECT}`;
 const ERRORS_URL = `https://console.cloud.google.com/errors?project=${GCP_PROJECT}`;

@@ -64,6 +64,10 @@ def _install_sigterm_goodbye() -> None:
     server is going away (drain_live_sessions), then hand control back to
     uvicorn's untouched SIGINT handler for its normal graceful exit."""
     loop = asyncio.get_running_loop()
+    # asyncio holds tasks by WEAK reference — without a hard one the drain
+    # task could be garbage-collected mid-await, and the SIGINT handoff
+    # would never fire (the process would sit deaf until SIGKILL).
+    retained: list = []
 
     def _on_sigterm():
         async def _drain_then_exit():
@@ -80,7 +84,7 @@ def _install_sigterm_goodbye() -> None:
             finally:
                 signal.raise_signal(signal.SIGINT)
 
-        asyncio.ensure_future(_drain_then_exit())
+        retained.append(asyncio.ensure_future(_drain_then_exit()))
 
     try:
         loop.add_signal_handler(signal.SIGTERM, _on_sigterm)

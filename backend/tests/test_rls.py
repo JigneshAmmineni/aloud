@@ -338,6 +338,43 @@ def test_create_artifact_handler_succeeds_under_real_rls():
     asyncio.run(run())
 
 
+def test_boot_sweep_works_under_real_rls():
+    """The sweep runs on the bootstrap engine, whose RLS exemption is a
+    property of the ROLE, not the code — with FORCE ROW LEVEL SECURITY on
+    every table, a wrong engine choice would silently see zero orphans and
+    the sqlite suite would stay green (the artifact-save bug's shape).
+    Prove the cross-user sweep actually closes rows on Postgres."""
+    from db.sessions_repo import sweep_orphaned_sessions
+
+    async def run():
+        uid_a, uid_b, sess_a, sess_b = await _seed_two_users()
+        # _seed_two_users creates both sessions ACTIVE with usage events
+        swept = await sweep_orphaned_sessions()
+        assert swept >= 2  # both users' orphans, cross-user in one pass
+        for uid, sess in ((uid_a, sess_a), (uid_b, sess_b)):
+            async with user_scoped_session(uid) as db:
+                row = await db.get(Session, sess)
+                assert row.status == "ended"
+                assert row.end_reason == "interrupted"
+                # exactly one stt event: the sweep emitted it, and a second
+                # sweep-worthy pass must not duplicate it
+                events = (
+                    (
+                        await db.execute(
+                            select(UsageEvent).where(
+                                UsageEvent.session_id == sess,
+                                UsageEvent.stage == "stt",
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                assert len(events) == 1
+
+    asyncio.run(run())
+
+
 def test_admin_setting_does_not_leak_across_pooled_connection_reuse():
     """(f): the FR-31 pooled-reuse test repeated for app.is_admin — a leak
     here would grant cross-user READS to the next transaction on the

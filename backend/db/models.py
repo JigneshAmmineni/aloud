@@ -32,13 +32,16 @@ class Session(Base):
     __tablename__ = "sessions"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)  # /start-minted UUID
-    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    # indexed: every RLS predicate and admin aggregate filters on user_id
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(16), default="active")  # active|ended
-    end_reason: Mapped[str | None] = mapped_column(String(16))  # user|error
+    # user (End tap / disconnect) | error | interrupted (process death →
+    # boot sweep, or a graceful-shutdown drain)
+    end_reason: Mapped[str | None] = mapped_column(String(16))
 
 
 class TranscriptEvent(Base):

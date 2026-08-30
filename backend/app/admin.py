@@ -100,7 +100,18 @@ async def admin_user_sessions(uid: str, admin: AuthedUser = Depends(get_current_
     sessions = await admin_repo.sessions_for_user(admin, uid)
     for s in sessions:
         s["estimated_cost"] = estimate_cost(s["usage"], _settings)
-    account = await run_in_threadpool(get_account, uid)
+    try:
+        account = await run_in_threadpool(get_account, uid)
+    except Exception as e:
+        # A transient Firebase failure must not 500 the page and discard
+        # the DB half that already succeeded — the page renders account:
+        # null as its "no Firebase account" state.
+        logger.bind(
+            component="app.admin",
+            event="admin.account_lookup_failed",
+            error_type=type(e).__name__,
+        ).warning("account lookup failed; serving sessions without identity")
+        account = None
     return {"account": account, "sessions": sessions}
 
 
@@ -121,6 +132,10 @@ async def admin_session_detail(
 @router.get("/overview")
 async def admin_overview(admin: AuthedUser = Depends(get_current_admin)):
     """FR-37: the at-a-glance tab."""
+    # Function-local on purpose: agent.companion imports the provider stack;
+    # importing it at module load would make the admin API depend on (and
+    # pay the import cost of) the whole pipeline. This reads one process
+    # counter, nothing more.
     from agent.companion import live_session_count
 
     data = await admin_repo.overview(admin)

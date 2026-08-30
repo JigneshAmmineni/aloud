@@ -117,6 +117,7 @@ async def _bootstrap_rls(engine: AsyncEngine, app_password: str) -> None:
         # retrofit indexes onto tables that already exist.
         "CREATE INDEX IF NOT EXISTS ix_usage_events_ts ON usage_events (ts);",
         "CREATE INDEX IF NOT EXISTS ix_turn_metrics_ts ON turn_metrics (ts);",
+        "CREATE INDEX IF NOT EXISTS ix_sessions_user_id ON sessions (user_id);",
         """
         UPDATE transcript_events te SET user_id = s.user_id
         FROM sessions s WHERE te.session_id = s.id AND te.user_id IS NULL;

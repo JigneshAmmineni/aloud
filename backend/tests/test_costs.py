@@ -39,3 +39,6 @@ def test_estimate_cost_handles_missing_units_and_unconfigured_rates(make_setting
     cost = estimate_cost({"artifact.count": 3.0, "llm.tokens_in": 500_000.0}, s)
     assert cost["llm"] == 0.5
     assert cost["total"] == 0.5
+    # A PARTIAL rate set is still "not configured": the total above omits
+    # three unpriced providers and must not display as a confident figure.
+    assert cost["configured"] is False

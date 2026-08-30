@@ -24,7 +24,9 @@ def estimate_cost(usage: dict[str, float], settings: Settings) -> dict:
         "llm": round(llm, 4),
         "tts": round(tts, 4),
         "total": round(stt + llm + tts, 4),
-        "configured": any(
+        # all(), not any(): a half-filled rate set must not render a
+        # confident total that silently omits an unpriced provider.
+        "configured": all(
             (
                 settings.rate_stt_per_minute,
                 settings.rate_llm_per_1m_tokens_in,

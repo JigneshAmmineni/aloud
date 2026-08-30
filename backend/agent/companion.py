@@ -181,6 +181,15 @@ class CompanionAgent:
             @turn_tracker.event_handler("on_turn_started")
             async def on_turn_started(_obs, turn_number: int):
                 recorder.current_turn = turn_number
+        else:
+            # Loud, because the failure mode is silent otherwise: no turn
+            # numbers = no turn_metrics rows and NULL turn_ids, and the
+            # admin overview would render as HEALTHY latency, not missing
+            # data (FR-33/36/37).
+            log.bind(event="turn_tracking.unavailable").error(
+                "pipeline exposes no turn tracker — per-turn metrics and "
+                "turn-attributed usage will be missing for this session"
+            )
 
         @transport.event_handler("on_client_connected")
         async def on_client_connected(transport, client):

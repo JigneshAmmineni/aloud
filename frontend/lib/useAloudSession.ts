@@ -8,7 +8,7 @@
  *                     while the session is active.
  */
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { PipecatClient, type TransportState } from "@pipecat-ai/client-js";
 import { SmallWebRTCTransport } from "@pipecat-ai/small-webrtc-transport";
 
@@ -79,6 +79,16 @@ export function useAloudSession() {
     setState("idle");
   }, []);
 
+  // The interval must not outlive the component: navigating away
+  // mid-session would otherwise leave it polling every 5s for the life of
+  // the tab, calling setState on an unmounted component.
+  useEffect(
+    () => () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    },
+    [],
+  );
+
   // Unexpected session death: tear down (disconnect releases the mic; it may
   // fail against a dead backend, which is fine) and leave a persistent
   // notice. Artifacts already on screen are deliberately kept.
@@ -101,9 +111,13 @@ export function useAloudSession() {
     pollMissesRef.current = 0;
     pollRef.current = setInterval(async () => {
       const sessionId = sessionIdRef.current;
-      if (!sessionId || !clientRef.current) return;
+      // expectedEndRef: a poll firing (or resolving) across a deliberate
+      // End would see the just-ended session as dead and flash the
+      // "connection lost" notice on the one flow that must stay silent.
+      if (!sessionId || !clientRef.current || expectedEndRef.current) return;
       try {
         const res = await authedFetch(`/sessions/${sessionId}/alive`);
+        if (expectedEndRef.current) return; // End happened while in flight
         if (res.ok) {
           const { alive } = (await res.json()) as { alive: boolean };
           if (alive) {
