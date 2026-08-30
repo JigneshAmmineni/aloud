@@ -83,9 +83,13 @@ consoles are the source of truth.)
 | Cartesia | TTS (Sonic-3) | `CARTESIA_API_KEY` | per-character credits on the subscription tier | [play.cartesia.ai](https://play.cartesia.ai) → Usage/Subscription |
 | Firebase Auth | identity (project `aloud-c74f5`) | service-account JSON | free ≤ 50K MAU (email/password + Google) | [Firebase console → Authentication → Usage](https://console.firebase.google.com/project/aloud-c74f5/authentication/usage) |
 | Google Cloud | the GCE VM, static IP, egress | — | ~$14–15/mo flat | [GCP Billing](https://console.cloud.google.com/billing) · [Compute Engine](https://console.cloud.google.com/compute/instances) |
+| GCP Cloud Logging + Monitoring | shipped logs (Ops Agent), host metrics, uptime check, email alerts | — | $0 at current scale (free tiers: 50 GiB/mo log ingestion, 1M uptime executions/mo, agent metrics allotment); scales with log volume | [GCP Billing](https://console.cloud.google.com/billing) · [Logging usage](https://console.cloud.google.com/logs/usage) |
+| Anthropic (Claude PR reviews + @claude) | the review on every push to an open PR, and @claude mentions | app token (GitHub secret) | per-review API/subscription usage — this is why pushes to open PRs are deliberate, per CLAUDE.md | [console.anthropic.com](https://console.anthropic.com) usage (or the Claude plan's usage page) |
 
 The three voice providers bill per use and dominate cost at demo scale; the
-VM is flat; Firebase is $0 at this scale.
+VM is flat; Firebase, Cloud Logging/Monitoring, and GitHub Actions (public
+repo) are $0 at this scale; Claude reviews bill per PR push. The domain is
+~$10/yr (Cloudflare registrar; DNS free).
 
 ## 3. Repository layout
 
