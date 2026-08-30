@@ -193,6 +193,9 @@ class CompanionAgent:
 
         @transport.event_handler("on_client_connected")
         async def on_client_connected(transport, client):
+            nonlocal connected_at
+            if connected_at is None:
+                connected_at = time.monotonic()
             log.bind(event="transport.connected").info(
                 "Client connected; kicking off greeting"
             )
@@ -209,7 +212,10 @@ class CompanionAgent:
         writer.start()
         recorder.start()
         _live_tasks[session_id] = task
-        session_started = time.monotonic()
+        # FR-32 defines the STT proxy as connect → disconnect: the clock
+        # starts when the CLIENT connects, not at pipeline start — a session
+        # whose ICE never completes streamed zero audio and must record 0.
+        connected_at: float | None = None
         log.bind(event="session.started").info("Pipeline starting")
         end_reason = "user"  # tap and connection drop are indistinguishable (resume is descoped)
         try:
@@ -225,8 +231,11 @@ class CompanionAgent:
                 # boot sweep uses, so deploys never pollute the error signal
                 end_reason = "interrupted"
             # FR-32: STT usage = streamed-time proxy, recorded at session end
-            # (crash-orphaned sessions are covered by the boot sweep).
-            recorder.record_stt_seconds(time.monotonic() - session_started)
+            # (crash-orphaned sessions are covered by the boot sweep). A
+            # session the client never reached streamed nothing: 0 seconds.
+            recorder.record_stt_seconds(
+                time.monotonic() - connected_at if connected_at is not None else 0.0
+            )
             await recorder.stop()
             await writer.stop()
             await end_session_row(session_id, self._user_id, end_reason)

@@ -68,6 +68,15 @@ export default function AdminUsersPage() {
   // never overwrite the state of a newer sort/search that finished first.
   const loadSeqRef = useRef(0);
 
+  // The debounce timer must not outlive the component (same rule as the
+  // liveness poll's unmount cleanup).
+  useEffect(
+    () => () => {
+      if (debounceTimer.current) clearTimeout(debounceTimer.current);
+    },
+    [],
+  );
+
   // FR-41: filters as you type, debounced. New search resets to page 1.
   const onSearch = (value: string) => {
     setQ(value);

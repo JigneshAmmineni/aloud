@@ -82,7 +82,17 @@ export function AdminShell({
     if (!isAdmin) router.replace("/");
   }, [loading, user, isAdmin, router]);
 
-  if (loading || !user || !isAdmin) return null;
+  // FR-41: every view needs a loading state — a blank page during auth
+  // init is exactly the window useAdminReady exists for. (Once auth has
+  // resolved to not-admin, null is right: the redirect is in flight.)
+  if (loading) {
+    return (
+      <main className="stage admin-stage">
+        <p className="login-msg notice">loading…</p>
+      </main>
+    );
+  }
+  if (!user || !isAdmin) return null;
 
   // "← back" follows the breadcrumb: the last crumb with an href; top-level
   // admin pages fall back to leaving admin for the app.

@@ -78,8 +78,14 @@ async def user_aggregates(admin: AuthedUser) -> dict[str, dict]:
     return out
 
 
+_SESSIONS_CAP = 500  # most-recent bound; the UI notes when it's hit
+
+
 async def sessions_for_user(admin: AuthedUser, user_id: str) -> list[dict]:
-    """FR-36: a user's session history with per-session usage and latency."""
+    """FR-36: a user's session history with per-session usage and latency.
+    Bounded on both axes: the newest _SESSIONS_CAP sessions, and the usage/
+    latency queries scoped to exactly those sessions — never every row the
+    user has ever produced."""
     async with admin_scoped_session(admin) as db:
         sessions = (
             (
@@ -87,11 +93,15 @@ async def sessions_for_user(admin: AuthedUser, user_id: str) -> list[dict]:
                     select(Session)
                     .where(Session.user_id == user_id)
                     .order_by(Session.started_at.desc())
+                    .limit(_SESSIONS_CAP)
                 )
             )
             .scalars()
             .all()
         )
+        session_ids = [s.id for s in sessions]
+        if not session_ids:
+            return []
         usage_rows = await db.execute(
             select(
                 UsageEvent.session_id,
@@ -99,7 +109,10 @@ async def sessions_for_user(admin: AuthedUser, user_id: str) -> list[dict]:
                 UsageEvent.unit,
                 func.sum(UsageEvent.quantity),
             )
-            .where(UsageEvent.user_id == user_id)
+            .where(
+                UsageEvent.user_id == user_id,
+                UsageEvent.session_id.in_(session_ids),
+            )
             .group_by(UsageEvent.session_id, UsageEvent.stage, UsageEvent.unit)
         )
         usage: dict[str, dict] = {}
@@ -107,7 +120,8 @@ async def sessions_for_user(admin: AuthedUser, user_id: str) -> list[dict]:
             usage.setdefault(sid, {})[f"{stage}.{unit}"] = float(total or 0)
         latency_rows = await db.execute(
             select(TurnMetric.session_id, TurnMetric.eot_to_first_audio_ms).where(
-                TurnMetric.user_id == user_id
+                TurnMetric.user_id == user_id,
+                TurnMetric.session_id.in_(session_ids),
             )
         )
         latencies: dict[str, list] = {}
@@ -248,7 +262,7 @@ async def overview(admin: AuthedUser) -> dict:
             )
             return {f"{stage}.{unit}": float(total or 0) for stage, unit, total in rows}
 
-        today = await _sessions_since(day)
+        last24 = await _sessions_since(day)
         last7 = await _sessions_since(week)
         usage7 = await _usage_since(week)
         usage30 = await _usage_since(month)
@@ -272,7 +286,7 @@ async def overview(admin: AuthedUser) -> dict:
             )
         ).scalar()
     return {
-        "today": today,
+        "last_24h": last24,  # rolling 24h window, named like its siblings
         "last_7d": last7,
         "usage_7d": usage7,
         "usage_30d": usage30,

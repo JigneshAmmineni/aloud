@@ -46,15 +46,36 @@ async def admin_list_users(
     has no email column; fine at current account counts)."""
     if sort not in _SORT_KEYS:
         raise HTTPException(status_code=400, detail=f"sort must be one of {_SORT_KEYS}")
+    if order not in ("asc", "desc"):
+        raise HTTPException(status_code=400, detail="order must be asc or desc")
     # Independent lookups (Firebase over the network, DB aggregates):
     # concurrent, so the page waits for the slower of the two, not the sum.
     accounts, aggregates = await asyncio.gather(
         run_in_threadpool(list_accounts), admin_repo.user_aggregates(admin)
     )
 
+    # A uid with DB rows but no Firebase account (deleted account, test
+    # data) must still appear — silent UNDER-reporting is the worst failure
+    # mode for a cost view. Synthesize a stub account row for those.
+    known = {a["uid"] for a in accounts}
+    merged = list(accounts) + [
+        {
+            "uid": uid,
+            "email": None,
+            "display_name": None,
+            "email_verified": False,
+            "disabled": False,
+            "providers": [],
+            "created_at": None,
+            "last_sign_in": None,
+        }
+        for uid in aggregates
+        if uid not in known
+    ]
+
     users = []
     needle = q.strip().lower()
-    for account in accounts:
+    for account in merged:
         agg = aggregates.get(
             account["uid"], {"sessions": 0, "last_active": None, "usage": {}}
         )

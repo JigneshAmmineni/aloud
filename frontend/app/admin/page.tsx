@@ -27,7 +27,7 @@ const ERRORS_URL = `https://console.cloud.google.com/errors?project=${GCP_PROJEC
 
 type Overview = {
   live_sessions: number;
-  today: { sessions: number; unique_users: number };
+  last_24h: { sessions: number; unique_users: number };
   last_7d: { sessions: number; unique_users: number };
   usage_7d: Usage;
   usage_30d: Usage;
@@ -100,13 +100,11 @@ export default function AdminOverviewPage() {
             <p className="admin-card-detail">in-process count; resets on deploy</p>
           </div>
           <div className="admin-card">
-            {/* backend key is "today" but the window is a rolling 24h —
-                label it like the other 24h cards */}
             <h2 className="admin-card-title">last 24h</h2>
-            <p className="admin-stat">{data.today.sessions}</p>
+            <p className="admin-stat">{data.last_24h.sessions}</p>
             <p className="admin-card-detail">
-              sessions · {data.today.unique_users} unique user
-              {data.today.unique_users === 1 ? "" : "s"}
+              sessions · {data.last_24h.unique_users} unique user
+              {data.last_24h.unique_users === 1 ? "" : "s"}
             </p>
           </div>
           <div className="admin-card">

@@ -185,7 +185,8 @@ Two architectural seams everything hangs on:
 
 1. Browser `POST /start` → session row created, `CompanionAgent` builds a
    dedicated pipeline (its own `LLMContext`, observers, transcript writer).
-2. SDP offer/answer via `POST/PATCH /api/offer` (Caddy → backend), then WebRTC
+2. SDP offer/answer via `POST/PATCH /sessions/{id}/api/offer` (Caddy →
+   backend; session-owned — the sessionless variant was removed), then WebRTC
    audio flows browser ↔ backend directly over UDP (bypasses Caddy).
 3. Turn loop: Flux detects end-of-turn → transcript frame → LLM streams tokens
    → sentence-level TTS → audio streams out. Barge-in interrupts mid-response.
@@ -263,9 +264,10 @@ drill-down — usage only, never content, NFR-9).
 by necessity, rate-limited — the signup availability pre-check, a documented
 FR-26 enumeration exception) ·
 `POST /documents` · `POST /start` (provisions the users row, mints the
-session, `check_revoked`) · `POST|PATCH /api/offer` and
+session, `check_revoked`) ·
 `POST|PATCH /sessions/{id}/api/offer` (WebRTC signaling, `check_revoked`,
-session-ownership enforced) · `GET /sessions/{id}/alive` (session-scoped
+session-ownership enforced; the sessionless `/api/offer` variant was removed
+with the prebuilt debug client — it had no ownership to enforce) · `GET /sessions/{id}/alive` (session-scoped
 liveness for the client's while-active poll; owner-scoped, DB-backed) ·
 admin API (admin claim; cross-user reads via
 FR-38's read-only `admin_scoped_session`): `GET /api/admin/users`,

@@ -201,8 +201,8 @@ def test_overview_aggregates(tmp_path):
     async def run():
         await _seed(tmp_path)
         data = await admin_repo.overview(ADMIN)
-        # today (24h): sa2 + sb1; 7d additionally sa1
-        assert data["today"] == {"sessions": 2, "unique_users": 2}
+        # last 24h: sa2 + sb1; 7d additionally sa1
+        assert data["last_24h"] == {"sessions": 2, "unique_users": 2}
         assert data["last_7d"] == {"sessions": 3, "unique_users": 2}
         assert data["usage_7d"]["stt.seconds"] == 720.0
         assert data["usage_30d"]["llm.tokens_in"] == 180.0

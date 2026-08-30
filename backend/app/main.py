@@ -50,7 +50,7 @@ from app.auth import AuthedUser, get_current_user_checked, get_current_user_id
 from app.config import load_settings
 from app.documents import DocumentError, document_store, extract_text
 from app.ratelimit import rate_limited
-from db.engine import init_db
+from db.engine import init_db, retire_bootstrap_engine
 from db.sessions_repo import session_is_active, sweep_orphaned_sessions
 from db.users_repo import provision_user
 
@@ -99,6 +99,10 @@ async def lifespan(app: FastAPI):
     # FR-32 boot sweep: close sessions orphaned by the previous process's
     # death and emit their inferred STT usage — before serving traffic.
     await sweep_orphaned_sessions()
+    # The sweep was the bootstrap engine's last job: retire the RLS-exempt
+    # escape hatch so any later use fails loudly instead of silently
+    # bypassing every policy.
+    await retire_bootstrap_engine()
     _install_sigterm_goodbye()
     yield
 
@@ -196,11 +200,14 @@ async def upload_document(
     except DocumentError as e:
         raise HTTPException(status_code=400, detail=str(e))
     doc = document_store.add(user_id, filename, file.content_type or "", text)
+    # No filename in the log: it's user-supplied text describing private
+    # material, and INFO lines ship to Cloud Logging (FR-39/NFR-9) — the
+    # same rule that keeps artifact titles out of agent/tools.py's log.
     logger.bind(
         component="app.documents",
         event="document.uploaded",
         char_count=doc.char_count,
-    ).info(f"Document uploaded: {filename!r}")
+    ).info(f"Document uploaded ({doc.char_count} chars)")
     return {
         "id": doc.id,
         "filename": doc.filename,

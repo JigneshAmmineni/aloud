@@ -111,8 +111,37 @@ def test_users_search_sort_pagination(client, auth_as, fake_admin_data):
     assert body["total"] == 3
     assert [u["sessions"] for u in body["users"]] == [4]
 
-    # unknown sort key is a clean 400, not a 500
+    # unknown sort key / order are a clean 400, not a 500 or silent default
     assert client.get("/api/admin/users", params={"sort": "nope"}).status_code == 400
+    assert (
+        client.get("/api/admin/users", params={"order": "sideways"}).status_code
+        == 400
+    )
+
+
+def test_users_includes_db_only_uids(client, auth_as, monkeypatch):
+    """A uid with usage in the DB but no Firebase account (deleted account)
+    must still appear — silent under-reporting is the worst failure mode
+    for a cost view."""
+    auth_as("admin-1", admin=True)
+    monkeypatch.setattr(admin_mod, "list_accounts", lambda: [dict(_ACCOUNTS[0])])
+
+    async def fake_aggregates(admin):
+        return {
+            "uid-a": _AGGREGATES["uid-a"],
+            "uid-ghost": {
+                "sessions": 2,
+                "last_active": "2026-08-28T10:00:00+00:00",
+                "usage": {"stt.seconds": 60.0},
+            },
+        }
+
+    monkeypatch.setattr(admin_repo_mod, "user_aggregates", fake_aggregates)
+    body = client.get("/api/admin/users").json()
+    assert body["total"] == 2
+    ghost = next(u for u in body["users"] if u["uid"] == "uid-ghost")
+    assert ghost["email"] is None
+    assert ghost["sessions"] == 2
 
 
 def test_user_sessions_route_merges_account_and_costs(
@@ -185,7 +214,7 @@ def test_overview_route_adds_live_sessions_and_costs(client, auth_as, monkeypatc
 
     async def fake_overview(admin):
         return {
-            "today": {"sessions": 1, "unique_users": 1},
+            "last_24h": {"sessions": 1, "unique_users": 1},
             "last_7d": {"sessions": 2, "unique_users": 2},
             "usage_7d": {"llm.tokens_in": 100.0},
             "usage_30d": {"llm.tokens_in": 200.0},

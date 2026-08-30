@@ -66,12 +66,29 @@ async def bootstrap_session():
     """RLS-exempt session on the bootstrap engine — boot-time maintenance
     ONLY (the FR-32 orphan sweep). Never on a request path; admin reads go
     through db/admin_repo's admin_scoped_session (FR-38). Loud if init_db
-    hasn't run — a sweep that silently saw zero rows would look like
-    success."""
-    assert _bootstrap_engine is not None, "init_db() must run first"
+    hasn't run OR the engine has been retired — a sweep that silently saw
+    zero rows would look like success."""
+    assert _bootstrap_engine is not None, (
+        "bootstrap engine unavailable — init_db() must run first, and after "
+        "retire_bootstrap_engine() the escape hatch is closed for good"
+    )
     factory = async_sessionmaker(_bootstrap_engine, expire_on_commit=False)
     async with factory() as db:
         yield db
+
+
+async def retire_bootstrap_engine() -> None:
+    """Close the RLS-exempt escape hatch once boot-time maintenance is done.
+    The bootstrap engine has no job after startup, and leaving it importable
+    AND working would make it the obvious (silently policy-bypassing) reach
+    for the next cross-user read — every other dangerous path in this
+    codebase fails structurally, so this one must too."""
+    global _bootstrap_engine
+    if _bootstrap_engine is not None and _bootstrap_engine is not _app_engine:
+        await _bootstrap_engine.dispose()  # postgres: separate superuser engine
+    # sqlite shares one engine; only the alias is dropped, the app engine
+    # keeps its own reference in the session factory
+    _bootstrap_engine = None
 
 
 @asynccontextmanager
