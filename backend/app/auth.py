@@ -161,23 +161,33 @@ def email_exists(email: str) -> bool:
 # --- Admin account operations (FR-29) — provider-aware, so they live here. ---
 
 
+def _account_dict(u) -> dict:
+    return {
+        "uid": u.uid,
+        "email": u.email,
+        "display_name": u.display_name,
+        "email_verified": u.email_verified,
+        "disabled": u.disabled,
+        "providers": [p.provider_id for p in u.provider_data],
+        "created_at": u.user_metadata.creation_timestamp,
+        "last_sign_in": u.user_metadata.last_sign_in_timestamp,
+    }
+
+
 def list_accounts() -> list[dict]:
-    """All Firebase accounts, for the admin user list."""
-    users = []
-    for u in fb_auth.list_users(app=_firebase()).iterate_all():
-        users.append(
-            {
-                "uid": u.uid,
-                "email": u.email,
-                "display_name": u.display_name,
-                "email_verified": u.email_verified,
-                "disabled": u.disabled,
-                "providers": [p.provider_id for p in u.provider_data],
-                "created_at": u.user_metadata.creation_timestamp,
-                "last_sign_in": u.user_metadata.last_sign_in_timestamp,
-            }
-        )
-    return users
+    """All Firebase accounts, for the admin user list (FR-35's one-traversal
+    merge). For a single account use get_account — never a full traversal."""
+    return [
+        _account_dict(u) for u in fb_auth.list_users(app=_firebase()).iterate_all()
+    ]
+
+
+def get_account(uid: str) -> dict | None:
+    """Single-uid lookup (the admin drill-down header)."""
+    try:
+        return _account_dict(fb_auth.get_user(uid, app=_firebase()))
+    except fb_auth.UserNotFoundError:
+        return None
 
 
 def set_account_disabled(uid: str, disabled: bool) -> None:

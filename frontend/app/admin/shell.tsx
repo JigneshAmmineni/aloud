@@ -24,7 +24,14 @@ export function useAdminReady(): boolean {
   return !loading && !!user && isAdmin;
 }
 
-export type CostEstimate = { stt: number; llm: number; tts: number; total: number };
+export type CostEstimate = {
+  stt: number;
+  llm: number;
+  tts: number;
+  total: number;
+  // false = the RATE_* env vars aren't set — figures are meaningless zeros
+  configured: boolean;
+};
 
 /** usage maps "stage.unit" -> quantity (the backend aggregate shape). */
 export type Usage = Record<string, number>;
@@ -49,9 +56,10 @@ export function fmtInt(n: number | null | undefined): string {
   return n == null ? "—" : Math.round(n).toLocaleString();
 }
 
-/** FR-34: every cost figure is labeled an estimate. */
+/** FR-34: every cost figure is labeled an estimate; unconfigured rates
+ * render as "—", never as a free-looking $0.0000. */
 export function fmtCost(c: CostEstimate | undefined): string {
-  return c ? `$${c.total.toFixed(4)}` : "—";
+  return c && c.configured ? `$${c.total.toFixed(4)}` : "—";
 }
 
 export function AdminShell({

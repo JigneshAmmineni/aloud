@@ -63,20 +63,14 @@ async def sweep_orphaned_sessions() -> int:
     Correct only while the backend is single-instance (a booting instance may
     assume every active session is orphaned) — see the spec's scaling note.
 
-    Cross-user by nature, so it runs on the BOOTSTRAP engine (RLS-exempt),
-    which is legitimate here and only here: this is boot-time maintenance
-    that executes before the app serves any traffic — not an admin-surface
-    read path (those go through admin_scoped_session, FR-38)."""
-    from sqlalchemy.ext.asyncio import async_sessionmaker
+    Cross-user by nature, so it runs through engine.py's bootstrap_session()
+    (RLS-exempt), which is legitimate here and only here: this is boot-time
+    maintenance that executes before the app serves any traffic — not an
+    admin-surface read path (those go through admin_scoped_session, FR-38)."""
+    from db.engine import bootstrap_session
 
-    from db import engine as _engine_mod
-
-    bootstrap = _engine_mod._bootstrap_engine
-    if bootstrap is None:
-        return 0
     swept = 0
-    boot_sessions = async_sessionmaker(bootstrap, expire_on_commit=False)
-    async with boot_sessions() as db:
+    async with bootstrap_session() as db:
         orphans = (
             (await db.execute(select(Session).where(Session.status == "active")))
             .scalars()
@@ -100,18 +94,30 @@ async def sweep_orphaned_sessions() -> int:
             s.status = "ended"
             s.end_reason = "interrupted"
             s.ended_at = ended_at
-            duration_s = max(0.0, (ended_at - s.started_at).total_seconds())
-            db.add(
-                UsageEvent(
-                    user_id=s.user_id,
-                    session_id=s.id,
-                    turn_id=None,
-                    ts=ended_at,
-                    stage="stt",
-                    unit="seconds",
-                    quantity=duration_s,
+            # The pipeline's cleanup commits its STT event BEFORE it closes
+            # the row — a hard death in that gap leaves an active session
+            # that already has one. usage_events is append-only: emitting a
+            # second would permanently double the session's audio minutes.
+            has_stt = (
+                await db.execute(
+                    select(func.count(UsageEvent.id)).where(
+                        UsageEvent.session_id == s.id, UsageEvent.stage == "stt"
+                    )
                 )
-            )
+            ).scalar()
+            if not has_stt:
+                duration_s = max(0.0, (ended_at - s.started_at).total_seconds())
+                db.add(
+                    UsageEvent(
+                        user_id=s.user_id,
+                        session_id=s.id,
+                        turn_id=None,
+                        ts=ended_at,
+                        stage="stt",
+                        unit="seconds",
+                        quantity=duration_s,
+                    )
+                )
             swept += 1
         await db.commit()
     if swept:

@@ -60,7 +60,13 @@ class TranscriptEvent(Base):
 class UsageEvent(Base):
     """FR-32: append-only raw usage. Metadata only — no sensitive columns
     (the `detail` field carries labels like an artifact kind, never content).
-    Cost is never stored; it is derived from these units at read time."""
+    Cost is never stored; it is derived from these units at read time.
+
+    Deliberately NO foreign keys (here and on TurnMetric): the boot sweep
+    writes usage rows for sessions it is simultaneously closing, `turn_id`
+    has no table at all, and NFR-7's future delete-everything cascade will
+    be app-level (RLS already fences reads). Don't "fix" this without that
+    context."""
 
     __tablename__ = "usage_events"
 
@@ -68,7 +74,8 @@ class UsageEvent(Base):
     user_id: Mapped[str] = mapped_column(String(64), index=True)
     session_id: Mapped[str] = mapped_column(String(128), index=True)
     turn_id: Mapped[int | None] = mapped_column(Integer)  # null: session-level
-    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # indexed: FR-37's overview filters 24h/7d/30d windows on ts
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     stage: Mapped[str] = mapped_column(String(16))  # stt|llm|tts|artifact
     unit: Mapped[str] = mapped_column(String(24))  # seconds|tokens_in|tokens_out|characters|count
     quantity: Mapped[float] = mapped_column(Float)
@@ -84,7 +91,7 @@ class TurnMetric(Base):
     user_id: Mapped[str] = mapped_column(String(64), index=True)
     session_id: Mapped[str] = mapped_column(String(128), index=True)
     turn_id: Mapped[int] = mapped_column(Integer)
-    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     eot_to_first_audio_ms: Mapped[int] = mapped_column(Integer)
     stages_ms: Mapped[dict | None] = mapped_column(JSON)  # per-stage TTFBs (names+ms)
 

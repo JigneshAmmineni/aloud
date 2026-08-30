@@ -116,9 +116,15 @@ def test_users_search_sort_pagination(client, auth_as, fake_admin_data):
 
 
 def test_user_sessions_route_merges_account_and_costs(
-    client, auth_as, fake_admin_data, monkeypatch
+    client, auth_as, monkeypatch
 ):
     auth_as("admin-1", admin=True)
+    # single-uid lookup, never the full list_accounts traversal
+    monkeypatch.setattr(
+        admin_mod,
+        "get_account",
+        lambda uid: _ACCOUNTS[0] if uid == "uid-a" else None,
+    )
 
     async def fake_sessions(admin, user_id):
         assert user_id == "uid-a"

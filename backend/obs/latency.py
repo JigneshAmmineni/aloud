@@ -62,7 +62,11 @@ def make_latency_observer(session_id: str, recorder=None) -> UserBotLatencyObser
     turn_metrics row per breakdown (FR-33) — enqueue-only, off the hot path."""
     observer = FluxAwareLatencyObserver()
     log = logger.bind(session_id=session_id, component="obs.latency")
-    last_measured_ms: list[int] = [0]  # closure cell: measured fires before breakdown
+    # Closure cell pairing the measured event with its breakdown. None means
+    # "no fresh measurement" — a breakdown without one (e.g. the greeting
+    # turn, which has no end-of-user-speech) must NOT persist a stale or
+    # fake-zero latency into turn_metrics (FR-33/FR-37 trustworthiness).
+    last_measured_ms: list[int | None] = [None]
 
     @observer.event_handler("on_latency_measured")
     async def on_latency_measured(_obs, latency: float):
@@ -101,8 +105,9 @@ def make_latency_observer(session_id: str, recorder=None) -> UserBotLatencyObser
             line.warning(f"stage(s) over {STAGE_WARN_S:.0f}s (C-1): {slow}")
         else:
             line.info("turn breakdown")
-        if recorder is not None:
+        if recorder is not None and last_measured_ms[0] is not None:
             recorder.record_turn_metric(last_measured_ms[0], stages_ms)
+        last_measured_ms[0] = None  # consumed: the next breakdown needs its own
 
     @observer.event_handler("on_first_bot_speech_latency")
     async def on_first_bot_speech(_obs, latency: float):

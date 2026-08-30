@@ -62,6 +62,19 @@ def session_factory() -> async_sessionmaker:
 
 
 @asynccontextmanager
+async def bootstrap_session():
+    """RLS-exempt session on the bootstrap engine — boot-time maintenance
+    ONLY (the FR-32 orphan sweep). Never on a request path; admin reads go
+    through db/admin_repo's admin_scoped_session (FR-38). Loud if init_db
+    hasn't run — a sweep that silently saw zero rows would look like
+    success."""
+    assert _bootstrap_engine is not None, "init_db() must run first"
+    factory = async_sessionmaker(_bootstrap_engine, expire_on_commit=False)
+    async with factory() as db:
+        yield db
+
+
+@asynccontextmanager
 async def user_scoped_session(user_id: str):
     """A DB session scoped to one verified user_id. On Postgres the setting
     is transaction-local (third set_config arg), evaporating at commit —
@@ -100,6 +113,10 @@ async def _bootstrap_rls(engine: AsyncEngine, app_password: str) -> None:
         # index the model declares — RLS filters on this column every query.
         "CREATE INDEX IF NOT EXISTS ix_transcript_events_user_id"
         " ON transcript_events (user_id);",
+        # FR-37's overview time-windows filter on ts; create_all won't
+        # retrofit indexes onto tables that already exist.
+        "CREATE INDEX IF NOT EXISTS ix_usage_events_ts ON usage_events (ts);",
+        "CREATE INDEX IF NOT EXISTS ix_turn_metrics_ts ON turn_metrics (ts);",
         """
         UPDATE transcript_events te SET user_id = s.user_id
         FROM sessions s WHERE te.session_id = s.id AND te.user_id IS NULL;

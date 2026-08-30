@@ -184,6 +184,21 @@ def test_boot_sweep_closes_orphans_and_emits_stt_usage(tmp_path):
                     started_at=started,
                 )
             )
+            # died AFTER its STT event committed but BEFORE the row closed:
+            # must be swept WITHOUT a second stt event (append-only table —
+            # a duplicate would permanently double the session's minutes)
+            db.add(
+                Session(
+                    id="s-half-dead", user_id="uid-a", status="active",
+                    started_at=started,
+                )
+            )
+            db.add(
+                UsageEvent(
+                    user_id="uid-a", session_id="s-half-dead", turn_id=None,
+                    ts=last_event, stage="stt", unit="seconds", quantity=240.0,
+                )
+            )
             # cleanly ended: must be untouched
             db.add(
                 Session(
@@ -194,7 +209,7 @@ def test_boot_sweep_closes_orphans_and_emits_stt_usage(tmp_path):
             )
             await db.commit()
 
-        assert await sweep_orphaned_sessions() == 2
+        assert await sweep_orphaned_sessions() == 3
 
         async with session_factory()() as db:
             crashed = await db.get(Session, "s-crashed")
@@ -218,10 +233,16 @@ def test_boot_sweep_closes_orphans_and_emits_stt_usage(tmp_path):
                 .scalars()
                 .all()
             )
-            by_session = {e.session_id: e for e in stt}
-            assert by_session["s-crashed"].quantity == 240.0  # 4 minutes
-            assert by_session["s-crashed"].turn_id is None
-            assert by_session["s-empty"].quantity == 0.0
+            by_session: dict[str, list] = {}
+            for e in stt:
+                by_session.setdefault(e.session_id, []).append(e)
+            assert by_session["s-crashed"][0].quantity == 240.0  # 4 minutes
+            assert by_session["s-crashed"][0].turn_id is None
+            assert by_session["s-empty"][0].quantity == 0.0
+            # the guard: still closed as interrupted, but NO duplicate event
+            assert len(by_session["s-half-dead"]) == 1
+            half = await db.get(Session, "s-half-dead")
+            assert half.end_reason == "interrupted"
 
         # second boot: nothing left to sweep
         assert await sweep_orphaned_sessions() == 0

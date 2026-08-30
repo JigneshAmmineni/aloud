@@ -43,11 +43,22 @@ function Spend({ label, cost }: { label: string; cost: CostEstimate }) {
   return (
     <div className="admin-card">
       <h2 className="admin-card-title">est. spend — {label}</h2>
-      <p className="admin-stat">${cost.total.toFixed(2)}</p>
-      <p className="admin-card-detail">
-        stt ${cost.stt.toFixed(2)} · llm ${cost.llm.toFixed(2)} · tts $
-        {cost.tts.toFixed(2)}
-      </p>
+      {cost.configured ? (
+        <>
+          <p className="admin-stat">${cost.total.toFixed(2)}</p>
+          <p className="admin-card-detail">
+            stt ${cost.stt.toFixed(2)} · llm ${cost.llm.toFixed(2)} · tts $
+            {cost.tts.toFixed(2)}
+          </p>
+        </>
+      ) : (
+        <>
+          <p className="admin-stat">—</p>
+          <p className="admin-card-detail">
+            provider rates not configured (RATE_* in .env)
+          </p>
+        </>
+      )}
     </div>
   );
 }

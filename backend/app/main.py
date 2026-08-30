@@ -67,8 +67,18 @@ def _install_sigterm_goodbye() -> None:
 
     def _on_sigterm():
         async def _drain_then_exit():
-            await drain_live_sessions()
-            signal.raise_signal(signal.SIGINT)
+            # The handoff to uvicorn's shutdown must happen no matter what —
+            # a raising drain would otherwise leave the process deaf to
+            # SIGTERM until Docker SIGKILLs it, the exact hard death the
+            # drain exists to avoid.
+            try:
+                await drain_live_sessions()
+            except Exception:
+                logger.bind(component="app.main", event="session.drain_failed").exception(
+                    "drain failed; shutting down anyway"
+                )
+            finally:
+                signal.raise_signal(signal.SIGINT)
 
         asyncio.ensure_future(_drain_then_exit())
 

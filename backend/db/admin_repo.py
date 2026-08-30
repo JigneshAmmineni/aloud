@@ -172,7 +172,14 @@ async def session_detail(admin: AuthedUser, session_id: str) -> dict | None:
     turn_usage: dict[int | None, dict] = {}
     for turn_id, stage, unit, total in usage_rows:
         turn_usage.setdefault(turn_id, {})[f"{stage}.{unit}"] = float(total or 0)
-    metrics_by_turn = {m.turn_id: m for m in metric_rows}
+    # A turn can carry two metric rows (e.g. the bot speaking twice around a
+    # tool call); show the worst — matching how sessions_for_user's
+    # worst-turn figure would count it.
+    metrics_by_turn: dict = {}
+    for m in metric_rows:
+        prior = metrics_by_turn.get(m.turn_id)
+        if prior is None or m.eot_to_first_audio_ms > prior.eot_to_first_audio_ms:
+            metrics_by_turn[m.turn_id] = m
     turn_ids = sorted(
         set(metrics_by_turn) | {t for t in turn_usage if t is not None}
     )

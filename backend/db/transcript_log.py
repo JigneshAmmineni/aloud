@@ -49,16 +49,21 @@ class TranscriptLogObserver(BaseObserver):
         if data.direction != FrameDirection.DOWNSTREAM:
             return
         frame = data.frame
-        if frame.id in self._seen:
-            return
-        self._seen.add(frame.id)
-
+        # Type check BEFORE the dedup set: audio frames dominate (~100/s per
+        # session, re-observed at every hop) — recording every frame id would
+        # grow _seen by tens of MB over a long session for nothing.
         if isinstance(frame, TranscriptionFrame):
-            self._record(role="user", kind="final_transcript", text=frame.text)
+            role, kind = "user", "final_transcript"
         elif isinstance(frame, AggregatedTextFrame) and not isinstance(
             frame, TTSTextFrame
         ):
-            self._record(role="agent", kind="agent_text", text=frame.text)
+            role, kind = "agent", "agent_text"
+        else:
+            return
+        if frame.id in self._seen:
+            return
+        self._seen.add(frame.id)
+        self._record(role=role, kind=kind, text=frame.text)
 
     def _record(self, *, role: str, kind: str, text: str) -> None:
         if not text.strip():

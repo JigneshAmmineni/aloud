@@ -12,7 +12,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 from loguru import logger
 
-from app.auth import AuthedUser, get_current_admin, list_accounts, set_account_disabled
+from app.auth import (
+    AuthedUser,
+    get_account,
+    get_current_admin,
+    list_accounts,
+    set_account_disabled,
+)
 from app.config import load_settings
 from app.costs import estimate_cost
 from db import admin_repo
@@ -84,12 +90,12 @@ async def admin_list_users(
 @router.get("/users/{uid}/sessions")
 async def admin_user_sessions(uid: str, admin: AuthedUser = Depends(get_current_admin)):
     """FR-36: session history. Account identity comes from Firebase so the
-    page can show who this is; usage/latency from the DB aggregates."""
+    page can show who this is (a single-uid lookup — the full traversal is
+    for the list view only); usage/latency from the DB aggregates."""
     sessions = await admin_repo.sessions_for_user(admin, uid)
     for s in sessions:
         s["estimated_cost"] = estimate_cost(s["usage"], _settings)
-    accounts = await run_in_threadpool(list_accounts)
-    account = next((a for a in accounts if a["uid"] == uid), None)
+    account = await run_in_threadpool(get_account, uid)
     return {"account": account, "sessions": sessions}
 
 

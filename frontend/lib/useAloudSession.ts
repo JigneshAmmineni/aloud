@@ -56,6 +56,10 @@ export function useAloudSession() {
   const sessionIdRef = useRef<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollMissesRef = useRef(0);
+  // alive:false only becomes authoritative after the session has been seen
+  // alive once — the DB row is created by a background task that can lag
+  // the transport's `ready`, and "not created yet" must not read as "dead".
+  const sawAliveRef = useRef(false);
   // True while a disconnect is expected (user tapped End, or the server said
   // goodbye) — distinguishes it from an unexpected drop, which gets a notice.
   const expectedEndRef = useRef(false);
@@ -64,6 +68,7 @@ export function useAloudSession() {
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = null;
     pollMissesRef.current = 0;
+    sawAliveRef.current = false;
     sessionIdRef.current = null;
     clientRef.current = null;
     setLocalTrack(null);
@@ -100,13 +105,18 @@ export function useAloudSession() {
         if (res.ok) {
           const { alive } = (await res.json()) as { alive: boolean };
           if (alive) {
+            sawAliveRef.current = true;
             pollMissesRef.current = 0;
             return;
           }
-          sessionLost(LOST_MESSAGE); // authoritative: the session is over
-          return;
+          if (sawAliveRef.current) {
+            sessionLost(LOST_MESSAGE); // authoritative: it lived, now it's over
+            return;
+          }
+          pollMissesRef.current += 1; // row may not exist yet: just a miss
+        } else {
+          pollMissesRef.current += 1;
         }
-        pollMissesRef.current += 1;
       } catch {
         pollMissesRef.current += 1;
       }
