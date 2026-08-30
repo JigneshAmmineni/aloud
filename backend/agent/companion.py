@@ -1,5 +1,6 @@
 """CompanionAgent: builds and runs one session's pipeline (SDD §2.3, §2.4)."""
 
+import asyncio
 import time
 
 from loguru import logger
@@ -12,6 +13,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
 )
+from pipecat.processors.frameworks.rtvi import RTVIServerMessageFrame
 from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
@@ -26,13 +28,44 @@ from db.transcript_log import TranscriptWriter
 from obs.latency import make_latency_observer
 from obs.usage import UsageMetricsObserver, UsageRecorder
 
-# FR-37's "live sessions now": an in-process count of running pipelines
-# (single-instance truth; resets on deploy — accepted in the spec).
-_live_sessions = 0
+# Live pipelines by session_id. Serves FR-37's "live sessions now" count
+# (single-instance truth; resets on deploy — accepted in the spec) and the
+# graceful-shutdown goodbye below.
+_live_tasks: dict[str, PipelineTask] = {}
+_draining = False
 
 
 def live_session_count() -> int:
-    return _live_sessions
+    return len(_live_tasks)
+
+
+async def drain_live_sessions() -> int:
+    """Graceful-shutdown goodbye: before the process dies (SIGTERM — deploys,
+    restarts), tell every connected client its session is ending over the
+    data channel, then cancel the pipelines so each session closes its own
+    row cleanly (end_reason 'interrupted' via the _draining flag) instead of
+    dying hard and leaving orphans for the boot sweep."""
+    global _draining
+    _draining = True
+    tasks = list(_live_tasks.items())
+    for session_id, task in tasks:
+        try:
+            await task.queue_frames(
+                [RTVIServerMessageFrame(data={"type": "session.ending"})]
+            )
+        except Exception:
+            pass  # a torn connection can't hear the goodbye; cancel anyway
+    if tasks:
+        await asyncio.sleep(0.5)  # let the message flush over the data channel
+        for session_id, task in tasks:
+            try:
+                await task.cancel()
+            except Exception:
+                pass
+        logger.bind(component="agent.companion", event="session.drained").info(
+            f"drained {len(tasks)} live session(s) for shutdown"
+        )
+    return len(tasks)
 
 
 def build_pipeline_parts(settings: Settings, documents=None):
@@ -156,8 +189,7 @@ class CompanionAgent:
         await create_session_row(session_id, self._user_id)
         writer.start()
         recorder.start()
-        global _live_sessions
-        _live_sessions += 1
+        _live_tasks[session_id] = task
         session_started = time.monotonic()
         log.bind(event="session.started").info("Pipeline starting")
         end_reason = "user"  # tap and connection drop are indistinguishable (resume is descoped)
@@ -168,7 +200,11 @@ class CompanionAgent:
             end_reason = "error"
             raise
         finally:
-            _live_sessions -= 1
+            _live_tasks.pop(session_id, None)
+            if _draining and end_reason == "user":
+                # ended by the shutdown drain, not the user — same label the
+                # boot sweep uses, so deploys never pollute the error signal
+                end_reason = "interrupted"
             # FR-32: STT usage = streamed-time proxy, recorded at session end
             # (crash-orphaned sessions are covered by the boot sweep).
             recorder.record_stt_seconds(time.monotonic() - session_started)

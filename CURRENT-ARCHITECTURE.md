@@ -152,6 +152,14 @@ Two architectural seams everything hangs on:
    streamed-time proxy). Sessions orphaned by a process death are closed as
    `interrupted` by the boot-time sweep, which also emits their inferred STT
    usage (FR-32).
+6. Unexpected-death UX: while active, the client polls
+   `GET /sessions/{id}/alive` every 10s (DB-backed truth — correct across
+   restarts, crashes, media-timeout closes, and any future multi-VM setup);
+   a dead answer or two missed polls drops the UI to idle with a persistent
+   "connection lost" notice (artifacts kept). On graceful shutdown (SIGTERM
+   — deploys/restarts) the backend sends a `session.ending` goodbye over the
+   data channel and cancels live pipelines so their rows close as
+   `interrupted` before the process exits.
 
 ## 5. Deployment & cloud infrastructure
 
@@ -208,7 +216,9 @@ FR-26 enumeration exception) ·
 `POST /documents` · `POST /start` (provisions the users row, mints the
 session, `check_revoked`) · `POST|PATCH /api/offer` and
 `POST|PATCH /sessions/{id}/api/offer` (WebRTC signaling, `check_revoked`,
-session-ownership enforced) · admin API (admin claim; cross-user reads via
+session-ownership enforced) · `GET /sessions/{id}/alive` (session-scoped
+liveness for the client's while-active poll; owner-scoped, DB-backed) ·
+admin API (admin claim; cross-user reads via
 FR-38's read-only `admin_scoped_session`): `GET /api/admin/users`,
 `GET /api/admin/users/{uid}/sessions`, `GET /api/admin/sessions/{id}`,
 `GET /api/admin/overview`, `POST /api/admin/users/{uid}/disable|enable`.

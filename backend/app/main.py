@@ -16,6 +16,8 @@ Session-establishment endpoints verify with check_revoked=True (FR-29), so a
 disabled account cannot open or complete a new session.
 """
 
+import asyncio
+import signal
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -42,17 +44,38 @@ from pipecat.transports.smallwebrtc.request_handler import (
     SmallWebRTCRequestHandler,
 )
 
-from agent.companion import CompanionAgent
+from agent.companion import CompanionAgent, drain_live_sessions
 from app import admin, auth
 from app.auth import AuthedUser, get_current_user_checked, get_current_user_id
 from app.config import load_settings
 from app.documents import DocumentError, document_store, extract_text
 from app.ratelimit import rate_limited
 from db.engine import init_db
-from db.sessions_repo import sweep_orphaned_sessions
+from db.sessions_repo import session_is_active, sweep_orphaned_sessions
 from db.users_repo import provision_user
 
 settings = load_settings()  # fail fast at boot, naming any missing env vars
+
+
+def _install_sigterm_goodbye() -> None:
+    """Graceful-shutdown goodbye. Uvicorn's own SIGTERM handling cancels the
+    agent background tasks before lifespan shutdown runs, so a goodbye there
+    would be too late. Instead: intercept SIGTERM, tell live sessions the
+    server is going away (drain_live_sessions), then hand control back to
+    uvicorn's untouched SIGINT handler for its normal graceful exit."""
+    loop = asyncio.get_running_loop()
+
+    def _on_sigterm():
+        async def _drain_then_exit():
+            await drain_live_sessions()
+            signal.raise_signal(signal.SIGINT)
+
+        asyncio.ensure_future(_drain_then_exit())
+
+    try:
+        loop.add_signal_handler(signal.SIGTERM, _on_sigterm)
+    except (NotImplementedError, RuntimeError):
+        pass  # non-unix host (local Windows runs); deploys are Linux containers
 
 
 @asynccontextmanager
@@ -62,6 +85,7 @@ async def lifespan(app: FastAPI):
     # FR-32 boot sweep: close sessions orphaned by the previous process's
     # death and emit their inferred STT usage — before serving traffic.
     await sweep_orphaned_sessions()
+    _install_sigterm_goodbye()
     yield
 
 
@@ -220,6 +244,19 @@ async def _handle_offer(
         request=request,
         webrtc_connection_callback=webrtc_connection_callback,
     )
+
+
+@app.get("/sessions/{session_id}/alive")
+async def session_alive(
+    session_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Session-scoped liveness for the client's while-active poll: the DB
+    row is the shared truth, so this answers correctly for every way a
+    session dies (crash → this request itself fails; restart → boot sweep
+    closed the row; media timeout → the pipeline closed it) and would keep
+    working unchanged behind a load balancer."""
+    return {"alive": await session_is_active(session_id, user_id)}
 
 
 @app.post("/sessions/{session_id}/api/offer")

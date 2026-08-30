@@ -123,6 +123,29 @@ def test_end_session_row_tolerates_unknown_session(tmp_path):
     asyncio.run(run())
 
 
+def test_session_is_active_lifecycle(tmp_path):
+    """The client's while-active liveness poll: true only for the owner's
+    still-active session — ended, unknown, and other-user sessions are all
+    authoritatively dead."""
+    from db.sessions_repo import session_is_active
+
+    url = f"sqlite+aiosqlite:///{tmp_path}/aloud_test.db"
+
+    async def run():
+        await init_db(url)
+        await provision_user("uid-a", None)
+        await provision_user("uid-b", None)
+        await create_session_row("sess-1", "uid-a")
+
+        assert await session_is_active("sess-1", "uid-a") is True
+        assert await session_is_active("sess-1", "uid-b") is False  # not theirs
+        assert await session_is_active("nope", "uid-a") is False
+        await end_session_row("sess-1", "uid-a", "user")
+        assert await session_is_active("sess-1", "uid-a") is False
+
+    asyncio.run(run())
+
+
 def test_boot_sweep_closes_orphans_and_emits_stt_usage(tmp_path):
     """FR-32's boot sweep: still-active sessions are closed as 'interrupted'
     (not 'error' — deploys cause this too), ended_at inferred from the max

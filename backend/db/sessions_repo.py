@@ -17,6 +17,22 @@ async def create_session_row(session_id: str, user_id: str) -> None:
         await db.commit()
 
 
+async def session_is_active(session_id: str, user_id: str) -> bool:
+    """Session-scoped liveness for the client's while-active poll. Answered
+    from the DB row (shared truth), so it stays correct if the backend ever
+    scales out: crash → the poll itself fails; restart → the boot sweep
+    marked the row interrupted; media-timeout → the pipeline closed it."""
+    async with user_scoped_session(user_id) as db:
+        row = (
+            await db.execute(
+                select(Session).where(
+                    Session.id == session_id, Session.user_id == user_id
+                )
+            )
+        ).scalar()
+        return row is not None and row.status == "active"
+
+
 async def end_session_row(session_id: str, user_id: str, end_reason: str) -> None:
     async with user_scoped_session(user_id) as db:
         row = await db.get(Session, session_id)
