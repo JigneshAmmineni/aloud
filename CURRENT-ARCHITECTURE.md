@@ -91,6 +91,51 @@ VM is flat; Firebase, Cloud Logging/Monitoring, and GitHub Actions (public
 repo) are $0 at this scale; Claude reviews bill per PR push. The domain is
 ~$10/yr (Cloudflare registrar; DNS free).
 
+### Provider swap checklist
+
+The provider seam makes the code change small — but a swap touches config,
+money, docs, and environments too. When swapping ANY of STT / LLM / TTS
+(or just changing models within a provider), walk every bullet:
+
+**Code**
+- [ ] `agent/providers.py` — the factory for that stage (the ONLY place SDK
+  construction may live). New SDK = new extra on the `pipecat-ai[...]` line
+  in `backend/requirements.txt` (Docker picks it up on rebuild).
+- [ ] `backend/tests/test_providers.py` — the service-class assertions.
+- [ ] Stage-specific couplings that do NOT swap automatically:
+  - **STT**: `obs/latency.py`'s `FluxAwareLatencyObserver` and
+    `companion.py`'s `ExternalUserTurnStrategies` both assume Flux does its
+    own turn detection with no VAD frames — a VAD-based STT needs both
+    revisited, and `FLUX_EOT_THRESHOLD` becomes dead config.
+  - **TTS**: the sanitizer text filters sit in front of it;
+    `CARTESIA_SPEED` / `CARTESIA_VOICE_ID` are Cartesia-only.
+  - **LLM**: the thinking-off-for-latency decision (ADR #4) and prompt
+    phrasing were tuned against Flash — re-evaluate both.
+- [ ] `app/costs.py` — only if the new provider bills in different UNITS
+  (the current math assumes STT $/minute, LLM $/1M tokens in+out, TTS
+  $/1M characters). Same units, different prices = env change only.
+
+**Config (BOTH the local `.env` AND the VM's `~/aloud/.env` — they are
+separate hand-maintained files; deploys never sync them)**
+- [ ] The provider selector / model env (`STT_PROVIDER`, `LLM_PROVIDER`,
+  `LLM_MODEL`, `TTS_PROVIDER`) and the new provider's API key.
+- [ ] **The matching `RATE_*` values — rates are the OLD provider's prices
+  until you change them, and every admin cost figure quietly becomes wrong
+  the moment the swap deploys.**
+- [ ] `.env.example` — document the new keys, retire the dead ones.
+
+**Docs (this file — the merge/deploy accuracy rule applies)**
+- [ ] §1 system-context diagram and §2 tech-stack row.
+- [ ] The provider table above: env key, pricing model, usage-console link
+  (that link is where you verify the new bills).
+- [ ] §8 decision log: note what replaced what, and why.
+
+**After deploy**
+- [ ] Confirm latency in the logs/admin (`turn.latency_breakdown` names the
+  guilty stage if the new provider is slower — C-1's 1s/stage advisory).
+- [ ] Check the OLD provider's console for residual spend, then retire its
+  key from both `.env`s.
+
 ## 3. Repository layout
 
 ```
