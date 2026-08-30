@@ -323,13 +323,18 @@ production" → Run workflow** (`.github/workflows/deploy.yml`):
    TLS cert live in named volumes and are untouched.
 4. **Verify.** The workflow polls `https://work-aloud.com/healthz` until it
    returns 200 (or fails the run with a rollback hint after ~2 minutes).
-5. **Move the `prod` pointer — last, only after verification.**
-   `git push origin +<SHA>:refs/heads/prod` — the `+` is a force-push,
-   deliberately: `prod` is not a line of development, it's a **bookmark
-   meaning "this exact commit is verified live."** Deploying forward moves
-   it forward; rolling back moves it backward; a failed run leaves it
-   untouched. Either way, `git log prod` on any machine tells you what
-   production is running.
+5. **Move the `prod` pointer and tag the deploy — last, only after
+   verification.** `git push origin +<SHA>:refs/heads/prod` — the `+` is a
+   force-push, deliberately: `prod` is not a line of development, it's a
+   **bookmark meaning "this exact commit is verified live."** Deploying
+   forward moves it forward; rolling back moves it backward; a failed run
+   leaves it untouched. Either way, `git log prod` on any machine tells you
+   what production is running. The same step pushes an immutable
+   `deploy-YYYYMMDD-HHMMSS` (UTC) tag at the commit — the pointer's
+   **permanent history**: `git tag -l 'deploy-*'` lists every verified
+   deploy ever, which is where you find the SHA to roll back to (the
+   Actions run history has the richer per-deploy record — logs, health
+   check — but its retention is a rolling window; tags are forever).
 
 **The pieces and where they live:**
 
@@ -342,7 +347,9 @@ production" → Run workflow** (`.github/workflows/deploy.yml`):
 | Concurrency guard | `concurrency: production-deploy` — two clicks can't deploy simultaneously | in the workflow |
 | GCP services involved | Compute Engine (the VM) + IAP (the tunnel) — nothing new was provisioned for CD beyond the service account | — |
 
-**Rollback**: same button, paste an older `main` SHA. Two caveats: DB schema
+**Rollback**: same button, paste an older `main` SHA — find it with
+`git tag -l 'deploy-*'` (every tag = a health-checked deploy, timestamped
+UTC in the name). Two caveats: DB schema
 migrations are **not** reversed (rolling back past a release that changed the
 schema may need manual DB attention first), and in-flight voice sessions die
 when the backend container restarts (true of every deploy).

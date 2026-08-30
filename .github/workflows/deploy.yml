@@ -137,7 +137,12 @@ jobs:
           fi
           echo "healthz 200 — live at $SITE ($(date -u))" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Point prod at the verified commit
+      - name: Point prod at the verified commit and tag the deploy
         # Last, on purpose: prod only ever records deploys that passed the
-        # health check — a failed run leaves the pointer untouched.
-        run: git push origin "+${{ steps.resolve.outputs.sha }}:refs/heads/prod"
+        # health check — a failed run leaves the pointer untouched. The
+        # branch is the CURRENT position; the immutable deploy-* tag is the
+        # permanent history of every position it ever held (the rollback
+        # index: `git tag -l 'deploy-*'`, pick one, paste its SHA above).
+        run: |
+          git push origin "+${{ steps.resolve.outputs.sha }}:refs/heads/prod"
+          git push origin "${{ steps.resolve.outputs.sha }}:refs/tags/deploy-$(date -u +%Y%m%d-%H%M%S)"
