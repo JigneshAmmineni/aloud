@@ -157,7 +157,7 @@ Two architectural seams everything hangs on:
    `interrupted` by the boot-time sweep, which also emits their inferred STT
    usage (FR-32).
 6. Unexpected-death UX: while active, the client polls
-   `GET /sessions/{id}/alive` every 10s (DB-backed truth — correct across
+   `GET /sessions/{id}/alive` every 5s (DB-backed truth — correct across
    restarts, crashes, media-timeout closes, and any future multi-VM setup);
    a dead answer or two missed polls drops the UI to idle with a persistent
    "connection lost" notice (artifacts kept). On graceful shutdown (SIGTERM

@@ -39,7 +39,7 @@ const RESTART_MESSAGE =
 // Session-liveness poll (unexpected-death detection): cadence and how many
 // consecutive poll failures mean the backend is gone. An authoritative
 // "alive: false" answer ends the session immediately, without waiting.
-const ALIVE_POLL_MS = 10_000;
+const ALIVE_POLL_MS = 5_000;
 const ALIVE_MAX_MISSES = 2;
 
 export function useAloudSession() {
