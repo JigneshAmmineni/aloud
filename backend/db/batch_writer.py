@@ -65,7 +65,9 @@ class BackgroundBatchWriter:
                 except Exception as e:
                     # turn_ids make a drop traceable ("the drill-down is
                     # missing turns 4–7"); getattr keeps the writer
-                    # type-agnostic — transcript rows simply have none.
+                    # type-agnostic — the transcript writer's _Row dataclass
+                    # (unlike the TranscriptEvent model) carries no turn_id,
+                    # so its drops just log an empty list.
                     turn_ids = sorted(
                         {
                             t

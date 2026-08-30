@@ -145,13 +145,20 @@ async def admin_user_sessions(uid: str, admin: AuthedUser = Depends(get_current_
 async def admin_session_detail(
     session_id: str, admin: AuthedUser = Depends(get_current_admin)
 ):
-    """FR-36 drill-down: per-turn latency joined with per-turn cost."""
+    """FR-36 drill-down: per-turn latency joined with per-turn cost. The
+    owner's email rides along for FR-41's breadcrumb (Users → {email} →
+    session) — resolved server-side so it never travels in a URL."""
     detail = await admin_repo.session_detail(admin, session_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="unknown session")
     detail["estimated_cost"] = estimate_cost(detail["usage"], _settings)
     for turn in detail["turns"]:
         turn["estimated_cost"] = estimate_cost(turn["usage"], _settings)
+    try:
+        account = await run_in_threadpool(get_account, detail["user_id"])
+    except Exception:
+        account = None  # transient lookup failure: the page falls back to uid
+    detail["user_email"] = account["email"] if account else None
     return detail
 
 

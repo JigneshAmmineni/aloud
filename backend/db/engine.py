@@ -57,7 +57,10 @@ _session_factory: async_sessionmaker | None = None
 
 
 def session_factory() -> async_sessionmaker:
-    assert _session_factory is not None, "init_db() must run first"
+    # raise, not assert — python -O strips asserts (same rule as
+    # bootstrap_session's guard below)
+    if _session_factory is None:
+        raise RuntimeError("init_db() must run first")
     return _session_factory
 
 

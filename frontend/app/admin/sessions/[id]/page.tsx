@@ -39,6 +39,7 @@ type Turn = {
 type Detail = {
   session_id: string;
   user_id: string;
+  user_email: string | null;
   started_at: string;
   ended_at: string | null;
   status: string;
@@ -82,10 +83,10 @@ export default function AdminSessionPage() {
     if (ready) load();
   }, [ready, load]);
 
-  // Breadcrumb: Users → {uid} → session. Deliberately the uid, not the
-  // email — these deep links are meant to be shared, and an email in a URL
-  // lands in browser history and access logs. The email is one click up.
-  const who = data?.user_id ?? "user";
+  // Breadcrumb: Users → {email} → session (FR-41). The email is resolved
+  // SERVER-side and never travels in the URL — these deep links are meant
+  // to be shared, and a URL param would land in history and access logs.
+  const who = data?.user_email ?? data?.user_id ?? "user";
 
   return (
     <AdminShell

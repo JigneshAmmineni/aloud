@@ -88,13 +88,6 @@ async def sessions_for_user(admin: AuthedUser, user_id: str) -> dict:
     user has ever produced. total_sessions carries the TRUE count so the
     cap is visible, never silent under-reporting."""
     async with admin_scoped_session(admin) as db:
-        # distinct name: the usage loop below unpacks a `total` per row and
-        # would shadow this count
-        total_sessions = (
-            await db.execute(
-                select(func.count(Session.id)).where(Session.user_id == user_id)
-            )
-        ).scalar()
         sessions = (
             (
                 await db.execute(
@@ -107,6 +100,16 @@ async def sessions_for_user(admin: AuthedUser, user_id: str) -> dict:
             .scalars()
             .all()
         )
+        # Count AFTER the list (READ COMMITTED: separate statements see
+        # separate snapshots) so a session starting in between can only make
+        # the total run AHEAD of the rows — the direction the UI already
+        # handles — never behind. Distinct name: the usage loop below
+        # unpacks a `total` per row and would shadow this.
+        total_sessions = (
+            await db.execute(
+                select(func.count(Session.id)).where(Session.user_id == user_id)
+            )
+        ).scalar()
         session_ids = [s.id for s in sessions]
         if not session_ids:
             return {"sessions": [], "total_sessions": int(total_sessions or 0)}

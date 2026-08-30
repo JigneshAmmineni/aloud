@@ -98,7 +98,7 @@ export default function AdminUserSessionsPage() {
             </p>
             <p className="admin-card-detail">
               {data.total_sessions > data.sessions.length
-                ? `showing newest ${data.sessions.length} of ${data.total_sessions} sessions (totals below cover only these)`
+                ? `showing newest ${data.sessions.length} of ${data.total_sessions} sessions (usage and cost totals cover only these)`
                 : `${data.total_sessions} session${data.total_sessions === 1 ? "" : "s"}`}{" "}
               · est. total{" "}
               {fmtCost({

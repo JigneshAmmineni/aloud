@@ -47,6 +47,9 @@ def test_lifespan_retires_bootstrap_engine(client):
     import db.engine as engine_mod
 
     assert engine_mod._bootstrap_engine is None
+    # ...and not vacuously: init_db really ran (None is also the
+    # never-initialized state)
+    assert engine_mod._session_factory is not None
 
 
 def test_healthz_is_open(client):

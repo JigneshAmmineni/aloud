@@ -207,10 +207,18 @@ def test_session_detail_route_404_and_costs(client, auth_as, monkeypatch):
         }
 
     monkeypatch.setattr(admin_repo_mod, "session_detail", fake_detail)
+    # FR-41 breadcrumb: the owner's email is resolved server-side (never a
+    # URL param)
+    monkeypatch.setattr(
+        admin_mod,
+        "get_account",
+        lambda uid: {"email": "ada@example.com"} if uid == "uid-a" else None,
+    )
     assert client.get("/api/admin/sessions/unknown").status_code == 404
     body = client.get("/api/admin/sessions/s-1").json()
     assert "estimated_cost" in body
     assert "estimated_cost" in body["turns"][0]  # per-turn cost, FR-36
+    assert body["user_email"] == "ada@example.com"
 
 
 def test_overview_route_adds_live_sessions_and_costs(client, auth_as, monkeypatch):
