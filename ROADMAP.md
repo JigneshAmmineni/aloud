@@ -21,10 +21,13 @@ documents are theirs alone.
 ## Feature order
 
 The order is intentional: auth establishes `user_id`, which everything after it
-hangs on (per-user metrics, per-user documents, per-user memory isolation) —
-and the context engine (4) lands before memory storage/retrieval (5), because
-retrieval injection and memory-management writes both depend on a context
-window we control section-by-section.
+hangs on (per-user metrics, per-user documents, per-user memory isolation).
+The agentic loop (3) lands before the artifacts rework (4) so the document
+workspace can be defined as **tools of the agent** rather than bolted onto
+the pipeline's built-in function calling. The context engine (5) lands before
+memory storage/retrieval (6), because retrieval injection and
+memory-management writes both depend on a context window we control
+section-by-section — and it builds inside the loop feature 3 establishes.
 
 ### 1. Auth — individual accounts
 
@@ -58,7 +61,28 @@ An admin-only surface answering "who uses this, and what does it cost?"
   already required by CLAUDE.md becomes queryable here).
 - Exact metric set is decided when this feature is specced.
 
-### 3. Documents & artifacts rework
+### 3. Agentic loop — the agent owns its turn
+
+Replace the pipeline's single-shot LLM stage with an agent loop we control:
+within a turn the agent can reason, call tools, observe results, and chain
+further calls — instead of today's one LLM call whose function calling is
+handled inside Pipecat's LLM service.
+
+- STT / TTS / transport stay on Pipecat; the loop replaces the LLM stage
+  only. (This resolves the spec-time decision previously parked under the
+  context engine; the retired SDD-v2.md in git history is background.)
+- Tools become the loop's contract: today's `create_artifact` migrates onto
+  it, and feature 4 then defines the document workspace as tools of this
+  agent (list / read / create / edit).
+- Provider-agnostic like everything else: tool schemas and loop control stay
+  behind the provider seam — no SDK calls outside `agent/providers.py`.
+- The voice hot path keeps NFR-1: the first spoken sentence must not wait on
+  a slow tool chain — speak-while-working semantics are a spec-time
+  decision.
+- Exact loop semantics, tool set, and failure behavior are decided when this
+  feature is specced.
+
+### 4. Documents & artifacts rework
 
 From single upload-at-start + copy-paste artifacts to a real document workspace.
 
@@ -69,36 +93,33 @@ From single upload-at-start + copy-paste artifacts to a real document workspace.
   preview. Markdown first; other file types as the engineering allows.
 - Later (own spec, after the basics land): multiple adjustable preview windows;
   live co-editing where user edits and agent edits flow both ways.
-- Later (depends on the context engine, feature 4): **mid-conversation
+- Later (depends on the context engine, feature 5): **mid-conversation
   uploads** — add a document (including drag-and-drop) while talking, and the
   agentic loop proactively picks it up, indexes it, and retrieves from it as
   the conversation calls for it. This replaces today's upload-before-session
   flow, which injects whole documents into the context window at session
   start and gets deprecated once this lands.
 
-### 4. Context engine — structured, owned context window
+### 5. Context engine — structured, owned context window
 
-Replace the pipeline's monolithic `LLMContext` with a context window we fully
-control — the foundation the memory layer builds on.
+Replace the loop's monolithic context with a context window we fully
+control — the foundation the memory layer builds on. Builds inside the
+agent loop (feature 3), which already owns context assembly per turn.
 
 - Distinct, individually budgeted sections: system prompt, core memory
-  (durable facts about the user), retrieved memory (populated by feature 5),
+  (durable facts about the user), retrieved memory (populated by feature 6),
   and the current conversation.
 - Auto-compression of the conversation section under memory pressure
   (recursive summarization: oldest turns compressed into summaries, raw turns
   evicted) — per memory.md's MemGPT-style sketch.
 - Full programmatic control of context assembly each turn, with per-section
   token accounting and instrumentation.
-- Spec-time decision: a custom context-management stage inside the Pipecat
-  pipeline vs. a custom agent loop replacing the pipeline's LLM stage
-  (STT/TTS/transport stay on Pipecat either way; the old hand-rolled design
-  doc SDD-v2.md, kept in git history, is background for that direction).
 
-### 5. Memory layer — cross-session memory
+### 6. Memory layer — cross-session memory
 
 Tiered, MemGPT-style memory so the agent remembers past sessions and documents.
-Builds on the context engine: retrieval fills its retrieved-memory section; the
-memory-management loop consumes its summaries and evictions.
+Builds on the context engine (feature 5): retrieval fills its retrieved-memory
+section; the memory-management loop consumes its summaries and evictions.
 
 - Storage/indexing structure and the retrieval mechanism are designed
   **together** — the structure is judged by the latency and quality of
@@ -109,18 +130,18 @@ memory-management loop consumes its summaries and evictions.
 - Retrieval quality is measured by evals (golden query→memory datasets), not
   just unit tests.
 
-### 6. LLM tracing
+### 7. LLM tracing
 
 Every LLM call recorded as a trace: full input messages, output, model, token
 counts, latency, purpose (voice turn / memory loop / compression), linked to
 `session_id`/`turn_id`.
 
 - The substrate for evals (golden datasets, LLM-as-judge, provider
-  comparisons) and for debugging the context engine and memory loop —
-  complements feature 2's aggregate usage metrics.
+  comparisons) and for debugging the agent loop, context engine, and memory
+  loop — complements feature 2's aggregate usage metrics.
 - Trace content columns (inputs/outputs) separate from metadata, per the
   encryption rule.
-- A minimal version may be pulled forward if debugging features 4–5 demands
+- A minimal version may be pulled forward if debugging features 3–6 demands
   it.
 
 ## Process infrastructure
@@ -136,7 +157,7 @@ live. Still to add, roughly when its prerequisite feature lands:
   production" workflow ships any chosen main commit — and rolls back — at a
   click; this gate would run inside it before the VM step.)
 - **Evals** (retrieval recall, response quality) join the scheduled/nightly
-  lane once features 5–6 provide the data they run on.
+  lane once features 6–7 provide the data they run on.
 
 ## Known risks
 
