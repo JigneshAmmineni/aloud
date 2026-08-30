@@ -178,8 +178,10 @@ Two architectural seams everything hangs on:
   `app.is_admin`, DB-enforced read-only, and blind to content tables (FR-38).
   The single exception is the boot-time orphan sweep, which runs on the
   RLS-exempt bootstrap engine — legitimate only because it executes before
-  the app serves traffic; **maintenance rule: no request-path code may ever
-  touch the bootstrap engine.**
+  the app serves traffic. That confinement is **structural, not
+  conventional**: the lifespan retires the bootstrap engine right after the
+  sweep (`retire_bootstrap_engine()`), and any later `bootstrap_session()`
+  raises — request-path code *cannot* reach it.
 
 ## 4. Runtime view (one voice session)
 
