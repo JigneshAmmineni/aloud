@@ -110,8 +110,8 @@ jobs:
           # older, untagged leftovers qualify. Both prunes are garbage
           # collectors — in-use/tagged images are skipped, nothing-to-do is
           # a clean no-op — so this is safe to re-run on every deploy.
-          docker image prune -f
-          docker builder prune -f --keep-storage=4GB
+          docker image prune -f || true
+          docker builder prune -f --keep-storage=4GB || true
           git fetch origin
           git checkout prod
           git reset --hard "$SHA"
