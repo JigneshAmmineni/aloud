@@ -108,14 +108,24 @@ class CompanionAgent:
     session state from here — the session row, transcript writer, and artifact
     handler all scope by it."""
 
-    def __init__(self, settings: Settings, documents=None, *, user_id: str):
+    def __init__(
+        self, settings: Settings, documents=None, *, user_id: str, session_id: str
+    ):
         self._settings = settings
         self._documents = documents or []
         self._user_id = user_id
+        # The /start-minted session id — the ONE session identity everywhere
+        # (DB rows, logs, admin URLs, the client's liveness poll). The
+        # transport's pc_id is a connection detail, logged for correlation.
+        self._session_id = session_id
 
     async def run(self, webrtc_connection) -> None:
-        session_id = webrtc_connection.pc_id
-        log = logger.bind(session_id=session_id, component="agent.companion")
+        session_id = self._session_id
+        log = logger.bind(
+            session_id=session_id,
+            pc_id=webrtc_connection.pc_id,
+            component="agent.companion",
+        )
         transport = SmallWebRTCTransport(
             webrtc_connection=webrtc_connection,
             params=TransportParams(

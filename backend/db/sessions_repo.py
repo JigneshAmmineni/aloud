@@ -13,7 +13,16 @@ from db.models import Session, TranscriptEvent, TurnMetric, UsageEvent
 
 async def create_session_row(session_id: str, user_id: str) -> None:
     async with user_scoped_session(user_id) as db:
-        db.add(Session(id=session_id, user_id=user_id, status="active"))
+        # The id is the /start-minted UUID; a renegotiated offer within the
+        # signaling TTL reuses it, so an existing row (only ever the owner's,
+        # under RLS) is re-activated instead of violating the primary key.
+        row = await db.get(Session, session_id)
+        if row is None:
+            db.add(Session(id=session_id, user_id=user_id, status="active"))
+        else:
+            row.status = "active"
+            row.ended_at = None
+            row.end_reason = None
         await db.commit()
 
 

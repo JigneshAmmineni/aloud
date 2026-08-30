@@ -86,6 +86,17 @@ async def _decode(token: str, check_revoked: bool) -> AuthedUser:
         claims = await run_in_threadpool(_verify_token, token, check_revoked)
     except (fb_auth.RevokedIdTokenError, fb_auth.UserDisabledError):
         raise HTTPException(status_code=401, detail="Account disabled or revoked")
+    except fb_auth.CertificateFetchError:
+        # Infrastructure, not identity: WE failed to fetch Google's signing
+        # certificates (transient network, typically right after boot).
+        # 503 tells the client to simply retry — a 401 here would misread a
+        # healthy token as invalid credentials.
+        logger.bind(
+            component="app.auth",
+            event="auth.verify_unavailable",
+            error_type="CertificateFetchError",
+        ).warning("token verification unavailable upstream")
+        raise HTTPException(status_code=503, detail="Try again shortly")
     except Exception as e:
         # Expired, malformed, wrong audience/issuer, cert fetch failure — all
         # collapse to one non-enumerating 401 (FR-26 discipline server-side),

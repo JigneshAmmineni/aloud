@@ -31,7 +31,7 @@ class User(Base):
 class Session(Base):
     __tablename__ = "sessions"
 
-    id: Mapped[str] = mapped_column(String(128), primary_key=True)  # transport pc_id
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)  # /start-minted UUID
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

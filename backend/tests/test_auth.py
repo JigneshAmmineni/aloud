@@ -253,3 +253,14 @@ def test_admin_claim_must_be_exactly_true(client, monkeypatch):
     )
     resp = client.get("/api/admin/users", headers={"Authorization": "Bearer t"})
     assert resp.status_code == 403
+
+
+def test_cert_fetch_failure_is_503_not_401(client, monkeypatch):
+    """CertificateFetchError means WE couldn't verify (transient upstream
+    outage), not that the token is bad — the client must get a retryable
+    503, never a misleading 'invalid credentials' 401."""
+    from firebase_admin.auth import CertificateFetchError
+
+    _fake_verify(monkeypatch, error=CertificateFetchError("certs unreachable", None))
+    resp = client.post("/start", headers={"Authorization": "Bearer t"})
+    assert resp.status_code == 503

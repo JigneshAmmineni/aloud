@@ -227,17 +227,22 @@ async def _handle_offer(
     request: SmallWebRTCRequest,
     background_tasks: BackgroundTasks,
     user_id: str,
+    session_id: str,
     documents=None,
 ):
     async def webrtc_connection_callback(connection: SmallWebRTCConnection):
         logger.bind(
-            session_id=connection.pc_id,
+            session_id=session_id,
+            pc_id=connection.pc_id,
             component="app.signaling",
             event="signaling.offer",
             document_count=len(documents) if documents else 0,
         ).info("New WebRTC connection; launching agent")
         background_tasks.add_task(
-            CompanionAgent(settings, documents, user_id=user_id).run, connection
+            CompanionAgent(
+                settings, documents, user_id=user_id, session_id=session_id
+            ).run,
+            connection,
         )
 
     return await webrtc_handler.handle_web_request(
@@ -269,7 +274,9 @@ async def session_offer(
     session = _owned_session(session_id, user.user_id)
     document_ids = session["body"].get("document_ids") or []
     documents = document_store.get(user.user_id, document_ids)
-    return await _handle_offer(request, background_tasks, user.user_id, documents)
+    return await _handle_offer(
+        request, background_tasks, user.user_id, session_id, documents
+    )
 
 
 @app.patch("/sessions/{session_id}/api/offer")

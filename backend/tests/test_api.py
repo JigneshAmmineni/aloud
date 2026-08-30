@@ -195,9 +195,10 @@ def test_documents_are_isolated_per_user(client, auth_as, stub_handler, monkeypa
     captured = {}
 
     class FakeAgent:
-        def __init__(self, settings, documents=None, *, user_id):
+        def __init__(self, settings, documents=None, *, user_id, session_id):
             captured["documents"] = documents
             captured["user_id"] = user_id
+            captured["session_id"] = session_id
 
         async def run(self, connection):
             pass
@@ -235,9 +236,10 @@ def test_documents_reach_the_agent_via_session_start(client, auth_as, monkeypatc
     captured = {}
 
     class FakeAgent:
-        def __init__(self, settings, documents=None, *, user_id):
+        def __init__(self, settings, documents=None, *, user_id, session_id):
             captured["documents"] = documents
             captured["user_id"] = user_id
+            captured["session_id"] = session_id
 
         async def run(self, connection):
             pass

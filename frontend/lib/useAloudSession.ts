@@ -238,7 +238,9 @@ export function useAloudSession() {
       console.error("connect failed", e);
       expectedEndRef.current = true; // a failed connect is not a lost session
       cleanup();
-      setError("couldn't connect — check that the backend is running");
+      // User-appropriate wording only: the person on the phone can't "check
+      // the backend" — retrying is the one action they actually have.
+      setError("couldn't connect — try again shortly.");
     }
   }, [cleanup, documents, sessionLost, startAlivePoll]);
 
