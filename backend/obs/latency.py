@@ -57,12 +57,20 @@ class FluxAwareLatencyObserver(UserBotLatencyObserver):
         await super().on_push_frame(data)
 
 
-def make_latency_observer(session_id: str) -> UserBotLatencyObserver:
+def make_latency_observer(session_id: str, recorder=None) -> UserBotLatencyObserver:
+    """`recorder` (obs.usage.UsageRecorder, optional) additionally persists a
+    turn_metrics row per breakdown (FR-33) — enqueue-only, off the hot path."""
     observer = FluxAwareLatencyObserver()
     log = logger.bind(session_id=session_id, component="obs.latency")
+    # Closure cell pairing the measured event with its breakdown. None means
+    # "no fresh measurement" — a breakdown without one (e.g. the greeting
+    # turn, which has no end-of-user-speech) must NOT persist a stale or
+    # fake-zero latency into turn_metrics (FR-33/FR-37 trustworthiness).
+    last_measured_ms: list[int | None] = [None]
 
     @observer.event_handler("on_latency_measured")
     async def on_latency_measured(_obs, latency: float):
+        last_measured_ms[0] = round(latency * 1000)
         line = log.bind(event="turn.latency", duration_ms=round(latency * 1000))
         if latency > E2E_ERROR_S:
             line.error(
@@ -97,6 +105,9 @@ def make_latency_observer(session_id: str) -> UserBotLatencyObserver:
             line.warning(f"stage(s) over {STAGE_WARN_S:.0f}s (C-1): {slow}")
         else:
             line.info("turn breakdown")
+        if recorder is not None and last_measured_ms[0] is not None:
+            recorder.record_turn_metric(last_measured_ms[0], stages_ms)
+        last_measured_ms[0] = None  # consumed: the next breakdown needs its own
 
     @observer.event_handler("on_first_bot_speech_latency")
     async def on_first_bot_speech(_obs, latency: float):

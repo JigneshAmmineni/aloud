@@ -53,6 +53,24 @@ def test_all_loguru_levels_have_mappings():
         assert _SEVERITY[name] in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 
 
+def test_exception_ships_as_formatted_stack_trace(capsys):
+    """FR-39: GCP Error Reporting groups an entry only if it carries a real
+    stack trace (spike-verified) — the sink must emit the formatted traceback,
+    never the loguru namedtuple repr."""
+    logger.remove()
+    logger.add(_sink, level="DEBUG")
+    try:
+        raise RuntimeError("obs boom")
+    except RuntimeError:
+        logger.exception("caught for the log")
+    out = capsys.readouterr().out.strip().splitlines()
+    line = json.loads(out[-1])
+    assert line["severity"] == "ERROR"
+    assert line["message"] == "caught for the log"
+    assert "Traceback (most recent call last):" in line["stack_trace"]
+    assert "RuntimeError: obs boom" in line["stack_trace"]
+
+
 def test_flux_turn_frames_drive_latency_events():
     """Flux emits UserStoppedSpeaking (not VAD frames); the observer must
     still measure end-of-speech -> bot speech and emit both log events."""
@@ -148,6 +166,54 @@ def test_slow_stage_logs_warning_with_guilty_stage():
     )
     assert record["level"].name == "WARNING"
     assert record["extra"]["stages_ms"]["ttfb.GoogleLLMService#0"] == 1500
+
+
+def test_breakdown_with_measurement_feeds_the_recorder():
+    """FR-33 wiring: a real turn (end-of-speech → bot speech) persists ONE
+    turn_metrics row carrying the measured latency and stage breakdown."""
+    from unittest.mock import MagicMock
+
+    recorder = MagicMock()
+    logger.remove()
+    logger.add(lambda m: None, level="DEBUG")
+    observer = make_latency_observer("test-session", recorder)
+
+    async def run():
+        await observer.on_push_frame(_pushed(UserStoppedSpeakingFrame()))
+        await observer.on_push_frame(
+            _pushed(
+                MetricsFrame(
+                    data=[TTFBMetricsData(processor="GoogleLLMService#0", value=0.4)]
+                )
+            )
+        )
+        await observer.on_push_frame(_pushed(BotStartedSpeakingFrame()))
+
+    asyncio.run(run())
+
+    recorder.record_turn_metric.assert_called_once()
+    ms, stages = recorder.record_turn_metric.call_args.args
+    assert ms >= 0
+    assert stages["ttfb.GoogleLLMService#0"] == 400
+
+
+def test_breakdown_without_measurement_records_nothing():
+    """The greeting turn (bot speaks with no preceding end-of-user-speech)
+    must NOT persist a fake-zero or stale latency row — those numbers feed
+    FR-37's p50/p95 and the NFR-1 breach count."""
+    from unittest.mock import MagicMock
+
+    recorder = MagicMock()
+    logger.remove()
+    logger.add(lambda m: None, level="DEBUG")
+    observer = make_latency_observer("test-session", recorder)
+
+    async def run():
+        # no UserStoppedSpeakingFrame: nothing was measured
+        await observer.on_push_frame(_pushed(BotStartedSpeakingFrame()))
+
+    asyncio.run(run())
+    recorder.record_turn_metric.assert_not_called()
 
 
 def test_fast_turn_logs_info_not_warning():

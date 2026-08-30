@@ -1,5 +1,8 @@
 """CompanionAgent: builds and runs one session's pipeline (SDD §2.3, §2.4)."""
 
+import asyncio
+import time
+
 from loguru import logger
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
@@ -10,6 +13,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
 )
+from pipecat.processors.frameworks.rtvi import RTVIServerMessageFrame
 from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
@@ -22,6 +26,46 @@ from app.config import Settings
 from db.sessions_repo import create_session_row, end_session_row
 from db.transcript_log import TranscriptWriter
 from obs.latency import make_latency_observer
+from obs.usage import UsageMetricsObserver, UsageRecorder
+
+# Live pipelines by session_id. Serves FR-37's "live sessions now" count
+# (single-instance truth; resets on deploy — accepted in the spec) and the
+# graceful-shutdown goodbye below.
+_live_tasks: dict[str, PipelineTask] = {}
+_draining = False
+
+
+def live_session_count() -> int:
+    return len(_live_tasks)
+
+
+async def drain_live_sessions() -> int:
+    """Graceful-shutdown goodbye: before the process dies (SIGTERM — deploys,
+    restarts), tell every connected client its session is ending over the
+    data channel, then cancel the pipelines so each session closes its own
+    row cleanly (end_reason 'interrupted' via the _draining flag) instead of
+    dying hard and leaving orphans for the boot sweep."""
+    global _draining
+    _draining = True
+    tasks = list(_live_tasks.items())
+    for session_id, task in tasks:
+        try:
+            await task.queue_frames(
+                [RTVIServerMessageFrame(data={"type": "session.ending"})]
+            )
+        except Exception:
+            pass  # a torn connection can't hear the goodbye; cancel anyway
+    if tasks:
+        await asyncio.sleep(0.5)  # let the message flush over the data channel
+        for session_id, task in tasks:
+            try:
+                await task.cancel()
+            except Exception:
+                pass
+        logger.bind(component="agent.companion", event="session.drained").info(
+            f"drained {len(tasks)} live session(s) for shutdown"
+        )
+    return len(tasks)
 
 
 def build_pipeline_parts(settings: Settings, documents=None):
@@ -64,14 +108,24 @@ class CompanionAgent:
     session state from here — the session row, transcript writer, and artifact
     handler all scope by it."""
 
-    def __init__(self, settings: Settings, documents=None, *, user_id: str):
+    def __init__(
+        self, settings: Settings, documents=None, *, user_id: str, session_id: str
+    ):
         self._settings = settings
         self._documents = documents or []
         self._user_id = user_id
+        # The /start-minted session id — the ONE session identity everywhere
+        # (DB rows, logs, admin URLs, the client's liveness poll). The
+        # transport's pc_id is a connection detail, logged for correlation.
+        self._session_id = session_id
 
     async def run(self, webrtc_connection) -> None:
-        session_id = webrtc_connection.pc_id
-        log = logger.bind(session_id=session_id, component="agent.companion")
+        session_id = self._session_id
+        log = logger.bind(
+            session_id=session_id,
+            pc_id=webrtc_connection.pc_id,
+            component="agent.companion",
+        )
         transport = SmallWebRTCTransport(
             webrtc_connection=webrtc_connection,
             params=TransportParams(
@@ -101,6 +155,7 @@ class CompanionAgent:
         )
 
         writer = TranscriptWriter(session_id, self._user_id)
+        recorder = UsageRecorder(session_id, self._user_id)
 
         task = PipelineTask(
             pipeline,
@@ -110,13 +165,37 @@ class CompanionAgent:
             ),
             # observers go on the task, NOT PipelineParams — the params model
             # silently ignores unknown fields
-            observers=[make_latency_observer(session_id), writer.observer()],
+            observers=[
+                make_latency_observer(session_id, recorder),
+                writer.observer(),
+                UsageMetricsObserver(recorder),
+            ],
             enable_turn_tracking=True,
             conversation_id=session_id,
         )
 
+        # FR-33: turn identity comes from the pipeline's own turn tracker.
+        turn_tracker = task.turn_tracking_observer
+        if turn_tracker is not None:
+
+            @turn_tracker.event_handler("on_turn_started")
+            async def on_turn_started(_obs, turn_number: int):
+                recorder.current_turn = turn_number
+        else:
+            # Loud, because the failure mode is silent otherwise: no turn
+            # numbers = no turn_metrics rows and NULL turn_ids, and the
+            # admin overview would render as HEALTHY latency, not missing
+            # data (FR-33/36/37).
+            log.bind(event="turn_tracking.unavailable").error(
+                "pipeline exposes no turn tracker — per-turn metrics and "
+                "turn-attributed usage will be missing for this session"
+            )
+
         @transport.event_handler("on_client_connected")
         async def on_client_connected(transport, client):
+            nonlocal connected_at
+            if connected_at is None:
+                connected_at = time.monotonic()
             log.bind(event="transport.connected").info(
                 "Client connected; kicking off greeting"
             )
@@ -131,6 +210,12 @@ class CompanionAgent:
 
         await create_session_row(session_id, self._user_id)
         writer.start()
+        recorder.start()
+        _live_tasks[session_id] = task
+        # FR-32 defines the STT proxy as connect → disconnect: the clock
+        # starts when the CLIENT connects, not at pipeline start — a session
+        # whose ICE never completes streamed zero audio and must record 0.
+        connected_at: float | None = None
         log.bind(event="session.started").info("Pipeline starting")
         end_reason = "user"  # tap and connection drop are indistinguishable (resume is descoped)
         try:
@@ -140,6 +225,18 @@ class CompanionAgent:
             end_reason = "error"
             raise
         finally:
+            _live_tasks.pop(session_id, None)
+            if _draining and end_reason == "user":
+                # ended by the shutdown drain, not the user — same label the
+                # boot sweep uses, so deploys never pollute the error signal
+                end_reason = "interrupted"
+            # FR-32: STT usage = streamed-time proxy, recorded at session end
+            # (crash-orphaned sessions are covered by the boot sweep). A
+            # session the client never reached streamed nothing: 0 seconds.
+            recorder.record_stt_seconds(
+                time.monotonic() - connected_at if connected_at is not None else 0.0
+            )
+            await recorder.stop()
             await writer.stop()
             await end_session_row(session_id, self._user_id, end_reason)
             log.bind(event="session.ended", end_reason=end_reason).info(

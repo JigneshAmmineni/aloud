@@ -22,6 +22,10 @@ def _settings(**overrides) -> Settings:
         flux_eot_threshold=0.8,
         database_url="sqlite+aiosqlite://",
         firebase_service_account_path="test-not-a-real-key.json",
+        rate_stt_per_minute=0.0,
+        rate_llm_per_1m_tokens_in=0.0,
+        rate_llm_per_1m_tokens_out=0.0,
+        rate_tts_per_1m_chars=0.0,
     )
     base.update(overrides)
     return Settings(**base)

@@ -86,6 +86,17 @@ async def _decode(token: str, check_revoked: bool) -> AuthedUser:
         claims = await run_in_threadpool(_verify_token, token, check_revoked)
     except (fb_auth.RevokedIdTokenError, fb_auth.UserDisabledError):
         raise HTTPException(status_code=401, detail="Account disabled or revoked")
+    except fb_auth.CertificateFetchError:
+        # Infrastructure, not identity: WE failed to fetch Google's signing
+        # certificates (transient network, typically right after boot).
+        # 503 tells the client to simply retry — a 401 here would misread a
+        # healthy token as invalid credentials.
+        logger.bind(
+            component="app.auth",
+            event="auth.verify_unavailable",
+            error_type="CertificateFetchError",
+        ).warning("token verification unavailable upstream")
+        raise HTTPException(status_code=503, detail="Try again shortly")
     except Exception as e:
         # Expired, malformed, wrong audience/issuer, cert fetch failure — all
         # collapse to one non-enumerating 401 (FR-26 discipline server-side),
@@ -150,23 +161,35 @@ def email_exists(email: str) -> bool:
 # --- Admin account operations (FR-29) — provider-aware, so they live here. ---
 
 
+def _account_dict(u) -> dict:
+    return {
+        "uid": u.uid,
+        "email": u.email,
+        "display_name": u.display_name,
+        "email_verified": u.email_verified,
+        "disabled": u.disabled,
+        "providers": [p.provider_id for p in u.provider_data],
+        "created_at": u.user_metadata.creation_timestamp,
+        "last_sign_in": u.user_metadata.last_sign_in_timestamp,
+    }
+
+
 def list_accounts() -> list[dict]:
-    """All Firebase accounts, for the admin user list."""
-    users = []
-    for u in fb_auth.list_users(app=_firebase()).iterate_all():
-        users.append(
-            {
-                "uid": u.uid,
-                "email": u.email,
-                "display_name": u.display_name,
-                "email_verified": u.email_verified,
-                "disabled": u.disabled,
-                "providers": [p.provider_id for p in u.provider_data],
-                "created_at": u.user_metadata.creation_timestamp,
-                "last_sign_in": u.user_metadata.last_sign_in_timestamp,
-            }
-        )
-    return users
+    """All Firebase accounts, for the admin user list (FR-35's one-traversal
+    merge). For a single account use get_account — never a full traversal."""
+    return [
+        _account_dict(u) for u in fb_auth.list_users(app=_firebase()).iterate_all()
+    ]
+
+
+def get_account(uid: str) -> dict | None:
+    """Single-uid lookup (the admin drill-down header). ValueError is the
+    SDK's answer to a malformed uid (hand-edited deep link) — same outcome
+    as unknown: the page's existing empty state, never a 500."""
+    try:
+        return _account_dict(fb_auth.get_user(uid, app=_firebase()))
+    except (fb_auth.UserNotFoundError, ValueError):
+        return None
 
 
 def set_account_disabled(uid: str, disabled: bool) -> None:

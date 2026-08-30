@@ -107,6 +107,25 @@ def test_session_scoped_patch_requires_known_session(client, stub_handler, auth_
     assert stub_handler.patch_requests == []
 
 
+def test_session_alive_route(client, auth_as, monkeypatch):
+    """The while-active liveness poll: verified identity + session id go to
+    the repo check (covered in test_db); the route just relays the answer."""
+    calls = []
+
+    async def fake_is_active(session_id, user_id):
+        calls.append((session_id, user_id))
+        return session_id == "live-1"
+
+    monkeypatch.setattr(main, "session_is_active", fake_is_active)
+
+    assert client.get("/sessions/live-1/alive").status_code == 401  # no token
+
+    auth_as("uid-a")
+    assert client.get("/sessions/live-1/alive").json() == {"alive": True}
+    assert client.get("/sessions/dead-1/alive").json() == {"alive": False}
+    assert calls == [("live-1", "uid-a"), ("dead-1", "uid-a")]
+
+
 def test_users_cannot_operate_each_others_sessions(client, stub_handler, auth_as):
     """NFR-8 negative test at the session layer: a valid token for user B
     must not open, offer into, or patch user A's session."""
@@ -176,9 +195,10 @@ def test_documents_are_isolated_per_user(client, auth_as, stub_handler, monkeypa
     captured = {}
 
     class FakeAgent:
-        def __init__(self, settings, documents=None, *, user_id):
+        def __init__(self, settings, documents=None, *, user_id, session_id):
             captured["documents"] = documents
             captured["user_id"] = user_id
+            captured["session_id"] = session_id
 
         async def run(self, connection):
             pass
@@ -216,9 +236,10 @@ def test_documents_reach_the_agent_via_session_start(client, auth_as, monkeypatc
     captured = {}
 
     class FakeAgent:
-        def __init__(self, settings, documents=None, *, user_id):
+        def __init__(self, settings, documents=None, *, user_id, session_id):
             captured["documents"] = documents
             captured["user_id"] = user_id
+            captured["session_id"] = session_id
 
         async def run(self, connection):
             pass

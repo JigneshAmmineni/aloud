@@ -16,6 +16,7 @@ with `logger.bind(...)` at call sites and land at the top level of the line.
 import json
 import os
 import sys
+import traceback
 
 from loguru import logger
 
@@ -43,11 +44,21 @@ def _sink(message) -> None:
         if key != "component":
             line[key] = value
     if record["exception"]:
-        line["exception"] = str(record["exception"])
+        # A real formatted traceback, not the namedtuple repr: GCP Error
+        # Reporting only groups entries carrying a recognizable stack trace
+        # (verified by spike — plain ERROR one-liners don't group, FR-39).
+        exc = record["exception"]
+        line["stack_trace"] = "".join(
+            traceback.format_exception(exc.type, exc.value, exc.traceback)
+        )
     print(json.dumps(line, default=str), file=sys.stdout, flush=True)
 
 
 def setup_logging() -> None:
-    """Replace loguru's default sink with the JSON sink. Call once at boot."""
+    """Replace loguru's default sink with the JSON sink. Call once at boot.
+
+    The fallback is INFO, not DEBUG (FR-39): logs ship to a persistent
+    external store, and DEBUG carries transcript text — the safe state must
+    be the default state. DEBUG is the explicit dev opt-in via LOG_LEVEL."""
     logger.remove()
-    logger.add(_sink, level=os.getenv("LOG_LEVEL", "DEBUG"))
+    logger.add(_sink, level=os.getenv("LOG_LEVEL", "INFO"))

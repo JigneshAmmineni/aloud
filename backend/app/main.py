@@ -16,6 +16,8 @@ Session-establishment endpoints verify with check_revoked=True (FR-29), so a
 disabled account cannot open or complete a new session.
 """
 
+import asyncio
+import signal
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -42,22 +44,66 @@ from pipecat.transports.smallwebrtc.request_handler import (
     SmallWebRTCRequestHandler,
 )
 
-from agent.companion import CompanionAgent
+from agent.companion import CompanionAgent, drain_live_sessions
 from app import admin, auth
 from app.auth import AuthedUser, get_current_user_checked, get_current_user_id
 from app.config import load_settings
 from app.documents import DocumentError, document_store, extract_text
 from app.ratelimit import rate_limited
-from db.engine import init_db
+from db.engine import init_db, retire_bootstrap_engine
+from db.sessions_repo import session_is_active, sweep_orphaned_sessions
 from db.users_repo import provision_user
 
 settings = load_settings()  # fail fast at boot, naming any missing env vars
+
+
+def _install_sigterm_goodbye() -> None:
+    """Graceful-shutdown goodbye. Uvicorn's own SIGTERM handling cancels the
+    agent background tasks before lifespan shutdown runs, so a goodbye there
+    would be too late. Instead: intercept SIGTERM, tell live sessions the
+    server is going away (drain_live_sessions), then hand control back to
+    uvicorn's untouched SIGINT handler for its normal graceful exit."""
+    loop = asyncio.get_running_loop()
+    # asyncio holds tasks by WEAK reference — without a hard one the drain
+    # task could be garbage-collected mid-await, and the SIGINT handoff
+    # would never fire (the process would sit deaf until SIGKILL).
+    retained: list = []
+
+    def _on_sigterm():
+        async def _drain_then_exit():
+            # The handoff to uvicorn's shutdown must happen no matter what —
+            # a raising drain would otherwise leave the process deaf to
+            # SIGTERM until Docker SIGKILLs it, the exact hard death the
+            # drain exists to avoid.
+            try:
+                await drain_live_sessions()
+            except Exception:
+                logger.bind(component="app.main", event="session.drain_failed").exception(
+                    "drain failed; shutting down anyway"
+                )
+            finally:
+                signal.raise_signal(signal.SIGINT)
+
+        retained.append(asyncio.ensure_future(_drain_then_exit()))
+
+    try:
+        loop.add_signal_handler(signal.SIGTERM, _on_sigterm)
+    except (NotImplementedError, RuntimeError):
+        pass  # non-unix host (local Windows runs); deploys are Linux containers
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     auth.configure(settings.firebase_service_account_path)
     await init_db(settings.database_url)
+    # FR-32 boot sweep: close sessions orphaned by the previous process's
+    # death and emit their inferred STT usage — before serving traffic.
+    await sweep_orphaned_sessions()
+    # The sweep was the bootstrap engine's last job: retire the RLS-exempt
+    # escape hatch so any later use fails loudly instead of silently
+    # bypassing every policy.
+    await retire_bootstrap_engine()
+    _install_sigterm_goodbye()
     yield
 
 
@@ -154,11 +200,14 @@ async def upload_document(
     except DocumentError as e:
         raise HTTPException(status_code=400, detail=str(e))
     doc = document_store.add(user_id, filename, file.content_type or "", text)
+    # No filename in the log: it's user-supplied text describing private
+    # material, and INFO lines ship to Cloud Logging (FR-39/NFR-9) — the
+    # same rule that keeps artifact titles out of agent/tools.py's log.
     logger.bind(
         component="app.documents",
         event="document.uploaded",
         char_count=doc.char_count,
-    ).info(f"Document uploaded: {filename!r}")
+    ).info(f"Document uploaded ({doc.char_count} chars)")
     return {
         "id": doc.id,
         "filename": doc.filename,
@@ -199,23 +248,41 @@ async def _handle_offer(
     request: SmallWebRTCRequest,
     background_tasks: BackgroundTasks,
     user_id: str,
+    session_id: str,
     documents=None,
 ):
     async def webrtc_connection_callback(connection: SmallWebRTCConnection):
         logger.bind(
-            session_id=connection.pc_id,
+            session_id=session_id,
+            pc_id=connection.pc_id,
             component="app.signaling",
             event="signaling.offer",
             document_count=len(documents) if documents else 0,
         ).info("New WebRTC connection; launching agent")
         background_tasks.add_task(
-            CompanionAgent(settings, documents, user_id=user_id).run, connection
+            CompanionAgent(
+                settings, documents, user_id=user_id, session_id=session_id
+            ).run,
+            connection,
         )
 
     return await webrtc_handler.handle_web_request(
         request=request,
         webrtc_connection_callback=webrtc_connection_callback,
     )
+
+
+@app.get("/sessions/{session_id}/alive")
+async def session_alive(
+    session_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Session-scoped liveness for the client's while-active poll: the DB
+    row is the shared truth, so this answers correctly for every way a
+    session dies (crash → this request itself fails; restart → boot sweep
+    closed the row; media timeout → the pipeline closed it) and would keep
+    working unchanged behind a load balancer."""
+    return {"alive": await session_is_active(session_id, user_id)}
 
 
 @app.post("/sessions/{session_id}/api/offer")
@@ -228,7 +295,9 @@ async def session_offer(
     session = _owned_session(session_id, user.user_id)
     document_ids = session["body"].get("document_ids") or []
     documents = document_store.get(user.user_id, document_ids)
-    return await _handle_offer(request, background_tasks, user.user_id, documents)
+    return await _handle_offer(
+        request, background_tasks, user.user_id, session_id, documents
+    )
 
 
 @app.patch("/sessions/{session_id}/api/offer")

@@ -221,7 +221,12 @@ def test_admin_route_allows_admin_claim(client, monkeypatch):
     monkeypatch.setattr(main.admin, "list_accounts", lambda: [{"uid": "uid-1"}])
     resp = client.get("/api/admin/users", headers={"Authorization": "Bearer t"})
     assert resp.status_code == 200
-    assert resp.json()["users"] == [{"uid": "uid-1"}]
+    # the route enriches each account with FR-35 aggregates (zeroed here —
+    # no DB rows); the account itself must pass through
+    users = resp.json()["users"]
+    assert len(users) == 1
+    assert users[0]["uid"] == "uid-1"
+    assert users[0]["sessions"] == 0
 
 
 def test_admin_disable_route_invokes_account_op(client, monkeypatch):
@@ -248,3 +253,26 @@ def test_admin_claim_must_be_exactly_true(client, monkeypatch):
     )
     resp = client.get("/api/admin/users", headers={"Authorization": "Bearer t"})
     assert resp.status_code == 403
+
+
+def test_cert_fetch_failure_is_503_not_401(client, monkeypatch):
+    """CertificateFetchError means WE couldn't verify (transient upstream
+    outage), not that the token is bad — the client must get a retryable
+    503, never a misleading 'invalid credentials' 401."""
+    from firebase_admin.auth import CertificateFetchError
+
+    _fake_verify(monkeypatch, error=CertificateFetchError("certs unreachable", None))
+    resp = client.post("/start", headers={"Authorization": "Bearer t"})
+    assert resp.status_code == 503
+
+
+def test_get_account_treats_malformed_uid_as_absent(monkeypatch):
+    """A hand-edited deep link (`/admin/users/%20`) must hit the page's
+    empty state, not a 500 — the SDK raises ValueError for malformed uids."""
+    monkeypatch.setattr(auth_mod, "_firebase", lambda: None)
+
+    def boom(uid, app=None):
+        raise ValueError("malformed uid")
+
+    monkeypatch.setattr(fb_auth, "get_user", boom)
+    assert auth_mod.get_account(" ") is None

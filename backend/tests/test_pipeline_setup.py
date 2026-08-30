@@ -80,3 +80,32 @@ def test_default_providers_are_the_documented_stack(make_settings):
     assert isinstance(stt, DeepgramFluxSTTService)
     assert isinstance(llm, GoogleLLMService)
     assert isinstance(tts, CartesiaTTSService)
+
+
+def test_drain_live_sessions_says_goodbye_then_cancels():
+    """Graceful-shutdown goodbye: every live pipeline gets a session.ending
+    server message over the data channel, then a cancel — and the module
+    flag makes those sessions close as 'interrupted', not 'user'."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from pipecat.processors.frameworks.rtvi import RTVIServerMessageFrame
+
+    import agent.companion as companion
+
+    task = MagicMock()
+    task.queue_frames = AsyncMock()
+    task.cancel = AsyncMock()
+    companion._live_tasks["drain-test"] = task
+    try:
+        assert companion.live_session_count() == 1
+        drained = asyncio.run(companion.drain_live_sessions())
+        assert drained == 1
+        assert companion._draining is True
+        frame = task.queue_frames.call_args.args[0][0]
+        assert isinstance(frame, RTVIServerMessageFrame)
+        assert frame.data == {"type": "session.ending"}
+        task.cancel.assert_awaited_once()
+    finally:
+        companion._live_tasks.pop("drain-test", None)
+        companion._draining = False

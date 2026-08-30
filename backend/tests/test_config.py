@@ -20,6 +20,10 @@ _OPTIONAL = (
     "CARTESIA_SPEED",
     "FLUX_EOT_THRESHOLD",
     "DATABASE_URL",
+    "RATE_STT_PER_MINUTE",
+    "RATE_LLM_PER_1M_TOKENS_IN",
+    "RATE_LLM_PER_1M_TOKENS_OUT",
+    "RATE_TTS_PER_1M_CHARS",
 )
 
 
@@ -57,6 +61,11 @@ def test_defaults(monkeypatch):
     assert s.flux_eot_threshold == 0.8
     assert s.cartesia_voice_id  # falls back to a non-empty default voice
     assert s.database_url.startswith("postgresql+asyncpg://")
+    # FR-34 rates: 0.0 means "not configured" — estimates show $0, never crash
+    assert s.rate_stt_per_minute == 0.0
+    assert s.rate_llm_per_1m_tokens_in == 0.0
+    assert s.rate_llm_per_1m_tokens_out == 0.0
+    assert s.rate_tts_per_1m_chars == 0.0
 
 
 def test_env_overrides(monkeypatch):

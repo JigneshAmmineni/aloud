@@ -14,7 +14,7 @@ from pipecat.processors.frameworks.rtvi import RTVIServerMessageFrame
 from pipecat.services.llm_service import FunctionCallParams
 
 from db.engine import user_scoped_session
-from db.models import Artifact
+from db.models import Artifact, UsageEvent
 
 ARTIFACT_KINDS = ("summary", "action_items", "cleaned_idea")
 
@@ -78,8 +78,27 @@ def make_create_artifact_handler(session_id: str, user_id: str):
         try:
             async with user_scoped_session(user_id) as db:
                 db.add(row)
+                # FR-32/FR-38: the metadata-only artifact_created event —
+                # admin views count artifacts from usage_events, never from
+                # the content-bearing table. Same transaction: count and
+                # artifact can't diverge.
+                db.add(
+                    UsageEvent(
+                        user_id=user_id,
+                        session_id=session_id,
+                        turn_id=None,
+                        ts=created_at,
+                        stage="artifact",
+                        unit="count",
+                        quantity=1.0,
+                        detail=kind,
+                    )
+                )
                 await db.commit()
-                await db.refresh(row)
+                # No refresh: row.id is already populated by the INSERT's
+                # RETURNING at flush, and a refresh AFTER commit would run in
+                # a new transaction whose RLS user context has evaporated
+                # (transaction-local set_config) — zero rows, loud failure.
         except Exception as e:
             log.bind(event="tool.create_artifact_failed").error(
                 f"artifact save failed: {e}"
@@ -103,8 +122,10 @@ def make_create_artifact_handler(session_id: str, user_id: str):
                 }
             )
         )
+        # No title in the log line: artifacts.title is a 🔒 sensitive column,
+        # and INFO-level lines ship to Cloud Logging (FR-39/NFR-9).
         log.bind(event="tool.invoked", tool="create_artifact", kind=kind).info(
-            f"artifact saved: {title!r}"
+            f"artifact saved ({kind}, {len(content)} chars)"
         )
         await params.result_callback(
             {
