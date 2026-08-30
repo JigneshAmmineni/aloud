@@ -43,7 +43,13 @@ type SessionRow = {
   estimated_cost: CostEstimate;
 };
 
-type Response = { account: Account | null; sessions: SessionRow[] };
+type Response = {
+  account: Account | null;
+  sessions: SessionRow[];
+  // TRUE session count — the list is capped server-side (newest 500), and
+  // the cap must be visible, never silent under-reporting on a cost view
+  total_sessions: number;
+};
 
 export default function AdminUserSessionsPage() {
   const router = useRouter();
@@ -91,8 +97,10 @@ export default function AdminUserSessionsPage() {
                 : "no Firebase account found for this uid"}
             </p>
             <p className="admin-card-detail">
-              {data.sessions.length} session
-              {data.sessions.length === 1 ? "" : "s"} · est. total{" "}
+              {data.total_sessions > data.sessions.length
+                ? `showing newest ${data.sessions.length} of ${data.total_sessions} sessions (usage and cost totals cover only these)`
+                : `${data.total_sessions} session${data.total_sessions === 1 ? "" : "s"}`}{" "}
+              · est. total{" "}
               {fmtCost({
                 stt: 0,
                 llm: 0,
@@ -135,16 +143,10 @@ export default function AdminUserSessionsPage() {
                     key={s.session_id}
                     className={`clickable${s.end_reason === "error" ? " error-row" : ""}`}
                     tabIndex={0}
-                    onClick={() =>
-                      router.push(
-                        `/admin/sessions/${s.session_id}?from=${encodeURIComponent(who)}`,
-                      )
-                    }
+                    onClick={() => router.push(`/admin/sessions/${s.session_id}`)}
                     onKeyDown={(e) => {
                       if (e.key === "Enter")
-                        router.push(
-                          `/admin/sessions/${s.session_id}?from=${encodeURIComponent(who)}`,
-                        );
+                        router.push(`/admin/sessions/${s.session_id}`);
                     }}
                   >
                     <td>{fmtWhen(s.started_at)}</td>

@@ -81,11 +81,12 @@ async def user_aggregates(admin: AuthedUser) -> dict[str, dict]:
 _SESSIONS_CAP = 500  # most-recent bound; the UI notes when it's hit
 
 
-async def sessions_for_user(admin: AuthedUser, user_id: str) -> list[dict]:
+async def sessions_for_user(admin: AuthedUser, user_id: str) -> dict:
     """FR-36: a user's session history with per-session usage and latency.
     Bounded on both axes: the newest _SESSIONS_CAP sessions, and the usage/
     latency queries scoped to exactly those sessions — never every row the
-    user has ever produced."""
+    user has ever produced. total_sessions carries the TRUE count so the
+    cap is visible, never silent under-reporting."""
     async with admin_scoped_session(admin) as db:
         sessions = (
             (
@@ -99,9 +100,19 @@ async def sessions_for_user(admin: AuthedUser, user_id: str) -> list[dict]:
             .scalars()
             .all()
         )
+        # Count AFTER the list (READ COMMITTED: separate statements see
+        # separate snapshots) so a session starting in between can only make
+        # the total run AHEAD of the rows — the direction the UI already
+        # handles — never behind. Distinct name: the usage loop below
+        # unpacks a `total` per row and would shadow this.
+        total_sessions = (
+            await db.execute(
+                select(func.count(Session.id)).where(Session.user_id == user_id)
+            )
+        ).scalar()
         session_ids = [s.id for s in sessions]
         if not session_ids:
-            return []
+            return {"sessions": [], "total_sessions": int(total_sessions or 0)}
         usage_rows = await db.execute(
             select(
                 UsageEvent.session_id,
@@ -149,7 +160,7 @@ async def sessions_for_user(admin: AuthedUser, user_id: str) -> list[dict]:
                 "worst_turn_ms": lat[-1] if lat else None,
             }
         )
-    return result
+    return {"sessions": result, "total_sessions": int(total_sessions or 0)}
 
 
 async def session_detail(admin: AuthedUser, session_id: str) -> dict | None:

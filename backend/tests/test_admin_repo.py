@@ -132,7 +132,9 @@ def test_user_aggregates(tmp_path):
 def test_sessions_for_user(tmp_path):
     async def run():
         await _seed(tmp_path)
-        sessions = await admin_repo.sessions_for_user(ADMIN, "uid-a")
+        data = await admin_repo.sessions_for_user(ADMIN, "uid-a")
+        assert data["total_sessions"] == 2  # true count rides along (cap visibility)
+        sessions = data["sessions"]
         assert [s["session_id"] for s in sessions] == ["sa2", "sa1"]  # newest first
         sa1 = sessions[1]
         assert sa1["duration_s"] == 120.0

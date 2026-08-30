@@ -177,6 +177,36 @@ def test_batch_writer_survives_a_failed_flush(tmp_path):
     assert flushed == [["second"]]
 
 
+def test_batch_writer_drop_log_names_the_affected_turns():
+    """A dropped batch must say WHICH turns it lost ("the drill-down is
+    missing turns 4–7"), deduped and sorted; rows without a turn_id (the
+    transcript writer's) contribute nothing."""
+    from types import SimpleNamespace
+
+    captured: list = []
+    logger.remove()
+    logger.add(lambda m: captured.append(m.record), level="DEBUG")
+
+    async def failing_flush(rows):
+        raise RuntimeError("db down")
+
+    async def run():
+        writer = BackgroundBatchWriter(failing_flush, logger.bind(session_id="s-1"))
+        writer.start()
+        writer.enqueue(SimpleNamespace(turn_id=7))
+        writer.enqueue(SimpleNamespace(turn_id=4))
+        writer.enqueue(SimpleNamespace(turn_id=4))  # dup: logged once
+        writer.enqueue(SimpleNamespace(text="no turn attr"))
+        await writer.stop()
+
+    asyncio.run(run())
+    record = next(
+        r for r in captured if r["extra"].get("event") == "batch_writer.write_failed"
+    )
+    assert record["extra"]["turn_ids"] == [4, 7]
+    assert record["extra"]["rows"] == 4
+
+
 def test_batch_writer_bounds_a_stalled_flush(monkeypatch):
     """A HANGING flush (Postgres mid-restart: asyncpg waits ~60s) must become
     a logged drop like a failing one — never block stop() (and with it the

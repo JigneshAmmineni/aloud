@@ -157,24 +157,28 @@ def test_user_sessions_route_merges_account_and_costs(
 
     async def fake_sessions(admin, user_id):
         assert user_id == "uid-a"
-        return [
-            {
-                "session_id": "s-1",
-                "started_at": "2026-08-27T10:00:00+00:00",
-                "duration_s": 60.0,
-                "status": "ended",
-                "end_reason": "user",
-                "usage": {"llm.tokens_in": 100.0},
-                "artifact_count": 1,
-                "median_turn_ms": 1000,
-                "worst_turn_ms": 2000,
-            }
-        ]
+        return {
+            "sessions": [
+                {
+                    "session_id": "s-1",
+                    "started_at": "2026-08-27T10:00:00+00:00",
+                    "duration_s": 60.0,
+                    "status": "ended",
+                    "end_reason": "user",
+                    "usage": {"llm.tokens_in": 100.0},
+                    "artifact_count": 1,
+                    "median_turn_ms": 1000,
+                    "worst_turn_ms": 2000,
+                }
+            ],
+            "total_sessions": 700,  # capped list, true count passes through
+        }
 
     monkeypatch.setattr(admin_repo_mod, "sessions_for_user", fake_sessions)
     body = client.get("/api/admin/users/uid-a/sessions").json()
     assert body["account"]["email"] == "ada@example.com"
     assert body["sessions"][0]["estimated_cost"]["total"] >= 0
+    assert body["total_sessions"] == 700
 
 
 def test_session_detail_route_404_and_costs(client, auth_as, monkeypatch):
@@ -203,10 +207,18 @@ def test_session_detail_route_404_and_costs(client, auth_as, monkeypatch):
         }
 
     monkeypatch.setattr(admin_repo_mod, "session_detail", fake_detail)
+    # FR-41 breadcrumb: the owner's email is resolved server-side (never a
+    # URL param)
+    monkeypatch.setattr(
+        admin_mod,
+        "get_account",
+        lambda uid: {"email": "ada@example.com"} if uid == "uid-a" else None,
+    )
     assert client.get("/api/admin/sessions/unknown").status_code == 404
     body = client.get("/api/admin/sessions/s-1").json()
     assert "estimated_cost" in body
     assert "estimated_cost" in body["turns"][0]  # per-turn cost, FR-36
+    assert body["user_email"] == "ada@example.com"
 
 
 def test_overview_route_adds_live_sessions_and_costs(client, auth_as, monkeypatch):

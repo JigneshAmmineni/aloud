@@ -2,6 +2,7 @@
 
 import asyncio
 
+import pytest
 from sqlalchemy import Text, select
 
 from db.engine import init_db, session_factory
@@ -142,6 +143,29 @@ def test_session_is_active_lifecycle(tmp_path):
         assert await session_is_active("nope", "uid-a") is False
         await end_session_row("sess-1", "uid-a", "user")
         assert await session_is_active("sess-1", "uid-a") is False
+
+    asyncio.run(run())
+
+
+def test_bootstrap_engine_retires_loudly(tmp_path):
+    """The RLS-exempt escape hatch must be structurally closed after boot:
+    usable before retirement, a loud RuntimeError after — never a silent
+    zero-row success (the artifact-save bug's shape, inverted)."""
+    from db.engine import bootstrap_session, retire_bootstrap_engine
+
+    url = f"sqlite+aiosqlite:///{tmp_path}/aloud_test.db"
+
+    async def run():
+        await init_db(url)
+        async with bootstrap_session():  # open before retirement
+            pass
+        await retire_bootstrap_engine()
+        with pytest.raises(RuntimeError):
+            async with bootstrap_session():
+                pass
+        await init_db(url)  # a fresh boot re-opens it (new process semantics)
+        async with bootstrap_session():
+            pass
 
     asyncio.run(run())
 

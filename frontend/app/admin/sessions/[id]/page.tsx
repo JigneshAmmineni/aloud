@@ -9,8 +9,8 @@
  * never content (NFR-9).
  */
 
-import { Suspense, useCallback, useEffect, useState } from "react";
-import { useParams, useSearchParams } from "next/navigation";
+import { useCallback, useEffect, useState } from "react";
+import { useParams } from "next/navigation";
 
 import { authedFetch } from "@/lib/auth";
 import {
@@ -39,6 +39,7 @@ type Turn = {
 type Detail = {
   session_id: string;
   user_id: string;
+  user_email: string | null;
   started_at: string;
   ended_at: string | null;
   status: string;
@@ -57,10 +58,9 @@ function fmtStages(stages: Record<string, number> | null): string {
     .join(" · ");
 }
 
-function SessionDetail() {
+export default function AdminSessionPage() {
   const ready = useAdminReady();
   const { id } = useParams<{ id: string }>();
-  const from = useSearchParams().get("from");
   const [data, setData] = useState<Detail | null>(null);
   const [error, setError] = useState("");
 
@@ -83,9 +83,10 @@ function SessionDetail() {
     if (ready) load();
   }, [ready, load]);
 
-  // Breadcrumb: Users → {email} → session. The email travels as a search
-  // param from the user page; a pasted deep link falls back to the uid.
-  const who = from ?? data?.user_id ?? "user";
+  // Breadcrumb: Users → {email} → session (FR-41). The email is resolved
+  // SERVER-side and never travels in the URL — these deep links are meant
+  // to be shared, and a URL param would land in history and access logs.
+  const who = data?.user_email ?? data?.user_id ?? "user";
 
   return (
     <AdminShell
@@ -164,15 +165,5 @@ function SessionDetail() {
         </>
       )}
     </AdminShell>
-  );
-}
-
-export default function AdminSessionPage() {
-  // useSearchParams requires a Suspense boundary for the build's
-  // prerender pass.
-  return (
-    <Suspense fallback={null}>
-      <SessionDetail />
-    </Suspense>
   );
 }

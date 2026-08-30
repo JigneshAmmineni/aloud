@@ -57,7 +57,10 @@ _session_factory: async_sessionmaker | None = None
 
 
 def session_factory() -> async_sessionmaker:
-    assert _session_factory is not None, "init_db() must run first"
+    # raise, not assert — python -O strips asserts (same rule as
+    # bootstrap_session's guard below)
+    if _session_factory is None:
+        raise RuntimeError("init_db() must run first")
     return _session_factory
 
 
@@ -68,10 +71,13 @@ async def bootstrap_session():
     through db/admin_repo's admin_scoped_session (FR-38). Loud if init_db
     hasn't run OR the engine has been retired — a sweep that silently saw
     zero rows would look like success."""
-    assert _bootstrap_engine is not None, (
-        "bootstrap engine unavailable — init_db() must run first, and after "
-        "retire_bootstrap_engine() the escape hatch is closed for good"
-    )
+    # raise, not assert: python -O strips asserts, and this is the guard
+    # that keeps the RLS-exempt engine structurally unreachable after boot.
+    if _bootstrap_engine is None:
+        raise RuntimeError(
+            "bootstrap engine unavailable — init_db() must run first, and "
+            "after retire_bootstrap_engine() the escape hatch is closed for good"
+        )
     factory = async_sessionmaker(_bootstrap_engine, expire_on_commit=False)
     async with factory() as db:
         yield db
