@@ -63,7 +63,19 @@ class BackgroundBatchWriter:
                         self._flush(buffer), timeout=FLUSH_TIMEOUT_S
                     )
                 except Exception as e:
+                    # turn_ids make a drop traceable ("the drill-down is
+                    # missing turns 4–7"); getattr keeps the writer
+                    # type-agnostic — transcript rows simply have none.
+                    turn_ids = sorted(
+                        {
+                            t
+                            for t in (getattr(r, "turn_id", None) for r in buffer)
+                            if t is not None
+                        }
+                    )
                     self._log.bind(
-                        event="batch_writer.write_failed", rows=len(buffer)
+                        event="batch_writer.write_failed",
+                        rows=len(buffer),
+                        turn_ids=turn_ids,
                     ).error(f"dropping {len(buffer)} rows: {e}")
                 buffer = []

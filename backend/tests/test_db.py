@@ -146,6 +146,31 @@ def test_session_is_active_lifecycle(tmp_path):
     asyncio.run(run())
 
 
+def test_bootstrap_engine_retires_loudly(tmp_path):
+    """The RLS-exempt escape hatch must be structurally closed after boot:
+    usable before retirement, a loud RuntimeError after — never a silent
+    zero-row success (the artifact-save bug's shape, inverted)."""
+    import pytest
+
+    from db.engine import bootstrap_session, retire_bootstrap_engine
+
+    url = f"sqlite+aiosqlite:///{tmp_path}/aloud_test.db"
+
+    async def run():
+        await init_db(url)
+        async with bootstrap_session():  # open before retirement
+            pass
+        await retire_bootstrap_engine()
+        with pytest.raises(RuntimeError):
+            async with bootstrap_session():
+                pass
+        await init_db(url)  # a fresh boot re-opens it (new process semantics)
+        async with bootstrap_session():
+            pass
+
+    asyncio.run(run())
+
+
 def test_boot_sweep_closes_orphans_and_emits_stt_usage(tmp_path):
     """FR-32's boot sweep: still-active sessions are closed as 'interrupted'
     (not 'error' — deploys cause this too), ended_at inferred from the max

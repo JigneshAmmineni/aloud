@@ -40,6 +40,15 @@ def client():
         yield c
 
 
+def test_lifespan_retires_bootstrap_engine(client):
+    """Pins the startup ordering: after the lifespan's sweep, the RLS-exempt
+    bootstrap engine is retired — dropping the retire call in a refactor
+    would leave the superuser engine live for the whole process."""
+    import db.engine as engine_mod
+
+    assert engine_mod._bootstrap_engine is None
+
+
 def test_healthz_is_open(client):
     """The one unauthenticated route: an infra liveness probe, no user data."""
     resp = client.get("/healthz")

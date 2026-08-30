@@ -118,7 +118,8 @@ async def admin_user_sessions(uid: str, admin: AuthedUser = Depends(get_current_
     """FR-36: session history. Account identity comes from Firebase so the
     page can show who this is (a single-uid lookup — the full traversal is
     for the list view only); usage/latency from the DB aggregates."""
-    sessions = await admin_repo.sessions_for_user(admin, uid)
+    data = await admin_repo.sessions_for_user(admin, uid)
+    sessions = data["sessions"]
     for s in sessions:
         s["estimated_cost"] = estimate_cost(s["usage"], _settings)
     try:
@@ -133,7 +134,11 @@ async def admin_user_sessions(uid: str, admin: AuthedUser = Depends(get_current_
             error_type=type(e).__name__,
         ).warning("account lookup failed; serving sessions without identity")
         account = None
-    return {"account": account, "sessions": sessions}
+    return {
+        "account": account,
+        "sessions": sessions,
+        "total_sessions": data["total_sessions"],
+    }
 
 
 @router.get("/sessions/{session_id}")

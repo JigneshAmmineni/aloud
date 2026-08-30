@@ -191,6 +191,13 @@ class CompanionAgent:
                 "turn-attributed usage will be missing for this session"
             )
 
+        # FR-32 defines the STT proxy as connect → disconnect: the clock
+        # starts when the CLIENT connects, not at pipeline start — a session
+        # whose ICE never completes streamed zero audio and must record 0.
+        # Bound BEFORE the handler that closes over it: the handler could in
+        # principle fire the moment the transport is live.
+        connected_at: float | None = None
+
         @transport.event_handler("on_client_connected")
         async def on_client_connected(transport, client):
             nonlocal connected_at
@@ -212,10 +219,6 @@ class CompanionAgent:
         writer.start()
         recorder.start()
         _live_tasks[session_id] = task
-        # FR-32 defines the STT proxy as connect → disconnect: the clock
-        # starts when the CLIENT connects, not at pipeline start — a session
-        # whose ICE never completes streamed zero audio and must record 0.
-        connected_at: float | None = None
         log.bind(event="session.started").info("Pipeline starting")
         end_reason = "user"  # tap and connection drop are indistinguishable (resume is descoped)
         try:
