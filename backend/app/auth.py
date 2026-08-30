@@ -183,10 +183,12 @@ def list_accounts() -> list[dict]:
 
 
 def get_account(uid: str) -> dict | None:
-    """Single-uid lookup (the admin drill-down header)."""
+    """Single-uid lookup (the admin drill-down header). ValueError is the
+    SDK's answer to a malformed uid (hand-edited deep link) — same outcome
+    as unknown: the page's existing empty state, never a 500."""
     try:
         return _account_dict(fb_auth.get_user(uid, app=_firebase()))
-    except fb_auth.UserNotFoundError:
+    except (fb_auth.UserNotFoundError, ValueError):
         return None
 
 

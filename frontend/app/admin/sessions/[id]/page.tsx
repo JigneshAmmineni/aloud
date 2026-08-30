@@ -24,6 +24,8 @@ import {
   type Usage,
 } from "../../shell";
 
+// Mirrors E2E_ERROR_S in backend/obs/latency.py — the one budget definition;
+// change them together.
 const NFR1_BUDGET_MS = 3000;
 
 type Turn = {

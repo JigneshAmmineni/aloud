@@ -175,3 +175,23 @@ def test_batch_writer_survives_a_failed_flush(tmp_path):
     asyncio.run(run())
     assert calls["n"] == 2
     assert flushed == [["second"]]
+
+
+def test_batch_writer_bounds_a_stalled_flush(monkeypatch):
+    """A HANGING flush (Postgres mid-restart: asyncpg waits ~60s) must become
+    a logged drop like a failing one — never block stop() (and with it the
+    session teardown and uvicorn's graceful shutdown) until SIGKILL."""
+    import db.batch_writer as bw
+
+    monkeypatch.setattr(bw, "FLUSH_TIMEOUT_S", 0.1)
+
+    async def hanging_flush(rows):
+        await asyncio.sleep(60)
+
+    async def run():
+        writer = BackgroundBatchWriter(hanging_flush, logger.bind(session_id="s-1"))
+        writer.start()
+        writer.enqueue("x")
+        await asyncio.wait_for(writer.stop(), timeout=5)  # must not hang
+
+    asyncio.run(run())

@@ -8,6 +8,8 @@ and blind to content tables by construction. Responses carry usage and
 metadata only, never conversation content (NFR-9).
 """
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 from loguru import logger
@@ -44,8 +46,11 @@ async def admin_list_users(
     has no email column; fine at current account counts)."""
     if sort not in _SORT_KEYS:
         raise HTTPException(status_code=400, detail=f"sort must be one of {_SORT_KEYS}")
-    accounts = await run_in_threadpool(list_accounts)
-    aggregates = await admin_repo.user_aggregates(admin)
+    # Independent lookups (Firebase over the network, DB aggregates):
+    # concurrent, so the page waits for the slower of the two, not the sum.
+    accounts, aggregates = await asyncio.gather(
+        run_in_threadpool(list_accounts), admin_repo.user_aggregates(admin)
+    )
 
     users = []
     needle = q.strip().lower()

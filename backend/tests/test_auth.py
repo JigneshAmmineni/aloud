@@ -264,3 +264,15 @@ def test_cert_fetch_failure_is_503_not_401(client, monkeypatch):
     _fake_verify(monkeypatch, error=CertificateFetchError("certs unreachable", None))
     resp = client.post("/start", headers={"Authorization": "Bearer t"})
     assert resp.status_code == 503
+
+
+def test_get_account_treats_malformed_uid_as_absent(monkeypatch):
+    """A hand-edited deep link (`/admin/users/%20`) must hit the page's
+    empty state, not a 500 — the SDK raises ValueError for malformed uids."""
+    monkeypatch.setattr(auth_mod, "_firebase", lambda: None)
+
+    def boom(uid, app=None):
+        raise ValueError("malformed uid")
+
+    monkeypatch.setattr(fb_auth, "get_user", boom)
+    assert auth_mod.get_account(" ") is None

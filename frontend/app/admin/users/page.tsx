@@ -64,6 +64,9 @@ export default function AdminUsersPage() {
   const [error, setError] = useState("");
   const [busyUid, setBusyUid] = useState<string | null>(null);
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Monotonic request id: a slow (full-Firebase-traversal) response must
+  // never overwrite the state of a newer sort/search that finished first.
+  const loadSeqRef = useRef(0);
 
   // FR-41: filters as you type, debounced. New search resets to page 1.
   const onSearch = (value: string) => {
@@ -76,6 +79,7 @@ export default function AdminUsersPage() {
   };
 
   const load = useCallback(async () => {
+    const seq = ++loadSeqRef.current;
     setError("");
     setLoading(true);
     try {
@@ -88,11 +92,13 @@ export default function AdminUsersPage() {
       });
       const res = await authedFetch(`/api/admin/users?${params}`);
       if (!res.ok) throw new Error(String(res.status));
-      setData((await res.json()) as UsersResponse);
+      const body = (await res.json()) as UsersResponse;
+      if (seq !== loadSeqRef.current) return; // superseded: drop the stale response
+      setData(body);
     } catch {
-      setError("couldn't load users — try a reload");
+      if (seq === loadSeqRef.current) setError("couldn't load users — try a reload");
     } finally {
-      setLoading(false);
+      if (seq === loadSeqRef.current) setLoading(false);
     }
   }, [debouncedQ, sort, order, page]);
 
@@ -114,6 +120,20 @@ export default function AdminUsersPage() {
 
   const arrow = (key: string) =>
     sort === SORTABLE[key] ? (order === "desc" ? " ↓" : " ↑") : "";
+
+  // Sortable headers are buttons in behavior — make them keyboard-reachable.
+  const sortableProps = (key: string) => ({
+    className: "sortable",
+    role: "button" as const,
+    tabIndex: 0,
+    onClick: () => onSort(key),
+    onKeyDown: (e: React.KeyboardEvent) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        onSort(key);
+      }
+    },
+  });
 
   const setDisabled = async (uid: string, disabled: boolean) => {
     setBusyUid(uid);
@@ -156,22 +176,18 @@ export default function AdminUsersPage() {
             <table className="admin-table">
               <thead>
                 <tr>
-                  <th className="sortable" onClick={() => onSort("email")}>
-                    email{arrow("email")}
-                  </th>
+                  <th {...sortableProps("email")}>email{arrow("email")}</th>
                   <th>name</th>
                   <th>status</th>
-                  <th className="sortable" onClick={() => onSort("sessions")}>
+                  <th {...sortableProps("sessions")}>
                     sessions{arrow("sessions")}
                   </th>
                   <th>audio min</th>
                   <th>tokens in</th>
                   <th>tokens out</th>
                   <th>tts chars</th>
-                  <th className="sortable" onClick={() => onSort("cost")}>
-                    est. cost{arrow("cost")}
-                  </th>
-                  <th className="sortable" onClick={() => onSort("last_active")}>
+                  <th {...sortableProps("cost")}>est. cost{arrow("cost")}</th>
+                  <th {...sortableProps("last_active")}>
                     last active{arrow("last_active")}
                   </th>
                   <th></th>
@@ -189,7 +205,11 @@ export default function AdminUsersPage() {
                   <tr
                     key={u.uid}
                     className={`clickable${u.disabled ? " disabled-row" : ""}`}
+                    tabIndex={0}
                     onClick={() => router.push(`/admin/users/${u.uid}`)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") router.push(`/admin/users/${u.uid}`);
+                    }}
                   >
                     <td>{u.email ?? u.uid}</td>
                     <td>{u.display_name ?? "—"}</td>

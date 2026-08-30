@@ -21,6 +21,7 @@ from sqlalchemy import func, select, text
 from app.auth import AuthedUser
 from db.engine import session_factory
 from db.models import Session, TurnMetric, UsageEvent
+from obs.latency import E2E_ERROR_S  # the one NFR-1 budget definition
 
 
 @asynccontextmanager
@@ -262,7 +263,7 @@ async def overview(admin: AuthedUser) -> dict:
             .scalars()
             .all()
         )
-        breaches = sum(1 for ms in latencies if ms > 3000)
+        breaches = sum(1 for ms in latencies if ms > E2E_ERROR_S * 1000)
         error_sessions = (
             await db.execute(
                 select(func.count(Session.id)).where(

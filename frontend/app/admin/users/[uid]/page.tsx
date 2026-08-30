@@ -92,8 +92,16 @@ export default function AdminUserSessionsPage() {
             </p>
             <p className="admin-card-detail">
               {data.sessions.length} session
-              {data.sessions.length === 1 ? "" : "s"} · est. total $
-              {totalCost.toFixed(4)}
+              {data.sessions.length === 1 ? "" : "s"} · est. total{" "}
+              {fmtCost({
+                stt: 0,
+                llm: 0,
+                tts: 0,
+                total: totalCost,
+                configured: data.sessions.some(
+                  (s) => s.estimated_cost.configured,
+                ),
+              })}
             </p>
           </div>
 
@@ -126,11 +134,18 @@ export default function AdminUserSessionsPage() {
                   <tr
                     key={s.session_id}
                     className={`clickable${s.end_reason === "error" ? " error-row" : ""}`}
+                    tabIndex={0}
                     onClick={() =>
                       router.push(
                         `/admin/sessions/${s.session_id}?from=${encodeURIComponent(who)}`,
                       )
                     }
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter")
+                        router.push(
+                          `/admin/sessions/${s.session_id}?from=${encodeURIComponent(who)}`,
+                        );
+                    }}
                   >
                     <td>{fmtWhen(s.started_at)}</td>
                     <td>{fmtDuration(s.duration_s)}</td>

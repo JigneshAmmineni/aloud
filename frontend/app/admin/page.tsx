@@ -97,7 +97,9 @@ export default function AdminOverviewPage() {
             <p className="admin-card-detail">in-process count; resets on deploy</p>
           </div>
           <div className="admin-card">
-            <h2 className="admin-card-title">today</h2>
+            {/* backend key is "today" but the window is a rolling 24h —
+                label it like the other 24h cards */}
+            <h2 className="admin-card-title">last 24h</h2>
             <p className="admin-stat">{data.today.sessions}</p>
             <p className="admin-card-detail">
               sessions · {data.today.unique_users} unique user

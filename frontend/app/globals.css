@@ -698,12 +698,27 @@ body::after {
   max-width: 340px;
 }
 
+.admin-table th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.admin-table th.sortable:hover {
+  color: var(--ink);
+}
+
 .admin-table tr.clickable {
   cursor: pointer;
 }
 
 .admin-table tr.clickable:hover td {
   background: rgba(255, 255, 255, 0.04);
+}
+
+.admin-table th.sortable:focus-visible,
+.admin-table tr.clickable:focus-visible {
+  outline: 1px solid var(--ink-dim);
+  outline-offset: -1px;
 }
 
 .error-row td:first-child {

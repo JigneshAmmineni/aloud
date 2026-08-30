@@ -12,6 +12,11 @@ _STOP = object()
 
 FLUSH_INTERVAL_S = 1.0
 MAX_BATCH = 25
+# A flush that HANGS (Postgres mid-restart: asyncpg waits ~60s to connect)
+# is worse than one that fails — it blocks session teardown and stalls
+# uvicorn's graceful shutdown into a SIGKILL. Bound it so a stall becomes
+# the same logged drop as a failure (NFR-10).
+FLUSH_TIMEOUT_S = 5.0
 
 
 class BackgroundBatchWriter:
@@ -54,7 +59,9 @@ class BackgroundBatchWriter:
                 pass
             if buffer and (stopping or len(buffer) >= MAX_BATCH or self._queue.empty()):
                 try:
-                    await self._flush(buffer)
+                    await asyncio.wait_for(
+                        self._flush(buffer), timeout=FLUSH_TIMEOUT_S
+                    )
                 except Exception as e:
                     self._log.bind(
                         event="batch_writer.write_failed", rows=len(buffer)

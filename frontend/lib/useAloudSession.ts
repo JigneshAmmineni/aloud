@@ -36,11 +36,13 @@ const LOST_MESSAGE =
 const RESTART_MESSAGE =
   "the server restarted — that session has ended. tap Talk to start a new one.";
 
-// Session-liveness poll (unexpected-death detection): cadence and how many
-// consecutive poll failures mean the backend is gone. An authoritative
-// "alive: false" answer ends the session immediately, without waiting.
+// Session-liveness poll (unexpected-death detection). Cadence is fast so an
+// authoritative "alive: false" (once seen alive) notices quickly — but plain
+// FAILED polls must tolerate ~20s of HTTP trouble before declaring death: a
+// phone switching towers or riding a lift stalls HTTP longer than 10s while
+// the UDP media path recovers on its own (NFR-3: mobile is in scope).
 const ALIVE_POLL_MS = 5_000;
-const ALIVE_MAX_MISSES = 2;
+const ALIVE_MAX_MISSES = 4;
 
 export function useAloudSession() {
   const [state, setState] = useState<SessionState>("idle");
