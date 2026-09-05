@@ -270,10 +270,12 @@ principles govern every FR below:
    become direct recorder calls — the mechanism changes, the rule doesn't.
 
 - **FR-32** Every session records its raw usage in an append-only
-  `usage_events` table (metadata only — no sensitive columns), captured by a
-  per-session pipeline observer from the usage metrics the pipeline already
-  emits and batch-written through the user-scoped path (per-session, so
-  per-user; RLS applies): LLM prompt and completion tokens per inference,
+  `usage_events` table (metadata only — no sensitive columns), batch-written
+  through the user-scoped path (per-session, so per-user; RLS applies).
+  Capture points: LLM usage is recorded by the agent loop directly from
+  each provider response once §4.10 lands (FR-47 — before that, by the
+  metrics-frame observer); TTS stays on the metrics-frame observer; STT
+  stays session-level. The recorded units: LLM prompt and completion tokens per inference,
   TTS characters per utterance, and an `artifact_created` event
   (`stage = 'artifact'`, `unit = 'count'`, `quantity = 1`, `detail` = the
   artifact's `kind` — never title/content) whenever the create_artifact
@@ -524,14 +526,28 @@ FR-7 still governs: the agent acts when the user asks.
   text deltas downstream *as they arrive*; if the step ends with tool
   calls, the loop executes them (concurrently when there is more than one),
   appends the calls and their results to the context, and begins the next
-  step; a step ending with text only ends the turn. Hard bounds, enforced
-  in code and surfaced as named constants: **max steps per turn**
-  (default 5 — on hitting the cap the loop appends an instruction to wrap
-  up and forces a final text-only step) and **per-tool timeout** (default
-  10s — a timeout is a tool *result* saying so, fed back to the model,
-  never an exception). Failure discipline: any loop-internal error (LLM
-  call failure, tool handler crash) degrades to a brief spoken fallback
-  and a clean end of turn — a broken tool must never kill the session.
+  step; a step ending with text only ends the turn. The **greeting** is a
+  named entry point, not an accident: on client connect the loop runs one
+  step with no user turn appended (today's `LLMRunFrame` semantics) — the
+  agent speaks first. Hard bounds, enforced in code and surfaced as named
+  constants: **max steps per turn** (default 5; the true ceiling is
+  MAX_STEPS + 1 LLM calls, because hitting the cap triggers one forced
+  final step — made **with tools omitted from the request** so it cannot
+  return another call, its "wrap up now" instruction injected into that
+  one call's message list and never appended to the context, so later
+  turns aren't built atop a stale wrap-up order) and **per-tool timeout**
+  (default 10s — a timeout is a tool *result* saying so, fed back to the
+  model, never an exception). Failure discipline: any loop-internal error
+  (LLM call failure, tool handler crash) degrades to a brief spoken
+  fallback and a clean end of turn — a broken tool must never kill the
+  session. Mandated tests: (a) a model that keeps calling tools terminates
+  at the cap with a spoken, text-only turn — never silence, never an
+  unbounded chain; (b) a handler hanging past the timeout yields a timeout
+  result the next step sees, and the turn still speaks; (c) a handler that
+  raises → spoken fallback, clean end of turn, and the session takes the
+  next turn normally (the primary error path); (d) the loop's direct
+  recorder calls pass NFR-10's fake-queue/no-database test split, which
+  names this loop as its intended future subject.
   Implementation MUST begin with a **spike** proving the stage swap: a
   custom processor in the LLM slot streaming text downstream with sentence
   aggregation, TTS, and barge-in interruption all intact. That is the
@@ -541,9 +557,19 @@ FR-7 still governs: the agent acts when the user asks.
   and the spike decides.
 - **FR-43** Speak-while-working: multi-step work must never delay first
   audio. The first streamed sentence of step 1 reaches TTS immediately
-  (NFR-2), tool execution overlaps speech already playing, and the system
+  (NFR-2) and tool execution overlaps speech already playing. The system
   prompt directs the model to say a short, natural acknowledgment before
-  invoking anything slow ("let me write that up—"). The no-tool turn — the
+  invoking anything slow ("let me write that up—") — but the prompt is
+  guidance, not the guarantee: Flash routinely emits a tool call as its
+  entire first chunk, and a prompt-only rule would leave the user in
+  silence for up to a full tool timeout. The guarantee is a
+  **deterministic backstop in the loop**: if no text has been forwarded
+  downstream when a step-1 tool round begins, the loop itself emits a
+  canned acknowledgment line (from a small named set, `FILLER_LINES`,
+  varied to avoid repetition) straight to TTS before executing the tools.
+  That line counts as first audio for NFR-1 and makes the FR testable:
+  mandated test — a step-1 response containing only a tool call still
+  produces speech before any tool handler runs. The no-tool turn — the
   overwhelming common case — must behave exactly as today: one LLM call,
   no added synchronous work (NFR-10 applies to the loop itself; anything
   the loop does beyond the call and the enqueue-only recorders is hot-path
@@ -553,17 +579,28 @@ FR-7 still governs: the agent acts when the user asks.
   each tool.
 - **FR-44** Context behind a seam: the loop obtains its messages
   exclusively from a **context provider** (`agent/context.py`) with a
-  narrow interface — build the message list; append a user turn, an
-  assistant turn, a tool call + result. The v1 implementation is
+  narrow interface — build the message list; append a user turn; append a
+  completed **step** (the assistant message with its text *and* its tool
+  calls, plus every call's result — one atomic append, see FR-42's
+  pseudocode); append the final assistant text. The v1 implementation is
   deliberately trivial and behavior-identical to today: system prompt
   (plus the FR-21 documents block) followed by the linear in-session
-  conversation (FR-14). Pipecat's `LLMContext`/aggregator pair is retired
-  from the LLM slot; conversation state now lives in our provider. This
+  conversation (FR-14). What retires and what stays is precise, because
+  the aggregators do two different jobs: **`LLMContext` and the
+  assistant-side aggregator retire** (context bookkeeping — the provider
+  owns it now); **the user-side aggregator stays** — it is *turn
+  assembly*, which principle 2 assigns to Pipecat: it carries
+  `ExternalUserTurnStrategies` because Flux does its own end-of-turn
+  detection, and it is what folds a stream of transcription frames (late
+  finals included) into one user message. The FR-42 spike confirms the
+  exact wiring by which the assembled user turn reaches the loop. This
   seam is exactly where feature 5 installs sections, budgets, and
   compression and feature 6 fills a retrieved-memory slot — with no change
-  to loop control flow. The provider logs an estimated token size of every
-  built context (FR-47) so growth is visible long before feature 5 manages
-  it.
+  to loop control flow. The provider logs a **locally computed, explicitly
+  approximate** token estimate of every built context (character
+  heuristic — never a provider `count_tokens` call, which is a network
+  round trip per step on the hot path) so growth is visible long before
+  feature 5 manages it.
 - **FR-45** Tools are a provider-neutral registry (`agent/tools.py`): each
   tool = name, JSON-schema parameters, an async handler, and a **read or
   write** classification (consumed by FR-46). `agent/providers.py`
@@ -573,7 +610,10 @@ FR-7 still governs: the agent acts when the user asks.
   state, **never from model-supplied arguments**: the model chooses *which*
   artifact, the handler resolves it through the user-scoped query (RLS
   backstop), and NFR-8's negative test is mandated — a handler handed
-  another user's artifact id reports not-found. The v1 inventory (the
+  another user's artifact id reports not-found. The queries themselves live
+  in `db/` (an artifacts repo with the standard discipline — `user_id: str`,
+  no default), not in the tool module: tools stay schema-shaped, the repo
+  layer owns filtering, ordering, and caps. The v1 inventory (the
   minimum that makes multi-step real):
   - `create_artifact` — migrated from the current implementation with
     behavior unchanged: artifact row + `artifact_created` usage event in
@@ -584,7 +624,9 @@ FR-7 still governs: the agent acts when the user asks.
     (default 20). This is deliberately the agent's first cross-session
     capability: it costs nothing and previews the memory feature's value.
   - `read_artifact` — the full content of one owned artifact, truncated at
-    a named cap with an explicit "[truncated]" marker.
+    `READ_ARTIFACT_MAX_CHARS` (default 8,000 — roughly a long artifact,
+    safely inside the model's window) with an explicit "[truncated]"
+    marker.
   Tool results are structured JSON. Artifact titles/content flowing into
   the model's context is the owner's own data in the owner's own session
   (NFR-5 covers the processing disclosure); logs carry tool names, ids,
@@ -598,21 +640,46 @@ FR-7 still governs: the agent acts when the user asks.
   post-interruption write completion spawns **no further LLM step**; its
   result is appended to the context so the next turn's model knows what
   happened, and the artifact panel announce still fires. The read/write
-  flag on the registry is what makes this decidable. Usage follows FR-33's
-  rule — *spent is recorded* — including partial usage of cancelled steps
-  when the provider reports it. Mandated test: interrupt mid-chain — the
-  write completes, the context records it, and no further LLM call is
-  issued.
+  flag on the registry is what makes this decidable. **What the context
+  holds after an interruption is defined, not inherited**: the assistant's
+  entry records only the *spoken prefix* — the sanitized sentence frames
+  that actually reached TTS before cancellation (the same stream FR-20's
+  transcript writer logs as `agent_text`), marked interrupted — never the
+  full generated text (the agent must not believe it said things the user
+  never heard) and never nothing (or it repeats the half-heard answer next
+  turn). And **every issued tool call gets a terminal result** — cancelled
+  ones get an explicit `{"status": "cancelled"}` — so the context is never
+  left in a half-round state no provider will accept. **Session teardown
+  gets the same write protection as barge-in**: End-tap, disconnect, and
+  the SIGTERM drain all cancel the pipeline task while a write can be in
+  flight — teardown waits a bounded `WRITE_GRACE_S` (default 5s) for
+  in-flight writes *before* the recorders and transcript writer stop, so a
+  completed write's `artifact_created` event lands in a live queue instead
+  of being silently dropped (FR-38's artifact counts read that event, not
+  the content table). Usage follows FR-33's rule — *spent is recorded* —
+  including partial usage of cancelled steps when the provider reports it.
+  Mandated tests: interrupt mid-chain — the write completes, the context
+  records the spoken prefix and the cancelled reads' terminal results, and
+  no further LLM call is issued; End-tap mid-write — the artifact row and
+  its usage event both land.
 - **FR-47** The loop instruments itself (this is §4.9 principle 3's
   anticipated shift from observers to direct recorder calls): per-step
   structured logs (`agent.step`: session_id, turn_id, step number, TTFB ms,
-  tool-call count; `tool.invoked`: name, duration ms, ok/error/timeout) and
-  LLM usage recorded per call directly from the provider's response through
-  the existing enqueue-only recorder (NFR-10 unchanged). LLM usage is
-  recorded in **exactly one place** — the loop; the metrics-frame observer
-  keeps TTS only, so nothing double-counts. The FR-33 latency observer and
-  NFR-1 measurement must survive the stage swap unchanged — verified in
-  the FR-42 spike, not assumed.
+  tool-call count; `tool.invoked`: session_id, turn_id, name, duration ms,
+  ok/error/timeout) and LLM usage recorded per call directly from the
+  provider's response through the existing enqueue-only recorder (NFR-10
+  unchanged; FR-32 is amended to match). LLM usage is recorded in
+  **exactly one place** — the loop; the metrics-frame observer keeps TTS
+  only, so nothing double-counts. The stage swap's effect on FR-33 is
+  stated positively, not assumed away: the end-of-speech → first-audio
+  measurement survives because the latency observer reads *speech* frames,
+  which the swap does not touch — but `stages_ms`' LLM and tool components
+  today come from the very LLM service being removed, so **the loop owes
+  the FR-33 row its per-step LLM TTFBs and per-tool durations** (written
+  through the recorder into the same breakdown; missing keys must not
+  silently read as healthy). Pipecat's turn tracker — the source of every
+  `turn_id` via `on_turn_started` — is also frame-flow-driven and must
+  survive; both survivals are verified in the FR-42 spike, not assumed.
 - **FR-48** The loop calls the LLM through a thin provider-agnostic
   streaming client built by an `agent/providers.py` factory, exposing
   three things: text deltas, tool calls, and usage counts. Gemini first
@@ -626,19 +693,40 @@ FR-7 still governs: the agent acts when the user asks.
 FR-42; kept here so the mechanism is editable knowingly.
 
 ```
-on user turn (from the pipeline's turn events):
+on user turn (assembled by the user-side aggregator, FR-44):
     context.append_user(turn_text)
+    run_turn()
+on client connect (the greeting — no user turn appended):
+    run_turn()
+
+run_turn():
     for step in 1..MAX_STEPS:
         messages = context.build()            # deterministic, no LLM
         stream  = llm(messages, tools)        # ONE call: text and/or tool calls
         forward text deltas downstream        # TTS starts at first sentence
         if stream yielded tool calls:
+            if step == 1 and nothing spoken yet:
+                speak a FILLER_LINES entry    # FR-43's deterministic backstop
             results = run handlers            # concurrent; TOOL_TIMEOUT_S each
-            context.append_tool_round(calls, results)
+            context.append_step(step_text, calls, results)
+            #   ^ ATOMIC and COMPLETE: the assistant message carrying this
+            #     step's text AND its tool calls, then every call's result —
+            #     one assistant message per step, in step order. Results
+            #     without their owning assistant message are unsendable
+            #     (Claude rejects orphan tool_results; Gemini defines
+            #     functionResponse relative to the functionCall turn).
             continue                          # next step sees the results
-        break                                 # text-only step = turn over
-    context.append_assistant(spoken_text)
-on interruption: cancel stream + read tools; writes finish (FR-46)
+        context.append_assistant(final_text)  # the closing text-only step
+        return
+    # cap hit: one forced final call, tools omitted, ephemeral wrap-up
+    # instruction (never appended) → append_assistant(final_text)
+
+on interruption (FR-46): cancel stream + read tools; writes finish.
+    context records the SPOKEN prefix (marked interrupted) and a terminal
+    {"status": "cancelled"} result for every unfinished call — never a
+    half-round context.
+on session end: wait WRITE_GRACE_S for in-flight writes BEFORE the
+    recorders/writer stop (FR-46).
 ```
 
 | Knob | Default | Where |
@@ -646,7 +734,9 @@ on interruption: cancel stream + read tools; writes finish (FR-46)
 | `MAX_STEPS` per turn | 5 | `agent/loop.py` |
 | `TOOL_TIMEOUT_S` per tool | 10 | `agent/loop.py` |
 | `LIST_ARTIFACTS_CAP` | 20 | `agent/tools.py` |
-| `READ_ARTIFACT_MAX_CHARS` | named constant | `agent/tools.py` |
+| `READ_ARTIFACT_MAX_CHARS` | 8,000 | `agent/tools.py` |
+| `FILLER_LINES` (speak-first backstop) | small named set | `agent/prompts.py` |
+| `WRITE_GRACE_S` (teardown wait for writes) | 5 | `agent/loop.py` |
 | Model / provider | `LLM_MODEL` / `LLM_PROVIDER` env | `agent/providers.py` |
 | Voice + tool-use behavior | system prompt | `agent/prompts.py` |
 
@@ -693,7 +783,7 @@ The following are explicitly not part of this product:
 
 ### Deferred — planned, but out of scope for the MVP demo
 
-- **Cross-session memory** (formerly FR-15–FR-17). The agent starts every session fresh; memory is in-session only. Planned later following the MemGPT framework, possibly integrating RAG with clever indexing and semantic vector search, depending on performance.
+- **Cross-session memory** (formerly FR-15–FR-17). The agent starts every session fresh; *automatic* recall is in-session only. Planned later following the MemGPT framework, possibly integrating RAG with clever indexing and semantic vector search, depending on performance. One deliberate carve-out (§4.10, FR-45): the explicit, user-asked artifact tools (`list_artifacts`/`read_artifact`) do reach the user's own artifacts from past sessions — that is a narrow, on-request read, not memory.
 - **Streaming memory processing.** When cross-session memory lands, it must run in parallel while the user is still speaking — context editing during input, not after the session ends.
 - **Document persistence.** Uploaded documents (FR-21) are ephemeral for the MVP — held in memory for the session and discarded when the process restarts. When cross-session memory lands, documents will persist alongside the conversation.
 - **Proactive flagging** (formerly FR-8; demo stretch goal). The agent surfacing gaps, contradictions, or connections unprompted, with a user-configurable on/off setting.
