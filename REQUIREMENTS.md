@@ -547,7 +547,14 @@ FR-7 still governs: the agent acts when the user asks.
   model, never an exception). Failure discipline: any loop-internal error
   (LLM call failure, tool handler crash) degrades to a brief spoken
   fallback and a clean end of turn — a broken tool must never kill the
-  session. Mandated tests: (a) a model that keeps calling tools terminates
+  session. **An empty step is a failure, not an ending**: a response with
+  neither text nor tool calls (a blocked or truncated generation —
+  Gemini's SAFETY/RECITATION/MAX_TOKENS-with-no-parts outcomes are
+  returns, not exceptions, so the error path above never fires on its
+  own) takes the same spoken-fallback path, distinguished via the
+  **finish reason FR-48's client exposes**, and **no empty assistant
+  message is ever appended** — an empty-content message 400s every later
+  request on the Claude swap. Mandated tests: (a) a model that keeps calling tools terminates
   at the cap with a spoken, text-only turn — never silence, never an
   unbounded chain; (b) a handler hanging past the timeout yields a timeout
   result the next step sees, and the turn still speaks; (c) a handler that
@@ -557,7 +564,9 @@ FR-7 still governs: the agent acts when the user asks.
   names this loop as its intended future subject; (e) the greeting —
   client connect with no user turn appended → one step runs and speech is
   produced (the silent-session regression is otherwise invisible until
-  launch).
+  launch); (f) a blocked/empty response → the fallback line is spoken,
+  nothing is appended to the context, and the session takes the next
+  turn normally.
   Implementation MUST begin with a **spike** proving the stage swap: a
   custom processor in the LLM slot streaming text downstream with sentence
   aggregation, TTS, and barge-in interruption all intact. That is the
@@ -586,7 +595,12 @@ FR-7 still governs: the agent acts when the user asks.
   yet forwarded downstream. And the condition is **state-based, not
   step-numbered**: a filler is owed whenever a tool round is beginning
   and no speech is playing or queued — a tool-only step 3 after step 1's
-  sentence finished playing is the same dead air as a silent step 1. The
+  sentence finished playing is the same dead air as a silent step 1.
+  "Playing or queued" has a named source, because the loop sits
+  *upstream* of TTS and cannot know it for free: the loop derives
+  playback state from the text it has forwarded downstream and the
+  bot-started/stopped-speaking frames flowing back through the pipeline —
+  an explicit FR-42 spike criterion, not an assumption. The
   filler comes from a small named set (`FILLER_LINES`, varied to avoid
   repetition; generic and topic-agnostic by design), travels **through
   the same downstream text-frame path as model text** — never a side
@@ -598,9 +612,11 @@ FR-7 still governs: the agent acts when the user asks.
   is also how the next step knows it already said "let me pull that up").
   The filler counts as first audio for NFR-1 — dead air is what the user
   experiences — but it must not launder slow turns as healthy: the FR-47
-  row records a filler-led turn (a `step.N.filler` entry), so FR-37's
-  breach analysis can distinguish "spoke fast" from "spoke a canned line
-  while 6 seconds of tool work ran." Mandated test — against a *slow*
+  row records a filler-led turn (a `step.N.filler` entry), and **FR-36
+  and FR-37 are amended accordingly** (not merely enabled): the
+  drill-down surfaces filler-led turns, and the breach analysis
+  distinguishes "spoke fast" from "spoke a canned line while 6 seconds
+  of tool work ran." Mandated test — against a *slow*
   stream, not an instant fake: filler audio is emitted while the step-1
   stream is still producing tokens. The no-tool turn — the
   overwhelming common case — must behave exactly as today: one LLM call,
@@ -627,8 +643,11 @@ FR-7 still governs: the agent acts when the user asks.
   assembly*, which principle 2 assigns to Pipecat: it carries
   `ExternalUserTurnStrategies` because Flux does its own end-of-turn
   detection, and it is what folds a stream of transcription frames (late
-  finals included) into one user message. One conversation store, not
-  two: the retained aggregator's `LLMContext` (it is constructed from
+  finals included) into one user message. The reset (below) needs a
+  boundary against those late finals: a straggler final arriving *after*
+  the turn was consumed and the scratch reset is **dropped and logged**,
+  never emitted as a second fragment-only user turn. One conversation
+  store, not two: the retained aggregator's `LLMContext` (it is constructed from
   one) is **turn-assembly scratch only** — the loop reads the assembled
   user message off the frame the aggregator emits and never reads that
   context as history; nothing else may read it either, **and it is reset
@@ -648,8 +667,10 @@ FR-7 still governs: the agent acts when the user asks.
   to loop control flow. The provider logs a **locally computed, explicitly
   approximate** token estimate of every built context (character
   heuristic — never a provider `count_tokens` call, which is a network
-  round trip per step on the hot path) so growth is visible long before
-  feature 5 manages it.
+  round trip per step on the hot path), as a structured `context.built`
+  event carrying `session_id`, `turn_id`, step number, and
+  `approx_tokens` — so growth is visible long before feature 5 manages
+  it.
 - **FR-45** Tools are a provider-neutral registry (`agent/tools.py`): each
   tool = name, JSON-schema parameters, an async handler, and a **read or
   write** classification (consumed by FR-46). `agent/providers.py`
@@ -691,9 +712,14 @@ FR-7 still governs: the agent acts when the user asks.
   durations, and outcomes — never arguments or content (NFR-9 discipline).
 - **FR-46** Barge-in vs. in-flight work (extends FR-13): on interruption,
   the current LLM stream is cancelled and queued speech discarded (today's
-  behavior); **pending and in-flight read tools are cancelled; an in-flight
-  write tool runs to completion** — a half-done write is worse than a moot
-  one, and `create_artifact`'s transaction is atomic either way. "Runs to
+  behavior); **pending and in-flight read tools are abandoned — their
+  results discarded, not force-cancelled mid-statement** (cancelling a
+  coroutine inside a DB query can hand a poisoned connection back to the
+  pool; v1's reads are millisecond queries whose results are merely
+  unwanted, so abandon-and-discard is simpler and equally correct);
+  **an in-flight write tool runs to completion** — a half-done write is
+  worse than a moot one, and `create_artifact`'s transaction is atomic
+  either way. "Runs to
   completion" has a named owner, or it is unimplementable: **write
   handlers execute in tasks the loop creates *outside* the pipeline's
   cancellation scope** (End-tap, disconnect, and barge-in all reach
@@ -718,7 +744,10 @@ FR-7 still governs: the agent acts when the user asks.
   the context holds after an interruption is defined, not inherited**:
   the assistant's entry records the *spoken prefix*, marked interrupted —
   taken from the sentence-level synthesis stream (the TTS service's
-  output frames, the same stream FR-20 logs as `agent_text`), which is an
+  output frames, the same stream FR-20 logs as `agent_text`), **with the
+  filler excluded from this capture** — the filler's context entry is
+  owned by FR-43's prefix rule alone, so an interrupted filler-led step
+  records it once, never twice — which is an
   **explicit over-approximation**: it is what was *sent for synthesis*,
   not what was *heard* — playback lags it by the buffered audio that
   barge-in discards, so it can overstate by up to the flushed
@@ -735,23 +764,33 @@ FR-7 still governs: the agent acts when the user asks.
   recorders and transcript writer stop (a completed write's
   `artifact_created` event must land in a live queue — FR-38's artifact
   counts read that event, not the content table). On the SIGTERM path
-  **the drain itself owns the wait** across all sessions, and the
-  per-session teardowns that follow **do not wait again** — a write the
-  drain's expired budget abandoned is abandoned, not re-awaited (the
-  round-2 fix composed the two waits: 0.5s goodbye + 5s drain + 5s
-  per-session + flushes overruns the stop window this clause says it must
-  fit). And the window itself is provisioned, not assumed:
-  `docker-compose.prod.yml` sets `stop_grace_period` to a value the whole
-  shutdown (goodbye + one grace + final flushes) fits inside with margin
-  (15s), because neither compose file sets it today and Docker's 10s
-  default is what SIGKILL — the outcome this clause exists to prevent —
-  is measured against. Usage follows FR-33's rule — *spent is recorded* —
+  **the drain itself owns the wait, and the ORDER is the load-bearing
+  part**: goodbye → **await every session's in-flight-write set** (via
+  the session-level write registry, which is drain-reachable by
+  construction) under the one total budget → **only then**
+  `task.cancel()` — because the drain's own cancel is what *triggers*
+  per-session teardown, and waiting after cancelling would enqueue the
+  completed write's `artifact_created` into recorders already stopping:
+  a silent, unlogged drop. Per-session teardowns after the drain **do
+  not wait again**; a write the expired budget abandons is **cancelled
+  and logged at WARNING with its `session_id`** — its only trace must
+  never be asyncio's destroyed-task noise. And the window is
+  provisioned by arithmetic, not assertion — every teardown database
+  operation is **deadline-bounded** (each background writer's stop
+  flushes under `FLUSH_TIMEOUT_S`; `end_session_row` gets an explicit
+  bound of 2s), and the worst-case sum is the spec for the window:
+  0.5s goodbye + 5s grace + ~11s of bounded flushes (two writers, two
+  flush attempts each in the DB-degraded case) + bounded row closes
+  ≈ 19s → `docker-compose.prod.yml` sets **`stop_grace_period: 30s`**
+  (margin included; Docker's 10s default is what SIGKILL — the outcome
+  this clause exists to prevent — was measured against). Usage follows FR-33's rule — *spent is recorded* —
   including partial usage of cancelled steps when the provider reports
   it. Mandated tests: interrupt mid-chain — the write completes, the
   context records the spoken prefix, the cancelled reads' terminal
   results, and the write's in-place-updated result, and no further LLM
   call is issued; End-tap mid-write — the artifact row and its usage
-  event both land.
+  event both land; **SIGTERM mid-write (the twin)** — the drain awaits
+  before cancelling, and the artifact row and its usage event both land.
 - **FR-47** The loop instruments itself (this is §4.9 principle 3's
   anticipated shift from observers to direct recorder calls): per-step
   structured logs (`agent.step`: session_id, turn_id, step number, TTFB ms,
@@ -775,9 +814,18 @@ FR-7 still governs: the agent acts when the user asks.
   interrupted flush, so the number must be captured with the
   measurement, not at write time) into the recorder's per-turn buffer;
   the **loop flushes that buffer as the single `turn_metrics` write at
-  turn end** (the closing text-only step, the cap's forced step, or the
-  interruption path — any path on which first audio happened). **FR-33
-  is amended to match** (its "written from the breakdowns the latency
+  turn end** — **gated on a measurement existing, not on audio**: the
+  greeting turn has first audio but no end-of-speech to measure (the
+  same guard today's observer carries), so it writes no row, exactly
+  like a turn interrupted before audio; both leave their steps in
+  `agent.step` logs only, and the NOT NULL column is never fabricated
+  as 0 (which would poison FR-37's p50 and breach count) nor violated
+  (which would take the whole write batch down). **The buffer's reset
+  boundary is explicit**: every stage entry carries the turn number
+  current at its step; the flush writes only entries matching the
+  measured turn; and the buffer clears at every turn end — row-writing
+  or not — so an interrupted no-row turn can never credit the next
+  turn with a tool it never called. **FR-33 is amended to match** (its "written from the breakdowns the latency
   observer already computes" described the old writer), exactly as FR-32
   was. Stage entries use **step-indexed keys** (`step.1.ttfb.llm`,
   `step.2.tool.read_artifact`, `step.N.filler` when the FR-43 backstop
@@ -792,7 +840,12 @@ FR-7 still governs: the agent acts when the user asks.
   end-to-end over-3s ERROR stays with the observer. "Missing must not
   read as healthy" has a render-site mechanism, not an intention:
   FR-36's drill-down shows an absent expected key as "—" (missing data),
-  never as zero or omitted-therefore-fine. Pipecat's turn tracker — the
+  never as zero or omitted-therefore-fine — and the render distinguishes
+  key **vocabularies**, not just presence: rows written before §4.10
+  carry the old flat keys (`ttfb.llm`, `tool.{name}`) and render under
+  that legacy vocabulary; "expected but absent → —" applies within the
+  step-indexed vocabulary only, so history doesn't retroactively render
+  as broken. Pipecat's turn tracker — the
   source of every `turn_id` via `on_turn_started` — is frame-flow-driven
   and must survive; both survivals are verified in the FR-42 spike, not
   assumed. Mandated tests (this FR's failure modes are all silent):
@@ -804,7 +857,10 @@ FR-7 still governs: the agent acts when the user asks.
   no double-count with the metrics-frame observer.
 - **FR-48** The loop calls the LLM through a thin provider-agnostic
   streaming client built by an `agent/providers.py` factory, exposing
-  three things: text deltas, tool calls, and usage counts. Gemini first
+  four things: text deltas, tool calls, usage counts, and a **finish
+  reason** (normal stop vs. blocked vs. truncated — without it the loop
+  cannot tell an empty ending from a blocked generation, FR-42's
+  empty-step rule). Gemini first
   (the provider SDK lives inside the factory, per the hard constraint);
   Claude remains the runner-up swap. Implementation MUST begin with a
   **spike** proving streamed text + native function calling + usage
@@ -857,11 +913,13 @@ run_turn():
     # forbidden (tool_choice: none; portable, FR-42) — ephemeral wrap-up
     # instruction (never appended) → append_assistant(final_text)
 
-at turn end (any path ON WHICH FIRST AUDIO HAPPENED — FR-33's
-    no-audio-no-row rule holds): flush the recorder's per-turn buffer
-    (observer-measured e2e ms + turn number captured at measurement, plus
-    the loop's step timings) as ONE turn_metrics row, step-indexed keys
-    (FR-47).
+at turn end (ANY path): if a MEASUREMENT exists (end-of-speech → first
+    audio; the greeting and pre-audio interruptions have none → no row,
+    steps to logs only), flush the recorder's per-turn buffer
+    (observer-measured e2e ms + turn number captured at measurement,
+    plus the loop's step timings for THAT turn) as ONE turn_metrics
+    row, step-indexed keys — then CLEAR the buffer either way (a
+    no-row turn must not credit the next turn's row) (FR-47).
 
 on interruption (FR-46): cancel stream + read tools; writes finish
     (loop-owned tasks, outside pipeline cancellation). Append the step
@@ -881,8 +939,9 @@ on session end: ONE WRITE_GRACE_S budget, spent once — End-tap/disconnect:
 |---|---|---|
 | `MAX_STEPS` per turn | 5 | `agent/loop.py` |
 | `TOOL_TIMEOUT_S` per tool | 10 | `agent/loop.py` |
-| `LIST_ARTIFACTS_CAP` | 20 | `agent/tools.py` |
-| `READ_ARTIFACT_MAX_CHARS` | 8,000 | `agent/tools.py` |
+| `LIST_ARTIFACTS_CAP` | 20 | `db/` artifacts repo (FR-45 assigns caps to the repo layer) |
+| `READ_ARTIFACT_MAX_CHARS` | 8,000 | `agent/tools.py` (result truncation — a tool concern, not a query one) |
+| `FALLBACK_LINES` (spoken failure/empty-step lines) | small named set | `agent/prompts.py` |
 | `FILLER_LINES` (speak-first backstop; generic, topic-agnostic by design) | small named set | `agent/prompts.py` |
 | `FILLER_DEADLINE_MS` (speak-by deadline, any silent tool round — state-based per FR-43) | 700 | `agent/loop.py` |
 | `WRITE_GRACE_S` (teardown wait for writes) | 5 total | `agent/companion.py` (the code that awaits: session teardown + the SIGTERM drain; the loop only owns the in-flight set) |
