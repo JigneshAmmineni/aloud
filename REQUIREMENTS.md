@@ -377,7 +377,8 @@ principles govern every FR below:
   roadmap's "per-user error rates": the in-app signal is each user's count
   of `end_reason = 'error'` sessions (visible in FR-36's session list);
   finer-grained error analysis lives in Cloud Logging, and richer per-user
-  error attribution waits for LLM tracing (feature 6).
+  error attribution waits for LLM tracing (feature 7; FR-49 ships its
+  minimal version).
 - **FR-38** Admin cross-user reads use an explicit, auditable, and
   **narrow** RLS escape:
   - Scope: the `OR current_setting('app.is_admin', true) = 'true'` clause
@@ -575,9 +576,10 @@ FR-7 still governs: the agent acts when the user asks.
   client connect with no user turn appended → one step runs and speech is
   produced **and no tool call is made** (the silent-session regression is
   otherwise invisible until launch; the tool-free rule guards FR-7);
-  (f) a blocked/empty response → the fallback line is spoken,
-  nothing is appended to the context, and the session takes the next
-  turn normally.
+  (f) a blocked/empty response → the fallback line is spoken, nothing
+  *from the model* is appended to the context (a spoken filler, if one
+  fired first, is appended per FR-43 — heard words never vanish), and
+  the session takes the next turn normally.
   Implementation MUST begin with a **spike** proving the stage swap: a
   custom processor in the LLM slot streaming text downstream with sentence
   aggregation, TTS, and barge-in interruption all intact. That is the
@@ -627,12 +629,17 @@ FR-7 still governs: the agent acts when the user asks.
   repetition; generic and topic-agnostic by design), travels **through
   the same downstream text-frame path as model text** — never a side
   channel to TTS, so FR-20's transcript log records it — and enters the
-  context **solely** as the **prefix of that step's `step_text` in
-  `append_step`**; FR-46's spoken-prefix capture excludes it **by
-  construction, with a named mechanism**: the loop emitted the filler
-  and knows its exact text, so it subtracts it from the captured
-  stream — the loop owns the dedupe, no marker protocol needed (never a
-  separate append: two
+  context as the **prefix of whichever assistant append closes the
+  turn**: `append_step` on a tool step; `append_assistant` when the
+  deadline lever's accepted false positive fired on a *plain* turn
+  (which never calls `append_step` — the rule must cover the very case
+  the lever creates); and **alone, as the turn's assistant entry, when
+  nothing else is appended** (FR-42's empty-step path — a sentence the
+  user heard must never vanish from the context). FR-46's spoken-prefix
+  capture excludes it **by construction, with a named mechanism**: the
+  loop emitted the filler and knows its exact text, so it subtracts it
+  from the captured stream — the loop owns the dedupe, no marker
+  protocol needed (never a separate append: two
   consecutive assistant messages are rejected by Anthropic and silently
   merged by Gemini; prefixing keeps one assistant message per step, which
   is also how the next step knows it already said "let me pull that up").
@@ -691,7 +698,15 @@ FR-7 still governs: the agent acts when the user asks.
   results, one result per issued call, in step order — the message-shape
   rule the C-2 swap depends on, no provider needed; (ii) a no-tool built
   context matches today's `LLMContext` message list — the
-  behavior-identical claim, asserted rather than assumed. This
+  behavior-identical claim, asserted rather than assumed; (iii) the
+  straggler boundary — a final arriving before the next
+  user-speech-start is dropped and logged, one arriving after it
+  becomes the next turn's content (an off-by-one here silently discards
+  "Actually, forget the pricing part —" as benign leftover); (iv) the
+  scratch reset — after a turn is consumed the scratch context holds
+  nothing, and an N-turn session never accumulates it (the failure
+  breaks nothing visible; it just keeps a second unbounded copy of the
+  conversation). Both are frame-level unit tests, no provider needed. This
   seam is exactly where feature 5 installs sections, budgets, and
   compression and feature 6 fills a retrieved-memory slot — with no change
   to loop control flow. The provider logs a **locally computed, explicitly
@@ -719,7 +734,9 @@ FR-7 still governs: the agent acts when the user asks.
   another user's artifact id reports not-found. The queries themselves live
   in `db/` (an artifacts repo with the standard discipline — `user_id: str`,
   no default), not in the tool module: tools stay schema-shaped, the repo
-  layer owns filtering, ordering, and caps. The v1 inventory (the
+  layer owns filtering, ordering, and caps. `list_artifacts` is the first
+  query filtering `artifacts` by `user_id` alone, so the column gains an
+  index (the same reasoning that indexed `sessions.user_id`). The v1 inventory (the
   minimum that makes multi-step real):
   - `create_artifact` — migrated from the current implementation with
     behavior unchanged: artifact row + `artifact_created` usage event in
@@ -763,8 +780,13 @@ FR-7 still governs: the agent acts when the user asks.
     artifact surfaces) + an `artifact_edited` usage event (`unit =
     'edits'`, FR-32 amended to name it), panel update announced through
     the FR-45 emit callback (`artifact.updated`, which the frontend
-    panel handles by updating the entry in place — `artifact.created` is
-    the only type it knows today), ownership resolved via the
+    panel handles as an **upsert** — update if the id is known, insert
+    if not: the panel's list is session-local and starts empty, and the
+    tool's defining case edits a prior-session artifact the client has
+    never seen; without the insert half, the agent confirms an edit out
+    loud while nothing renders. `RETURNING content` already hands the
+    announce its full payload. `artifact.created` is the only type the
+    panel knows today), ownership resolved via the
     user-scoped repo — the mandated NFR-8 negative test covers it too.
     The edited event carries the current `turn_id` and `detail` = the
     artifact's kind, like creates (FR-36's per-turn cost table depends
@@ -784,7 +806,10 @@ FR-7 still governs: the agent acts when the user asks.
   results discarded, not force-cancelled mid-statement** (cancelling a
   coroutine inside a DB query can hand a poisoned connection back to the
   pool; v1's reads are millisecond queries whose results are merely
-  unwanted, so abandon-and-discard is simpler and equally correct);
+  unwanted, so abandon-and-discard is simpler and equally correct —
+  with the same disposal discipline as the detached write: an abandoned
+  read that eventually raises is swallowed and logged with its
+  `session_id`, never an unretrieved-exception traceback);
   **an in-flight write tool runs to completion** — a half-done write is
   worse than a moot one, and `create_artifact`'s transaction is atomic
   either way. "Runs to
@@ -810,7 +835,11 @@ FR-7 still governs: the agent acts when the user asks.
   (a silent no-op, never an unretrieved exception in a task nothing
   awaits). **What
   the context holds after an interruption is defined, not inherited**:
-  the assistant's entry records the *spoken prefix*, marked interrupted —
+  the assistant's entry records the *spoken prefix*, marked
+  interrupted — the mark's **wire form is a sentinel suffix owned by the
+  context provider** (a bracketed marker in the text, deliberately
+  model-visible: an extra metadata key is dropped or rejected across
+  providers, and an unmarked prefix reads as a complete answer) —
   taken from the sentence-level synthesis stream (the TTS service's
   output frames, the same stream FR-20 logs as `agent_text`), **with the
   filler excluded from this capture** — the filler's context entry is
@@ -868,7 +897,13 @@ FR-7 still governs: the agent acts when the user asks.
   tool-call count; `tool.invoked`: session_id, turn_id, name, duration ms,
   ok/error/timeout) and LLM usage recorded per call directly from the
   provider's response through the existing enqueue-only recorder (NFR-10
-  unchanged; FR-32 is amended to match). LLM usage is recorded in
+  unchanged; FR-32 is amended to match) — **with the turn number passed
+  explicitly from the step that made the call, never sampled at enqueue
+  time**: the tracker advances on barge-in, so a cancelled step's
+  late-reported usage would otherwise land on the *next* turn — the
+  interrupted turn renders free and its successor double-priced in
+  FR-36 — the same at-write-time bug this FR fixes for the measurement
+  below. LLM usage is recorded in
   **exactly one place** — the loop; the metrics-frame observer keeps TTS
   only, so nothing double-counts. The stage swap's effect on FR-33 is
   stated positively, not assumed away: the end-of-speech → first-audio
@@ -885,7 +920,16 @@ FR-7 still governs: the agent acts when the user asks.
   interrupted flush, so the number must be captured with the
   measurement, not at write time) into the recorder's per-turn buffer;
   the **loop flushes that buffer as the single `turn_metrics` write at
-  turn end** — **gated on a measurement existing, not on audio**: the
+  turn end** — where "turn end" for the write means **both signals have
+  arrived: the loop's turn end AND the observer's measurement, whichever
+  lands last**. The two race in the common case, and a flush that looked
+  only at the loop's end would lose it: the stream closes *upstream* of
+  TTS, so on a one-sentence turn (FR-9 makes that the norm) the loop
+  finishes ~100ms before first audio — and the dropped rows would be
+  selectively the *fast* turns, skewing FR-37's p50 and breach count
+  slow. If no measurement arrives within a bounded window after the
+  loop's end (2s), the no-row path applies and the buffer clears.
+  **Gated on a measurement existing, not on audio**: the
   greeting turn has first audio but no end-of-speech to measure (the
   same guard today's observer carries), so it writes no row, exactly
   like a turn interrupted before audio; both leave their steps in
@@ -936,13 +980,16 @@ FR-7 still governs: the agent acts when the user asks.
   no double-count with the metrics-frame observer.
 - **FR-48** The loop calls the LLM through a thin provider-agnostic
   streaming client built by an `agent/providers.py` factory, exposing
-  four things: text deltas, tool calls, usage counts, and a **finish
-  reason** (normal stop vs. blocked vs. truncated vs. **interrupted** —
-  the stream cancelled mid-generation by barge-in, whose partial
-  consumption FR-46 records and whose trace row FR-49 keeps; without the
-  vocabulary the loop cannot tell an empty ending from a blocked
-  generation — FR-42's empty-step rule — nor a finished turn from a cut
-  one). Gemini first
+  four outputs — text deltas, tool calls, usage counts, and a **finish
+  reason** — plus **one input beyond the messages: the `tool_choice`
+  directive** (`none` on the greeting and the cap's forced step),
+  translated per provider inside the factory — a silent mistranslation
+  there is what would unguard FR-7 on the greeting. The finish-reason
+  vocabulary: normal stop vs. blocked vs. truncated vs. **interrupted**
+  (the stream cancelled mid-generation by barge-in, whose partial
+  consumption FR-46 records and whose trace row FR-49 keeps); without it
+  the loop cannot tell an empty ending from a blocked generation
+  (FR-42's empty-step rule) nor a finished turn from a cut one. Gemini first
   (the provider SDK lives inside the factory, per the hard constraint);
   Claude remains the runner-up swap. Implementation MUST begin with a
   **spike** proving streamed text + native function calling + usage
@@ -976,8 +1023,18 @@ FR-7 still governs: the agent acts when the user asks.
   session's own instance of the shared writer *class* — with
   `input_messages` **serialized at enqueue time**, never a reference to
   the live message list a later `append_step` mutates (a lazy trace
-  would show messages that were never sent); a dropped trace batch logs
-  and drops, never touching the conversation. Access, until
+  would show messages that were never sent — an accepted, *named* NFR-10
+  deviation: the serialization is O(context), ~1ms per step at
+  long-session sizes, sitting between step N's stream and step N+1's
+  call); a dropped trace batch logs and drops, never touching the
+  conversation. **The `interrupted` row's enqueue point is the
+  cancellation path itself**: the loop enqueues the partial trace —
+  text streamed so far, tokens where the provider reported them,
+  duration to cancellation, finish reason `interrupted` — from state it
+  already holds, in its interruption handler, never behind the cancelled
+  `await` (a `CancelledError` unwinding past the natural enqueue would
+  lose precisely the turn a trace is most wanted for). FR-46's
+  partial-usage rule shares this enqueue point. Access, until
   feature 7 builds the real surface, is **developer-grade by design and
   its role is named**: the application role sees traces only inside the
   owner's RLS scope; the developer path — compose `psql` locally, SSH +
