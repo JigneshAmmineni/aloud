@@ -1188,28 +1188,50 @@ Out of scope, deliberately: multiple/adjustable preview panes and live
 co-editing (later, own spec — roadmap); mid-conversation uploads and
 proactive pickup (feature 5, which also deprecates the
 upload-before-session flow); chunking/embedding/retrieval (feature 6);
-per-document delete (arrives with NFR-7's delete-my-data work — noted
-here so it is not silently dropped); PDF original-byte storage, preview,
-or re-download (v1 stores extracted text only — the consequence is named
-in FR-51); encryption at rest (post-MVP, NFR-6).
+PDF original-byte storage, preview, or re-download (v1 stores extracted
+text only — the consequence is named in FR-51); encryption at rest
+(post-MVP, NFR-6). Per-document delete was first drafted as out of scope
+and pulled **into** v1 by review: an undeletable mis-upload, readable by
+the agent in every future session with NFR-7's delete-everything as the
+only escape, is a dead end (FR-52).
 
 - **FR-50** One `documents` table replaces `artifacts`. Metadata
-  columns: `id`; `user_id` (FK, indexed — FR-45's `list` reasoning
+  columns: `id` (**integer PK, one sequence for both sources** — the
+  upload path's client-side UUID id space retires with the in-memory
+  store: FR-51's response returns the row id and the client's document
+  id is a number everywhere; two id types would silently break FR-55's
+  id-matched upsert, inserting a duplicate card instead of re-rendering
+  the open preview); `user_id` (FK, indexed — FR-45's `list` reasoning
   transfers); `session_id` (nullable FK: the creating session for agent
   documents, NULL for uploads, which precede `/start`); `source`
   (`uploaded` | `agent`); `kind` (agent documents keep FR-12's
   `summary` | `action_items` | `cleaned_idea`; NULL for uploads);
   `format` (`markdown` | `text` | `pdf` — the render/edit switch: agent
-  documents are always `markdown`, uploads get it from the existing
-  extension-first detection); `created_at`; `updated_at` (nullable —
-  FR-45's activity ordering `COALESCE(updated_at, created_at)`
-  transfers). Content-class 🔒 columns: `title` (for uploads, the
+  documents are always `markdown`; uploads get it from upload-time
+  detection, which this FR **widens to a three-way split** — extension
+  first (`.md`/`.markdown` → `markdown`, other text → `text`, `.pdf` →
+  `pdf`), content type as fallback (`text/markdown` included) — because
+  today's detection collapses markdown into `text`, which would render
+  an uploaded `plan.md` preformatted under FR-54, for the file type
+  this product most expects); `legacy_artifact_id` (nullable integer,
+  unique — the migration's idempotency key, below); `created_at`;
+  `updated_at` (nullable — FR-45's activity ordering
+  `COALESCE(updated_at, created_at)` transfers). Content-class 🔒 columns: `title` (for uploads, the
   original filename — filenames are content by the established log
   rule) and `content` (generated or extracted text). RLS: `documents`
   joins the user-owned table set with the standard four policies and is
   **not** in the admin-read set — **FR-31's table list, FR-38's
-  content-table enumeration, and FR-38 test (d) are amended to read
-  `documents` for `artifacts`**. Usage-event vocabulary is deliberately
+  content-table enumeration, and FR-38 test (d) are amended so
+  `documents` *joins* them; nothing is substituted out**: `artifacts`
+  leaves no protected set while it exists. The legacy table's fate is
+  stated, not implied: after the migration nothing reads or writes it,
+  but it still holds 🔒 rows, so it stays RLS-covered and admin-blind
+  through the release that ships this feature — it is the rollback
+  target's live table (this FR's own rollback caveat) — and is
+  **dropped in the following release** once the deploy is verified.
+  Until the drop, FR-38 test (d) asserts zero admin-context rows from
+  **both** tables — a test against the empty leftover alone would ship
+  green while proving nothing. Usage-event vocabulary is deliberately
   unchanged: creates and edits keep `stage='artifact'`
   (`artifact_created` / `artifact_edited`, FR-32) so §4.9's stage.unit
   aggregation, FR-38's event-sourced counts, and recorded history all
@@ -1220,15 +1242,23 @@ in FR-51); encryption at rest (post-MVP, NFR-6).
   Migration: implementation ships an **idempotent pre-serve migration**
   (the RLS-bootstrap / boot-sweep slot) carrying every existing
   `artifacts` row into `documents` with `source='agent'`,
-  `format='markdown'`, title/content/timestamps intact — dogfooding
-  rows are real user data; loss is not acceptable. The standing deploy
+  `format='markdown'`, title/content/timestamps intact, and
+  `legacy_artifact_id` = the source row's id — dogfooding rows are real
+  user data; loss is not acceptable. **`legacy_artifact_id` is the
+  idempotency key**: the copy inserts only rows whose id is not already
+  present (insert-where-absent on the unique column), so a second boot
+  no-ops by construction — "is the table empty" is NOT the mechanism,
+  since FR-51's uploads share the table from day one. The standing deploy
   caveat applies and is accepted: rollback does not reverse migrations
   (CURRENT-ARCHITECTURE.md), so rolling back past this release needs
   manual DB attention. Mandated tests: a seeded legacy `artifacts` row
   surfaces post-migration as an agent document, fields intact; the
-  migration is idempotent (a second boot no-ops); the NFR-8 negative on
-  `documents` (user A cannot read user B's rows); FR-38 test (d)
-  extended — the admin context reads zero `documents` rows.
+  migration is idempotent (a second boot no-ops, asserted via
+  `legacy_artifact_id` — and stays a no-op after an upload has landed
+  in the shared table); the NFR-8 negative on `documents` (user A
+  cannot read user B's rows); FR-38 test (d) extended — the admin
+  context reads zero rows from `documents` **and** from the retained
+  `artifacts` table.
 - **FR-51** Uploads persist; the attach flow is behavior-identical.
   `POST /documents` keeps its contract (multipart, one file per
   request, extension-first type detection, extraction rules and error
@@ -1236,17 +1266,25 @@ in FR-51); encryption at rest (post-MVP, NFR-6).
   a `documents` row (`source='uploaded'`) through `user_scoped_session`
   instead of the in-memory store — the `InMemoryDocumentStore` retires
   into `db/documents_repo.py`, the swap its own docstring names. The
-  response's `id` becomes the row id. Session attach is unchanged in
-  semantics: the client sends the ids of **this visit's uploads** to
-  `/start`, attach resolution reads them owner-scoped from the repo,
-  and `build_document_context_block` injects them in full under
-  `MAX_TOTAL_CHARS` (400k) exactly as today (FR-21). Workspace
-  documents from past visits are **not** auto-attached — a workspace of
-  thirty documents would drown the injected block; the agent reaches
-  older documents on request through FR-53's tools, and automatic
-  pickup is feature 5/6 territory. The upload list's × removes a
-  document from the attach set only — it never deletes the row (there
-  is no delete in v1). Named consequence of extracted-text-only
+  response's `id` becomes the integer row id (FR-50). Session attach
+  becomes a **user-curated selection, never an automatic one**: the
+  client sends the attach set's ids to `/start`, attach resolution
+  reads them owner-scoped from the repo, and
+  `build_document_context_block` injects them in full under
+  `MAX_TOTAL_CHARS` (400k) exactly as today (FR-21). This visit's
+  uploads enter the set by default — today's behavior, preserved; any
+  other workspace document, **either source**, can be toggled into the
+  set while idle (FR-54): `/start` already takes ids, and the
+  drown-the-block rationale only ever argued against *auto*-attach,
+  not against the user choosing. Nothing is ever attached unasked —
+  automatic pickup stays feature 5/6 territory, and the agent reaches
+  unattached documents on request through FR-53's tools. Budget is
+  enforced where the user can see it: the client refuses additions
+  past `MAX_TOTAL_CHARS` using the list's `char_count` (visible
+  feedback, not silence); the server's existing block truncation
+  remains the backstop. The attach toggle changes the attach set
+  only — deletion is FR-52's separate, confirmed affordance, never
+  this one. Named consequence of extracted-text-only
   storage: a PDF's original bytes are gone after extraction — preview,
   agent reads, and download all see the extracted text; download of an
   upload reproduces that text, never the original file. Accepted for
@@ -1264,17 +1302,33 @@ in FR-51); encryption at rest (post-MVP, NFR-6).
   (`COALESCE(updated_at, created_at)` DESC), capped
   (`WORKSPACE_LIST_CAP`, default 100 — a revisit note, not a pager;
   paginate when someone hits it), returning metadata plus `title` and a
-  computed `char_count`, **never `content`**. `GET /documents/{id}` —
-  one owned document with full content, serving preview and download;
-  another user's id is not-found (the NFR-8 negative is mandated).
-  Download is client-composed from the fetched content (a Blob saved
-  under the document's title with `.md`/`.txt` extension) — no extra
-  endpoint, nothing new to secure. Routing must be explicit in both
-  environments: the Next rewrite covers only the literal `/documents`
-  today and must cover `/documents/{id}`; the prod Caddyfile's backend
-  matcher lists no `/documents` path at all (prod currently reaches the
-  upload endpoint only through Next's rewrite hop) — both matchers are
-  fixed as part of this FR.
+  computed `char_count`, **never `content`** — and a `total` count, so
+  truncation is visible ("showing 100 of 212"), never silent.
+  `GET /documents/{id}` — one owned document with full content, serving
+  preview, download, and FR-53/55's oversized-announce refetch.
+  `DELETE /documents/{id}` — pulled into v1 by review (the scope note
+  above): hard delete, either source, behind FR-54's confirming
+  affordance. Deliberate delete semantics, stated: usage events are
+  untouched (*spent is recorded* — FR-38's event-sourced counts survive
+  the row, deliberately); a deleted id later named by a tool resolves
+  not-found (the standard steering result) and in an attach set is
+  silently skipped (the existing unknown-id behavior); deleting
+  mid-session does not retract content already injected or read into
+  the model's context — FR-14 keeps the session's memory (accepted).
+  Download is client-composed from the fetched content — no extra
+  endpoint, nothing new to secure — saved under the document's title
+  as `.md` (`markdown`) or `.txt` (`text` **and** `pdf`: the stored
+  content is extracted text, and a `.pdf` extension on it would be a
+  broken file). Routing must be explicit in both environments: the
+  Next rewrite covers only the literal `/documents` today and must
+  cover `/documents/{id}`; the prod Caddyfile's backend matcher lists
+  no `/documents` path at all (prod currently reaches the upload
+  endpoint only through Next's rewrite hop) — both matchers are fixed
+  as part of this FR. Mandated tests: the NFR-8 negatives on all three
+  routes (another user's id never appears in the list, GETs it
+  not-found, DELETEs it not-found and deletes nothing); the list
+  response never serializes `content`; delete → the row is gone and a
+  subsequent `read_document` of that id steers not-found.
 - **FR-53** The agent's document tools — FR-45 amended: same registry,
   same discipline, renamed and extended. Renames: `create_artifact` →
   `create_document`, `list_artifacts` → `list_documents`,
@@ -1310,7 +1364,14 @@ in FR-51); encryption at rest (post-MVP, NFR-6).
     outlived-write race FR-46/FR-45 close for `append`). Zero
     occurrences → a steering tool result ("no match — read the document
     and copy the text exactly"); more than one → "ambiguous — include
-    more surrounding text". `str_replace` works at **any** content
+    more surrounding text". **The two steering results are producible,
+    not aspirational** — a bare UPDATE's zero rowcount cannot tell
+    no-match from ambiguous: either the statement computes the
+    occurrence count alongside the update (a CTE returning it), or the
+    handler follows the failed UPDATE with a **read-only diagnostic
+    query** to choose the message — explicitly permitted, because the
+    atomicity rule binds *writes*: a failed UPDATE wrote nothing, so no
+    read-modify-write window exists. `str_replace` works at **any** content
     size: an exact match proves the model has seen the text it touches,
     which is precisely the knowledge the over-cap `replace` refusal
     exists to guarantee. **FR-45's "effectively append-only past the
@@ -1326,10 +1387,17 @@ in FR-51); encryption at rest (post-MVP, NFR-6).
   - Announces: `document.created` / `document.updated` replace
     `artifact.created` / `artifact.updated` with the same upsert
     contract (FR-45); the payload is the document's metadata plus
-    post-edit `content` (the `RETURNING` value — no follow-up SELECT).
-    Frontend and backend ship in one release; in-flight sessions across
-    that deploy die as they do on every deploy (standing behavior,
-    accepted).
+    post-edit `content` (the `RETURNING` value — no follow-up SELECT)
+    **only up to `ANNOUNCE_CONTENT_MAX_CHARS` (default 16,000)**: the
+    data channel shares the session's transport with live audio, and
+    this FR makes 200k-char documents editable — a five-character
+    `str_replace` must not ship the whole document mid-session. Above
+    the threshold the announce carries `content_omitted: true` and no
+    content; the client refetches `GET /documents/{id}` to update the
+    list and any open preview (ordinary HTTP, off the voice path —
+    FR-55). Frontend and backend ship in one release; in-flight
+    sessions across that deploy die as they do on every deploy
+    (standing behavior, accepted).
   Mandated tests: (i) FR-45's transferred tests hold under the new
   names — cap termination, atomic-append concurrency, the 1 `count` /
   N `edits` aggregation, the NFR-8 negatives; (ii) `str_replace`:
@@ -1354,11 +1422,16 @@ in FR-51); encryption at rest (post-MVP, NFR-6).
   in the render context — raw HTML must never execute (markdown
   rendered with HTML disabled or escaped; a mandated test or lint
   guard, not an assumption). The upload button lives with the Uploaded
-  list and stays idle-gated — FR-51's attach semantics are unchanged,
-  and the list marks which documents are attached to the next session.
-  The workspace and preview are available both while idle and during an
-  active session (the user talks about what they're previewing); only
-  upload is idle-gated. Empty, loading, and error states exist on the
+  list and stays idle-gated; each item marks its attach state and,
+  while idle, exposes FR-51's attach toggle (both lists — an
+  agent-written summary is attachable context too), with the visible
+  budget refusal FR-51 mandates. Each item also exposes FR-52's delete
+  behind an explicit confirmation — visually distinct from the attach
+  toggle, so removing-from-session and destroying-the-row can never be
+  mistaken for each other. The workspace and preview are available both
+  while idle and during an active session (the user talks about what
+  they're previewing); only upload and the attach toggle are
+  idle-gated. Empty, loading, and error states exist on the
   lists and the pane; the pane is dismissible; finer visual design is
   not specified; NFR-3 applies — on phone widths the lists may stack
   and the preview may overlay the console full-width. Testable UI
@@ -1370,34 +1443,46 @@ in FR-51); encryption at rest (post-MVP, NFR-6).
   `document.updated` upserts the item, re-orders by activity, **and, if
   that document is open in the preview pane, re-renders the pane's
   content in place** — the roadmap's "watch it write" moment; no
-  polling, no refetch (FR-53's payload carries the full post-edit
-  content). The upsert's insert half stays load-bearing even with
+  polling, and no refetch while the payload carries the content — on a
+  `content_omitted` announce (FR-53's size threshold) the client
+  refetches `GET /documents/{id}` and updates the same way. The upsert's insert half stays load-bearing even with
   FR-54's fetch: an edited document can be absent from the client's
   capped list. On reload or a fresh visit the workspace rehydrates from
   `GET /documents` — client-only artifact state (and its lost-on-reload
   behavior) is retired, and the old "artifacts deliberately kept on
   unexpected session death" rule is subsumed: the lists are
   server-backed truth. Mandated tests: backend — the `document.updated`
-  payload carries the post-edit content (per FR-53); client behavior
-  notes — an upsert for an unknown id inserts, an update for the
-  previewed document re-renders it, and a reload shows server truth.
+  payload carries the post-edit content below FR-53's threshold and
+  `content_omitted` with no content above it; client behavior notes —
+  an upsert for an unknown id inserts, an update for the previewed
+  document re-renders it (refetching when content was omitted), and a
+  reload shows server truth.
 
 **Amendments this feature makes** (recorded here; the amended FRs stay
 authoritative for everything not named): FR-45 — tool and knob renames,
-`str_replace`, read pagination, announce renames, append-only
-consequence retired (FR-53). FR-31 / FR-38 — `documents` replaces
-`artifacts` in the user-owned table list, the content-table enumeration,
-and test (d) (FR-50). FR-32 / FR-38 counts — deliberately unchanged
-(`stage='artifact'` kept, FR-50). FR-21 — uploads persist (FR-51); the
-attach-and-inject flow is unchanged. §6 — the document-persistence
-deferral narrows to indexing/retrieval; the cross-session carve-out
-speaks the document-tool vocabulary and now includes uploads.
+`str_replace`, read pagination, announce renames and size threshold,
+append-only consequence retired (FR-53). FR-31 / FR-38 — `documents`
+**joins** the user-owned table list, the content-table enumeration, and
+test (d); `artifacts` leaves no protected set until its stated drop
+release, and test (d) covers both tables until then (FR-50). FR-32 /
+FR-38 counts — deliberately unchanged (`stage='artifact'` kept, FR-50).
+FR-21 — uploads persist (FR-51); attach becomes a user-curated
+selection with this visit's uploads default-attached. §6 — the
+document-persistence deferral narrows to indexing/retrieval; the
+cross-session carve-out speaks the document-tool vocabulary and now
+includes uploads. Process note: these amendments are recorded here
+rather than applied in place **deliberately** — `feature/agentic-loop`
+has REQUIREMENTS.md in flight, and in-place edits to §4.9/§4.10 would
+conflict; once that branch merges, **applying them in place at the
+amended FRs is a pre-merge task for this spec's PR**, so no implementer
+ever reads FR-38 or FR-45 without seeing them.
 
 | Knob | Default | Where |
 |---|---|---|
 | `WORKSPACE_LIST_CAP` (`GET /documents`) | 100 | `db/` documents repo (FR-45's rule: caps live in the repo layer) |
 | `LIST_DOCUMENTS_CAP` (tool; renamed from `LIST_ARTIFACTS_CAP`) | 20 | `db/` documents repo |
 | `READ_DOCUMENT_MAX_CHARS` (renamed from `READ_ARTIFACT_MAX_CHARS`; also the `read_document` page size) | 8,000 | `agent/tools.py` |
+| `ANNOUNCE_CONTENT_MAX_CHARS` (announce payload cap; above it `content_omitted: true` + client refetch) | 16,000 | `agent/tools.py` |
 | `MAX_FILE_BYTES` (per uploaded file) | 5 MB | unchanged (upload/extraction module) |
 | `MAX_DOC_CHARS` (per document, post-extraction) | 200,000 | unchanged |
 | `MAX_TOTAL_CHARS` (per-session injected block, FR-21) | 400,000 | unchanged |
