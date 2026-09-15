@@ -279,8 +279,10 @@ principles govern every FR below:
   TTS characters per utterance, and an `artifact_created` event
   (`stage = 'artifact'`, `unit = 'count'`, `quantity = 1`, `detail` = the
   artifact's `kind` — never title/content) whenever the create_artifact
-  tool succeeds, so admin views can count artifacts without touching the
-  content-bearing table (FR-38). STT usage is recorded at session end as the
+  tool succeeds — and, once §4.10 lands, an `artifact_edited` event in
+  the same shape whenever the `edit_artifact` tool succeeds — so admin
+  views can count artifact activity without touching the content-bearing
+  table (FR-38). STT usage is recorded at session end as the
   session's audio duration (connect → disconnect, in seconds; the session
   row's start/end timestamps are written in the pipeline's cleanup path, so
   ungraceful disconnects are covered the same as a clean "End" tap) — a
@@ -706,6 +708,19 @@ FR-7 still governs: the agent acts when the user asks.
     `READ_ARTIFACT_MAX_CHARS` (default 8,000 — roughly a long artifact,
     safely inside the model's window) with an explicit "[truncated]"
     marker.
+  - `edit_artifact` — replace or append to one owned artifact's content
+    (optionally its title); v1 modes are exactly `replace` and `append` —
+    no diff/patch formats, which are feature-4 territory. Deliberately
+    the second **write** tool: it exercises the FR-46 in-flight-write
+    machinery beyond creation, completes the read → edit chain ("fix the
+    third bullet in yesterday's summary" cannot be answered by context
+    alone — it requires reading and editing the real row), and is
+    therefore the inventory's most clearly evaluatable behavior. Same
+    discipline as create: row update + an `artifact_edited` usage event
+    in `artifact_created`'s shape (FR-32 is amended to name it), panel
+    update announced through the FR-45 emit callback
+    (`artifact.updated`), ownership resolved via the user-scoped repo —
+    the mandated NFR-8 negative test covers it too.
   Tool results are structured JSON. Artifact titles/content flowing into
   the model's context is the owner's own data in the owner's own session
   (NFR-5 covers the processing disclosure); logs carry tool names, ids,
@@ -870,6 +885,32 @@ FR-7 still governs: the agent acts when the user asks.
   the stream: FR-43's first-delta trigger exists only if the former; if
   the `functionCall` arrives whole, `FILLER_DEADLINE_MS` is the only
   real backstop and the implementation leans on it knowingly.
+- **FR-49** Minimal LLM tracing, pulled forward from roadmap feature 7
+  by that feature's own clause — the loop is *built through* its trace,
+  not traced after the fact. Every LLM call the loop makes writes one
+  row to an `llm_traces` table: `session_id`, `turn_id`, step number,
+  timestamp, model, purpose (`turn` | `greeting` | `wrap_up` |
+  `fallback`), finish reason, prompt/completion tokens, TTFB ms, and
+  duration (metadata) — plus `input_messages` and `output`, the full
+  text sent and received, as **dedicated 🔒 content columns** (NFR-6:
+  separable, encryption-ready). Rows are user-keyed and RLS-covered like
+  every content table, join NFR-7's future delete cascade, and are
+  **excluded from the FR-38 admin escape — no admin surface ever renders
+  a trace** (NFR-9: a trace *is* content; the developer path below is
+  not an admin surface). Capture is NFR-10-shaped: the loop enqueues the
+  row it already holds every field of; the shared background writer
+  flushes; a dropped trace batch logs and drops, never touching the
+  conversation. Access, until feature 7 builds the real surface, is
+  **developer-grade by design**: query the database directly (compose
+  `psql` locally; SSH + `psql` on the VM — 5432 is never public), plus a
+  mandated convenience — `scripts/show_trace.py <session_id>`
+  (local-only, `grant_admin.py`'s pattern): pretty-prints the session
+  turn by turn — each step's input messages, streamed output, tool calls
+  with results and timings, finish reason — the exact execution story of
+  the loop. At `LOG_LEVEL=DEBUG` (dev only, never shipped — FR-39) the
+  loop additionally logs each step's input/output inline: the live view
+  while testing. Retention follows §4.9's usage tables: indefinite at
+  current scale, same revisit trigger.
 
 **How the loop works — reference pseudocode and knobs.** Normative for
 FR-42; kept here so the mechanism is editable knowingly.
