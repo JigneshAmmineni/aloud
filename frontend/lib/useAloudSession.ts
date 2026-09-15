@@ -23,6 +23,7 @@ export type Artifact = {
   kind: string;
   content: string;
   created_at: string;
+  updated_at?: string | null;
 };
 
 export type AttachedDocument = {
@@ -216,6 +217,19 @@ export function useAloudSession() {
           onServerMessage: (data: any) => {
             if (data?.type === "artifact.created" && data.artifact) {
               setArtifacts((prev) => [data.artifact as Artifact, ...prev]);
+            }
+            // FR-45: edit_artifact announces the post-edit artifact as an
+            // UPSERT — update if the id is on screen, insert if not: this
+            // panel's list is session-local and starts empty, and the
+            // tool's defining case edits a prior-session artifact the
+            // client has never seen.
+            if (data?.type === "artifact.updated" && data.artifact) {
+              const updated = data.artifact as Artifact;
+              setArtifacts((prev) =>
+                prev.some((a) => a.id === updated.id)
+                  ? prev.map((a) => (a.id === updated.id ? updated : a))
+                  : [updated, ...prev],
+              );
             }
             // Graceful-shutdown goodbye: the server says it's going away
             // (deploy/restart) before the connection drops.
