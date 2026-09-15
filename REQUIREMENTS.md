@@ -539,7 +539,10 @@ FR-7 still governs: the agent acts when the user asks.
   step; a step ending with text only ends the turn. The **greeting** is a
   named entry point, not an accident: on client connect the loop runs one
   step with no user turn appended (today's `LLMRunFrame` semantics) — the
-  agent speaks first. Hard bounds, enforced in code and surfaced as named
+  agent speaks first — and that call is made with **`tool_choice: none`**:
+  FR-7 licenses no tool use the user didn't ask for, §6's carve-out is
+  explicitly "user-asked," and a session must not open with
+  `list_artifacts` volunteering last week's 🔒 titles unprompted. Hard bounds, enforced in code and surfaced as named
   constants: **max steps per turn** (default 5; the true ceiling is
   MAX_STEPS + 1 LLM calls, because hitting the cap triggers one forced
   final step — made with **tool selection forbidden, tools still
@@ -570,8 +573,9 @@ FR-7 still governs: the agent acts when the user asks.
   recorder calls pass NFR-10's fake-queue/no-database test split, which
   names this loop as its intended future subject; (e) the greeting —
   client connect with no user turn appended → one step runs and speech is
-  produced (the silent-session regression is otherwise invisible until
-  launch); (f) a blocked/empty response → the fallback line is spoken,
+  produced **and no tool call is made** (the silent-session regression is
+  otherwise invisible until launch; the tool-free rule guards FR-7);
+  (f) a blocked/empty response → the fallback line is spoken,
   nothing is appended to the context, and the session takes the next
   turn normally.
   Implementation MUST begin with a **spike** proving the stage swap: a
@@ -592,14 +596,25 @@ FR-7 still governs: the agent acts when the user asks.
   **deterministic backstop in the loop**, and its trigger must beat the
   slow part: a tool call's *arguments* stream too — `create_artifact`
   carries the whole artifact body, 2–6s of generation — so waiting for
-  the completed tool round is already too late. The backstop fires on
-  whichever comes first: the **first tool-call delta** in the stream (the
-  call's name surfaces before its arguments finish — *if* the provider
-  streams calls incrementally, which the FR-48 spike must determine; if
-  Gemini delivers the `functionCall` atomically, the deadline is the only
-  real backstop and the spec says so), or a **deadline** —
-  `FILLER_DEADLINE_MS` (default 700) after the call starts with nothing
-  yet forwarded downstream. And the condition is **state-based, not
+  the completed tool round is already too late. **The trigger is selected
+  by the FR-48 spike's incremental-vs-atomic finding, because the two
+  cases admit different knowledge** (a single rule can't serve both: at
+  T+700ms with zero deltas, a slow plain answer and a pending tool call
+  are indistinguishable, so a blind deadline would speak filler over
+  ordinary slow turns — breaking this FR's own no-tool-turn mandate and
+  stamping `step.N.filler` on healthy turns — while gating on the tool
+  round un-backstops the atomic case). **Incremental delivery** → the
+  trigger is the **first tool-call delta**; the call's name surfaces
+  well before its arguments finish, and no blind deadline exists.
+  **Atomic delivery** → the trigger is the completed call's **arrival,
+  before any handler runs** — the earliest knowable moment — and the
+  residual is stated, not hidden: the call's own generation time is
+  dead air no backstop covers; the spike must **measure** it for a
+  typical `create_artifact`, and if it breaches NFR-1 the named lever
+  is a blind deadline (`FILLER_DEADLINE_MS`, default 700) with its
+  false positive — a filler prefix on a slow plain turn — accepted
+  knowingly and excluded from the no-tool-turn mandate. And the
+  condition is **state-based, not
   step-numbered**: a filler is owed whenever a tool round is beginning
   and no speech is playing or queued — a tool-only step 3 after step 1's
   sentence finished playing is the same dead air as a silent step 1.
@@ -611,9 +626,13 @@ FR-7 still governs: the agent acts when the user asks.
   filler comes from a small named set (`FILLER_LINES`, varied to avoid
   repetition; generic and topic-agnostic by design), travels **through
   the same downstream text-frame path as model text** — never a side
-  channel to TTS, so FR-20's transcript log and FR-46's spoken-prefix
-  stream both see it — and enters the context as the **prefix of that
-  step's `step_text` in `append_step`** (never a separate append: two
+  channel to TTS, so FR-20's transcript log records it — and enters the
+  context **solely** as the **prefix of that step's `step_text` in
+  `append_step`**; FR-46's spoken-prefix capture excludes it **by
+  construction, with a named mechanism**: the loop emitted the filler
+  and knows its exact text, so it subtracts it from the captured
+  stream — the loop owns the dedupe, no marker protocol needed (never a
+  separate append: two
   consecutive assistant messages are rejected by Anthropic and silently
   merged by Gemini; prefixing keeps one assistant message per step, which
   is also how the next step knows it already said "let me pull that up").
@@ -625,7 +644,8 @@ FR-7 still governs: the agent acts when the user asks.
   distinguishes "spoke fast" from "spoke a canned line while 6 seconds
   of tool work ran." Mandated test — against a *slow*
   stream, not an instant fake: filler audio is emitted while the step-1
-  stream is still producing tokens. The no-tool turn — the
+  stream is still producing tokens (incremental branch) or on call
+  arrival before any handler runs (atomic branch). The no-tool turn — the
   overwhelming common case — must behave exactly as today: one LLM call,
   no added synchronous work (NFR-10 applies to the loop itself; anything
   the loop does beyond the call and the enqueue-only recorders is hot-path
@@ -651,9 +671,12 @@ FR-7 still governs: the agent acts when the user asks.
   `ExternalUserTurnStrategies` because Flux does its own end-of-turn
   detection, and it is what folds a stream of transcription frames (late
   finals included) into one user message. The reset (below) needs a
-  boundary against those late finals: a straggler final arriving *after*
-  the turn was consumed and the scratch reset is **dropped and logged**,
-  never emitted as a second fragment-only user turn. One conversation
+  boundary against those late finals, **with a discriminator** — "after
+  the reset" alone also describes the next turn's first words: the
+  boundary is **Flux's next user-speech-start event**. A final arriving
+  between the turn's consumption and that event is the consumed turn's
+  leftover — **dropped and logged**, never a second fragment-only user
+  turn; a final arriving after it belongs to the new turn and is kept. One conversation
   store, not two: the retained aggregator's `LLMContext` (it is constructed from
   one) is **turn-assembly scratch only** — the loop reads the assembled
   user message off the frame the aggregator emits and never reads that
@@ -722,9 +745,14 @@ FR-7 still governs: the agent acts when the user asks.
     provably never saw through the truncating read; there is no
     versioning or undo in v1, so unseen content must be undeletable);
     and **`append` is an atomic DB-side concatenation in the repo layer**
-    (`content = content || :text`) — never read-modify-write, which
-    would silently lose an edit when FR-46 lets a write outlive its
-    turn. Deliberately the second **write** tool: it exercises the FR-46
+    (`content = content || :text` ... `RETURNING content`, so the
+    `artifact.updated` announce carries the post-edit content without a
+    follow-up SELECT that would reopen the race) — never
+    read-modify-write, which would silently lose an edit when FR-46 lets
+    a write outlive its turn. Stated consequence, accepted for v1: an
+    artifact grown past the read cap becomes effectively append-only —
+    the escape is feature 4's real document editing (patch formats,
+    pagination), not a cleverer cap rule here. Deliberately the second **write** tool: it exercises the FR-46
     in-flight-write machinery beyond creation, completes the read → edit
     chain ("fix the third bullet in yesterday's summary" cannot be
     answered by context alone — it requires reading and editing the real
@@ -738,6 +766,14 @@ FR-7 still governs: the agent acts when the user asks.
     panel handles by updating the entry in place — `artifact.created` is
     the only type it knows today), ownership resolved via the
     user-scoped repo — the mandated NFR-8 negative test covers it too.
+    The edited event carries the current `turn_id` and `detail` = the
+    artifact's kind, like creates (FR-36's per-turn cost table depends
+    on the turn attribution). Mandated tests — the two honesty rules are
+    the data-loss rules, and a regression in either is invisible to
+    single-threaded testing: (i) an append issued concurrently with a
+    write that outlived its turn loses neither edit (the atomic
+    concatenation); (ii) one create plus N edits aggregates as 1
+    `count` / N `edits` — never N+1 artifacts.
   Tool results are structured JSON. Artifact titles/content flowing into
   the model's context is the owner's own data in the owner's own session
   (NFR-5 covers the processing disclosure); logs carry tool names, ids,
@@ -860,7 +896,15 @@ FR-7 still governs: the agent acts when the user asks.
   current at its step; the flush writes only entries matching the
   measured turn; and the buffer clears at every turn end — row-writing
   or not — so an interrupted no-row turn can never credit the next
-  turn with a tool it never called. **FR-33 is amended to match** (its "written from the breakdowns the latency
+  turn with a tool it never called. **Session teardown mid-turn is a
+  turn end for this purpose**: the teardown sequence flushes the buffer
+  (measurement existing) *before* the recorders stop — `task.cancel()`
+  is not a turn end on its own, and End-tap mid-response must not lose a
+  row whose measurement was already taken (FR-33's "interrupted
+  mid-response records normally"; its usage rows survive either way, so
+  a lost row renders real cost with latency "—" on the session's last
+  turn — the one ops opens the drill-down for). **FR-33 is amended to
+  match** (its "written from the breakdowns the latency
   observer already computes" described the old writer), exactly as FR-32
   was. Stage entries use **step-indexed keys** (`step.1.ttfb.llm`,
   `step.2.tool.read_artifact`, `step.N.filler` when the FR-43 backstop
@@ -929,17 +973,25 @@ FR-7 still governs: the agent acts when the user asks.
   writer** (FR-31's rule: a write batch never spans users — a
   cross-session batch would have no single `app.user_id` to set): the
   loop enqueues the row it already holds every field of into the
-  session's own instance of the shared writer *class*; a dropped trace
-  batch logs and drops, never touching the conversation. Access, until
+  session's own instance of the shared writer *class* — with
+  `input_messages` **serialized at enqueue time**, never a reference to
+  the live message list a later `append_step` mutates (a lazy trace
+  would show messages that were never sent); a dropped trace batch logs
+  and drops, never touching the conversation. Access, until
   feature 7 builds the real surface, is **developer-grade by design and
   its role is named**: the application role sees traces only inside the
   owner's RLS scope; the developer path — compose `psql` locally, SSH +
   `psql` on the VM (5432 is never public), and the mandated
   `scripts/show_trace.py <session_id>` (local-only, `grant_admin.py`'s
-  pattern; connects via `DATABASE_URL` as the database owner) — runs as
-  the **owner role, which RLS does not bind**: it reads any session's
-  trace from a `session_id` alone, deliberately, and that is exactly why
-  it exists only behind DB access and never as a product surface. The
+  pattern; connects via `DATABASE_URL`) — works through the compose
+  user's **superuser bypass, the one exemption FR-31 itself names**:
+  `FORCE ROW LEVEL SECURITY` is on every table, so *ownership exempts
+  nothing* — a merely-owner role would silently print an empty session.
+  If `DATABASE_URL` is ever hardened to a non-superuser role, the script
+  must connect with an explicit `BYPASSRLS` role or fail loudly, never
+  quietly show nothing. It reads any session's trace from a `session_id`
+  alone, deliberately, and that is exactly why it exists only behind DB
+  access and never as a product surface. The
   script pretty-prints the session turn by turn — each step's input
   messages, streamed output, tool calls with results and timings, finish
   reason — the exact execution story of the loop. At `LOG_LEVEL=DEBUG`
@@ -1014,10 +1066,12 @@ on interruption (FR-46): cancel stream + read tools; writes finish
     UPDATES that result in place (FR-44). Never a tail append, never a
     half-round context.
 on session end: ONE WRITE_GRACE_S budget, spent once — End-tap/disconnect:
-    per-session teardown awaits the in-flight-write set BEFORE the
-    recorders/writer stop; SIGTERM: the drain owns the wait across all
-    sessions and per-session teardowns do NOT wait again; writers stop
-    CONCURRENTLY. The whole shutdown fits stop_grace_period=30s (FR-46).
+    per-session teardown awaits the in-flight-write set, THEN flushes the
+    per-turn metrics buffer (if a measurement exists — a mid-turn End is
+    a turn end, FR-47), THEN the recorders/writer stop; SIGTERM: the
+    drain owns the wait across all sessions and per-session teardowns do
+    NOT wait again; writers stop CONCURRENTLY. The whole shutdown fits
+    stop_grace_period=30s (FR-46).
 ```
 
 | Knob | Default | Where |
