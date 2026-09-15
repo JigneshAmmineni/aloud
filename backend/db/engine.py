@@ -44,6 +44,7 @@ _RLS_TABLES = (
     "artifacts",
     "usage_events",
     "turn_metrics",
+    "llm_traces",
 )
 
 # FR-38: ONLY these tables' FOR SELECT policies carry the admin escape.
@@ -126,8 +127,8 @@ async def _bootstrap_rls(engine: AsyncEngine, app_password: str) -> None:
         """,
         f"GRANT USAGE ON SCHEMA public TO {APP_ROLE};",
         f"GRANT SELECT, INSERT, UPDATE, DELETE ON users, sessions,"
-        f" transcript_events, artifacts, usage_events, turn_metrics"
-        f" TO {APP_ROLE};",
+        f" transcript_events, artifacts, usage_events, turn_metrics,"
+        f" llm_traces TO {APP_ROLE};",
         f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {APP_ROLE};",
         # Pre-auth databases: add columns create_all won't retrofit.
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_name VARCHAR(80);",

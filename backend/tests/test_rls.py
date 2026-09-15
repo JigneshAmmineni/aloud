@@ -19,7 +19,14 @@ from sqlalchemy import delete, select, update
 
 from app.auth import AuthedUser
 from db.engine import init_db, session_factory, user_scoped_session
-from db.models import Artifact, Session, TranscriptEvent, TurnMetric, UsageEvent
+from db.models import (
+    Artifact,
+    LLMTrace,
+    Session,
+    TranscriptEvent,
+    TurnMetric,
+    UsageEvent,
+)
 from db.sessions_repo import create_session_row
 from db.users_repo import provision_user
 
@@ -171,6 +178,15 @@ async def _seed_two_users():
                     title="private title", content="private content",
                 )
             )
+            db.add(
+                LLMTrace(
+                    user_id=uid, session_id=sess, turn_id=1, step=1, ts=_NOW,
+                    model="m", purpose="turn", finish_reason="stop",
+                    prompt_tokens=None, completion_tokens=None,
+                    ttfb_ms=None, duration_ms=None,
+                    input_messages="[]", output="private trace",
+                )
+            )
             await db.commit()
     return uid_a, uid_b, sess_a, sess_b
 
@@ -184,15 +200,23 @@ def test_admin_context_reads_scoped_tables_never_content_tables():
     async def run():
         uid_a, uid_b, *_ = await _seed_two_users()
 
-        # (a) user scoping holds on the new tables, no WHERE needed
+        # (a) user scoping holds on the new tables, no WHERE needed —
+        # llm_traces included (FR-49 / NFR-8: A cannot read B's traces)
         async with user_scoped_session(uid_a) as db:
-            for model in (UsageEvent, TurnMetric):
+            for model in (UsageEvent, TurnMetric, LLMTrace):
                 rows = (await db.execute(select(model))).scalars().all()
                 assert {r.user_id for r in rows} == {uid_a}
 
         # (b) neither setting: zero rows everywhere
         async with session_factory()() as db:
-            for model in (Session, UsageEvent, TurnMetric, TranscriptEvent, Artifact):
+            for model in (
+                Session,
+                UsageEvent,
+                TurnMetric,
+                TranscriptEvent,
+                Artifact,
+                LLMTrace,
+            ):
                 assert (await db.execute(select(model))).scalars().all() == []
 
         # (c) admin context reads across users on the three scoped tables
@@ -204,8 +228,9 @@ def test_admin_context_reads_scoped_tables_never_content_tables():
                 }
                 assert {uid_a, uid_b} <= users
 
-            # (d) ...and ZERO rows from the content tables, even here
-            for model in (TranscriptEvent, Artifact):
+            # (d) ...and ZERO rows from the content tables, even here —
+            # llm_traces is content (FR-49: no admin surface renders a trace)
+            for model in (TranscriptEvent, Artifact, LLMTrace):
                 assert (await db.execute(select(model))).scalars().all() == []
 
     asyncio.run(run())

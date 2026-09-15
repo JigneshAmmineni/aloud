@@ -99,6 +99,37 @@ class TurnMetric(Base):
     stages_ms: Mapped[dict | None] = mapped_column(JSON)  # per-stage TTFBs (names+ms)
 
 
+class LLMTrace(Base):
+    """FR-49: one row per LLM call the agent loop makes — the loop is built
+    through its trace. Metadata plus DEDICATED 🔒 content columns
+    (input_messages/output: the full text sent and received), separable for
+    NFR-6. RLS-covered like every content table and EXCLUDED from the FR-38
+    admin escape — no admin surface ever renders a trace; access is the
+    developer path (superuser psql / scripts/show_trace.py) only.
+
+    Retention: input_messages stores the full built context per step, so
+    traces grow quadratically per turn — a debugging artifact, prunable
+    without ceremony (unlike usage_events, an audit record)."""
+
+    __tablename__ = "llm_traces"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    session_id: Mapped[str] = mapped_column(String(128), index=True)
+    turn_id: Mapped[int | None] = mapped_column(Integer)
+    step: Mapped[int] = mapped_column(Integer)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    model: Mapped[str] = mapped_column(String(64))
+    purpose: Mapped[str] = mapped_column(String(16))  # turn|greeting|wrap_up
+    finish_reason: Mapped[str] = mapped_column(String(16))  # FR-48 vocabulary
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer)
+    ttfb_ms: Mapped[int | None] = mapped_column(Integer)
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    input_messages: Mapped[str] = mapped_column(Text)  # 🔒 sensitive (JSON)
+    output: Mapped[str] = mapped_column(Text)  # 🔒 sensitive
+
+
 class Artifact(Base):
     __tablename__ = "artifacts"
 
