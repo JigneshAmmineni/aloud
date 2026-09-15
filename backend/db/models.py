@@ -104,10 +104,14 @@ class Artifact(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"), index=True)
-    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    # indexed: list_artifacts (FR-45) filters by user_id alone
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    # FR-45 edit_artifact; list_artifacts orders by most-recent activity
+    # (COALESCE(updated_at, created_at))
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     kind: Mapped[str] = mapped_column(String(24))  # summary|action_items|cleaned_idea
     title: Mapped[str] = mapped_column(Text)  # 🔒 sensitive
     content: Mapped[str] = mapped_column(Text)  # 🔒 sensitive

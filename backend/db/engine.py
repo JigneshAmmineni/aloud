@@ -141,6 +141,10 @@ async def _bootstrap_rls(engine: AsyncEngine, app_password: str) -> None:
         "CREATE INDEX IF NOT EXISTS ix_usage_events_ts ON usage_events (ts);",
         "CREATE INDEX IF NOT EXISTS ix_turn_metrics_ts ON turn_metrics (ts);",
         "CREATE INDEX IF NOT EXISTS ix_sessions_user_id ON sessions (user_id);",
+        # FR-45: edit_artifact adds updated_at; list_artifacts filters by
+        # user_id alone (pre-§4.10 databases predate both).
+        "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;",
+        "CREATE INDEX IF NOT EXISTS ix_artifacts_user_id ON artifacts (user_id);",
         """
         UPDATE transcript_events te SET user_id = s.user_id
         FROM sessions s WHERE te.session_id = s.id AND te.user_id IS NULL;
