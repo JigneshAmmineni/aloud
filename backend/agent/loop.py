@@ -6,7 +6,8 @@ spike's pass/fail criteria, FR-42):
   - the pipeline runs with a non-LLMService stage in the LLM slot;
   - text frames stream through sentence aggregation to TTS and are heard;
   - the greeting fires (LLMContextFrame arrives with no user turn);
-  - barge-in interrupts the canned stream (InterruptionFrame cancels it);
+  - barge-in interrupts the canned stream (via _start_interruption — the
+    spike's key finding, see the override below);
   - the latency observer still logs turn.latency and the turn tracker
     still numbers turns (FR-47's survivals).
 
@@ -19,7 +20,6 @@ import asyncio
 
 from loguru import logger
 from pipecat.frames.frames import (
-    InterruptionFrame,
     LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
@@ -43,16 +43,22 @@ class SpikeLoopProcessor(FrameProcessor):
         super().__init__(**kwargs)
         self._response_task = None
 
+    async def _start_interruption(self):
+        # The framework's REAL interruption hook. Pipecat dispatches the
+        # broadcast InterruptionFrame here (a SystemFrame handled out of
+        # band, before process_frame), flushing this processor's own queue
+        # — but it knows nothing of the detached streaming task we spawned.
+        # Cancel it, or it keeps pushing words into TTS after the flush and
+        # the bot talks over the user. Catching InterruptionFrame in
+        # process_frame was the wrong seam (spike finding).
+        if self._response_task:
+            await self.cancel_task(self._response_task)
+            self._response_task = None
+        await super()._start_interruption()
+
     async def process_frame(self, frame, direction):
         await super().process_frame(frame, direction)
-        if isinstance(frame, InterruptionFrame):
-            # The spike's barge-in proof: cancel the in-flight canned
-            # stream, exactly as the LLM service cancels its own.
-            if self._response_task:
-                await self.cancel_task(self._response_task)
-                self._response_task = None
-            await self.push_frame(frame, direction)
-        elif isinstance(frame, LLMContextFrame):
+        if isinstance(frame, LLMContextFrame):
             # A turn is ready (user turn or the greeting's LLMRunFrame,
             # both arrive here via the user aggregator).
             if self._response_task:
