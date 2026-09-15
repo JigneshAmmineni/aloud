@@ -1,6 +1,7 @@
 """CompanionAgent: builds and runs one session's pipeline (SDD §2.3, §2.4)."""
 
 import asyncio
+import os
 import time
 
 from loguru import logger
@@ -137,17 +138,30 @@ class CompanionAgent:
         stt, llm, tts, context, user_agg, assistant_agg = build_pipeline_parts(
             self._settings, self._documents
         )
-        llm.register_function(
-            "create_artifact",
-            make_create_artifact_handler(session_id, self._user_id),
-        )
+        # FR-42 spike switch: swap the LLM stage for the canned-response
+        # processor to prove the stage swap (TTS streaming + barge-in +
+        # observers intact) before the real loop is built in its place.
+        if os.getenv("AGENT_LOOP_SPIKE") == "1":
+            from agent.loop import SpikeLoopProcessor
+
+            llm_stage = SpikeLoopProcessor()
+            log_spike = logger.bind(
+                session_id=session_id, component="agent.loop"
+            )
+            log_spike.warning("AGENT_LOOP_SPIKE active — canned responses only")
+        else:
+            llm_stage = llm
+            llm.register_function(
+                "create_artifact",
+                make_create_artifact_handler(session_id, self._user_id),
+            )
 
         pipeline = Pipeline(
             [
                 transport.input(),
                 stt,
                 user_agg,
-                llm,
+                llm_stage,
                 tts,
                 transport.output(),
                 assistant_agg,
