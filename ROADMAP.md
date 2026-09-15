@@ -82,6 +82,36 @@ handled inside Pipecat's LLM service.
 - Exact loop semantics, tool set, and failure behavior are decided when this
   feature is specced.
 
+### 3.1 System instructions fine-tuning — the agent's conversational character
+
+Next up. Small, prompt-only PR (plus tests pinning the new behaviors); no
+loop or pipeline changes. Live testing of feature 3 showed the agent
+steering the conversation too strongly — its default is pressure-testing
+and challenging everything said, which makes it dominate.
+
+Target character: **an intelligent, productive partner in conversation —
+an assistant / junior exec the user works through — never the one leading
+it.**
+
+- Challenging and pressure-testing is something the agent does when
+  *invited* ("poke holes in this"), not its default posture.
+- During a brain dump / train of thought, minimal acknowledgments are the
+  right move: "hmm", "that makes sense", "go on" — and it's fine to say
+  nothing substantive until the user asks for thoughts.
+- A pause to think is not an invitation: the agent must not fill the
+  user's thinking pauses with questions or suggestions. (The prompt can
+  only shape what it says when a turn does fire; if pause tolerance needs
+  tuning at the turn-detection layer, `FLUX_EOT_THRESHOLD` is the knob —
+  measure before touching it.)
+- Questions stay sharp but rationed: asked when the agent genuinely has
+  one, at most one at a time (FR-9 holds), never to keep the conversation
+  moving.
+- Where the pieces live is mapped in `agent/prompts.py` (base prompt,
+  documents block, fallback/filler/greeting lines, wrap-up instruction)
+  and `agent/tools.py` (tool descriptions — the model reads these too).
+  All of them get vetted in this pass, with A/B listening tests against
+  real brain-dump sessions as the acceptance bar.
+
 ### 4. Documents & artifacts rework
 
 From single upload-at-start + copy-paste artifacts to a real document workspace.

@@ -41,6 +41,22 @@ FALLBACK_LINES = (
     "I lost my train of thought for a second. Go ahead.",
 )
 
+# A FAILED GREETING call must still sound like a greeting: "where were we"
+# at session open reads as a bot assuming a resumed conversation. Canned,
+# like FALLBACK_LINES.
+FALLBACK_GREETING_LINES = (
+    "Hey. What's on your mind?",
+    "Hi there. Where do you want to start today?",
+)
+
+# The greeting's ephemeral trigger (FR-42): Gemini rejects a call whose
+# message list is system-instruction only, so the greeting call carries this
+# one synthetic user line — sent in that call ONLY, never appended to the
+# context (the wrap-up instruction's pattern).
+GREETING_TRIGGER = (
+    "(The user just connected. Greet them as your instructions describe.)"
+)
+
 # FR-43: the speak-first backstop before silent tool work. Generic and
 # topic-agnostic by design; varied to avoid repetition.
 FILLER_LINES = (

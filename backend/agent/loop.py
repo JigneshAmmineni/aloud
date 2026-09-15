@@ -42,7 +42,13 @@ from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from agent.context import ContextProvider
-from agent.prompts import FALLBACK_LINES, FILLER_LINES, WRAP_UP_INSTRUCTION
+from agent.prompts import (
+    FALLBACK_GREETING_LINES,
+    FALLBACK_LINES,
+    FILLER_LINES,
+    GREETING_TRIGGER,
+    WRAP_UP_INSTRUCTION,
+)
 from agent.providers import (
     FINISH_INTERRUPTED,
     LLMDone,
@@ -136,6 +142,7 @@ class AgentLoopProcessor(FrameProcessor):
         self._late_results: dict[str, dict] = {}  # completed, not yet landed
         self._filler_cycle = itertools.cycle(FILLER_LINES)
         self._fallback_cycle = itertools.cycle(FALLBACK_LINES)
+        self._greeting_fallback_cycle = itertools.cycle(FALLBACK_GREETING_LINES)
 
     # ---- frame handling --------------------------------------------------
 
@@ -243,6 +250,11 @@ class AgentLoopProcessor(FrameProcessor):
         messages = self._context.build(turn_id=state.turn_id, step=state.step)
         if wrap_up:
             messages = messages + [{"role": "system", "content": WRAP_UP_INSTRUCTION}]
+        elif purpose == "greeting":
+            # Ephemeral trigger, this call only (never appended): the built
+            # context is system-prompt-only here, and Gemini rejects a call
+            # with an empty contents list.
+            messages = messages + [{"role": "user", "content": GREETING_TRIGGER}]
         state.purpose = purpose
         state.messages = messages
         state.step_text = ""
@@ -462,8 +474,13 @@ class AgentLoopProcessor(FrameProcessor):
     async def _speak_fallback(self, state: _TurnState, reason: str) -> None:
         """FR-42's degrade path: a brief spoken canned line and a clean end
         of turn. Nothing FROM THE MODEL is appended; a filler the user
-        already heard is appended alone (FR-43: heard words never vanish)."""
-        line = next(self._fallback_cycle)
+        already heard is appended alone (FR-43: heard words never vanish).
+        A failed GREETING falls back to a canned greeting — "where were we"
+        at session open would read as a resumed-session assumption."""
+        if state.purpose == "greeting":
+            line = next(self._greeting_fallback_cycle)
+        else:
+            line = next(self._fallback_cycle)
         self._log.bind(
             event="agent.fallback", turn_id=state.turn_id, reason=reason
         ).warning(f"spoken fallback (reason: {reason})")

@@ -22,7 +22,13 @@ from pipecat.frames.frames import LLMTextFrame
 import agent.loop as loop_mod
 from agent.context import INTERRUPTED_SUFFIX, ContextProvider
 from agent.loop import AgentLoopProcessor
-from agent.prompts import FALLBACK_LINES, FILLER_LINES, WRAP_UP_INSTRUCTION
+from agent.prompts import (
+    FALLBACK_GREETING_LINES,
+    FALLBACK_LINES,
+    FILLER_LINES,
+    GREETING_TRIGGER,
+    WRAP_UP_INSTRUCTION,
+)
 from agent.providers import LLMDone, LLMTextDelta, LLMToolCall, LLMUsage
 from agent.tools import Tool
 from db.models import LLMTrace, TurnMetric, UsageEvent
@@ -253,11 +259,47 @@ def test_e_greeting_runs_one_toolfree_step_and_speaks():
     assert len(h.llm.calls) == 1
     assert h.llm.calls[0]["tool_choice"] == "none"
     assert h.llm.calls[0]["tools"]  # declared, selection forbidden
+    # the ephemeral trigger rides the CALL (Gemini rejects an empty
+    # contents list) but never enters the context
+    assert h.llm.calls[0]["messages"][-1] == {
+        "role": "user",
+        "content": GREETING_TRIGGER,
+    }
     assert "What's on your mind?" in _pushed_text(h)
     assert handler_ran == []
     built = h.ctx.build()
     assert [m["role"] for m in built] == ["system", "assistant"]  # no user turn
+    assert not any(m.get("content") == GREETING_TRIGGER for m in built)
     assert _queued(h.traces, LLMTrace)[0].purpose == "greeting"
+
+
+def test_failed_greeting_falls_back_to_a_greeting_never_the_snag_line():
+    """A greeting that errors or comes back empty must still SOUND like a
+    greeting — "where were we" at session open reads as a resumed-session
+    assumption (the exact live-test bug this pins)."""
+
+    class ExplodingLLM:
+        def __init__(self):
+            self.calls = []
+
+        async def stream(self, messages, tools=None, tool_choice="auto"):
+            self.calls.append({"messages": messages})
+            raise ValueError("contents are required.")
+            yield  # pragma: no cover
+
+    h = make_loop([])
+    h.loop._llm = ExplodingLLM()
+    asyncio.run(h.loop._run_turn(None))
+    text = _pushed_text(h)
+    assert any(line in text for line in FALLBACK_GREETING_LINES)
+    assert not any(line in text for line in FALLBACK_LINES)
+
+    # the empty-step path (blocked generation) takes the same greeting line
+    h2 = make_loop([[_done("blocked")]])
+    asyncio.run(h2.loop._run_turn(None))
+    text2 = _pushed_text(h2)
+    assert any(line in text2 for line in FALLBACK_GREETING_LINES)
+    assert not any(line in text2 for line in FALLBACK_LINES)
 
 
 def test_f_empty_step_speaks_fallback_appends_nothing_from_model():
