@@ -14,7 +14,6 @@ from google import genai
 from google.genai import types as genai_types
 from pipecat.services.cartesia.tts import CartesiaTTSService, GenerationConfig
 from pipecat.services.deepgram.flux.stt import DeepgramFluxSTTService
-from pipecat.services.google.llm import GoogleLLMService
 
 from app.config import Settings
 
@@ -31,22 +30,6 @@ def make_stt(settings: Settings):
             ),
         )
     raise ValueError(f"Unknown STT_PROVIDER: {settings.stt_provider}")
-
-
-def make_llm(settings: Settings):
-    if settings.llm_provider == "google":
-        return GoogleLLMService(
-            api_key=settings.google_api_key,
-            settings=GoogleLLMService.Settings(
-                model=settings.llm_model,
-                # Thinking OFF: with it on, Flash TTFB blows the §5 latency
-                # budget. Pipecat defaults 2.5 Flash to budget 0 already; set
-                # it explicitly so an upstream default change can't silently
-                # re-enable it.
-                thinking=GoogleLLMService.ThinkingConfig(thinking_budget=0),
-            ),
-        )
-    raise ValueError(f"Unknown LLM_PROVIDER: {settings.llm_provider}")
 
 
 def make_tts(settings: Settings, text_filters: list):

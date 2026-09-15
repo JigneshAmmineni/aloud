@@ -4,20 +4,12 @@ read/write classification (consumed by FR-46's interruption rules).
 Handlers receive verified identity and the panel-announce emit callback
 from session state via ToolContext — never from the model. Queries live in
 db/artifacts_repo; tools stay schema-shaped.
-
-(The legacy FR-12 create_artifact handler for the Pipecat LLM service is
-kept below until the loop replaces that stage.)
 """
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
 from loguru import logger
-from pipecat.adapters.schemas.function_schema import FunctionSchema
-from pipecat.adapters.schemas.tools_schema import ToolsSchema
-from pipecat.processors.frameworks.rtvi import RTVIServerMessageFrame
-from pipecat.services.llm_service import FunctionCallParams
 
 from db.artifacts_repo import (
     append_artifact_content,
@@ -26,8 +18,7 @@ from db.artifacts_repo import (
     list_artifact_rows,
     replace_artifact_content,
 )
-from db.engine import user_scoped_session
-from db.models import Artifact, UsageEvent
+from db.models import Artifact
 
 ARTIFACT_KINDS = ("summary", "action_items", "cleaned_idea")
 
@@ -312,122 +303,3 @@ def registry_schemas(registry: list[Tool]) -> list[dict]:
         {"name": t.name, "description": t.description, "parameters": t.parameters}
         for t in registry
     ]
-
-CREATE_ARTIFACT_SCHEMA = FunctionSchema(
-    name="create_artifact",
-    description=(
-        "Write up an artifact of the conversation and put it on the user's "
-        "screen: a structured summary, a list of action items, or a cleaned-up "
-        "version of the user's idea. Use only when the user asks for a write-up."
-    ),
-    properties={
-        "title": {
-            "type": "string",
-            "description": "Short, human-readable title for the artifact.",
-        },
-        "kind": {
-            "type": "string",
-            "enum": list(ARTIFACT_KINDS),
-            "description": "What kind of write-up this is.",
-        },
-        "content": {
-            "type": "string",
-            "description": (
-                "The artifact body. Plain text with simple structure; this is "
-                "read on screen, not spoken."
-            ),
-        },
-    },
-    required=["title", "kind", "content"],
-)
-
-
-def tool_schemas() -> ToolsSchema:
-    return ToolsSchema(standard_tools=[CREATE_ARTIFACT_SCHEMA])
-
-
-def make_create_artifact_handler(session_id: str, user_id: str):
-    """Build the per-session create_artifact handler (registered on the LLM)."""
-    log = logger.bind(session_id=session_id, component="agent.tools")
-
-    async def create_artifact(params: FunctionCallParams):
-        title = str(params.arguments.get("title", "")).strip() or "Untitled"
-        kind = params.arguments.get("kind", "summary")
-        if kind not in ARTIFACT_KINDS:
-            kind = "summary"
-        content = str(params.arguments.get("content", "")).strip()
-        if not content:
-            await params.result_callback(
-                {"status": "error", "error": "content is required"}
-            )
-            return
-
-        created_at = datetime.now(timezone.utc)
-        row = Artifact(
-            session_id=session_id,
-            user_id=user_id,
-            kind=kind,
-            title=title,
-            content=content,
-        )
-        try:
-            async with user_scoped_session(user_id) as db:
-                db.add(row)
-                # FR-32/FR-38: the metadata-only artifact_created event —
-                # admin views count artifacts from usage_events, never from
-                # the content-bearing table. Same transaction: count and
-                # artifact can't diverge.
-                db.add(
-                    UsageEvent(
-                        user_id=user_id,
-                        session_id=session_id,
-                        turn_id=None,
-                        ts=created_at,
-                        stage="artifact",
-                        unit="count",
-                        quantity=1.0,
-                        detail=kind,
-                    )
-                )
-                await db.commit()
-                # No refresh: row.id is already populated by the INSERT's
-                # RETURNING at flush, and a refresh AFTER commit would run in
-                # a new transaction whose RLS user context has evaporated
-                # (transaction-local set_config) — zero rows, loud failure.
-        except Exception as e:
-            log.bind(event="tool.create_artifact_failed").error(
-                f"artifact save failed: {e}"
-            )
-            await params.result_callback(
-                {"status": "error", "error": "the artifact could not be saved"}
-            )
-            return
-
-        await params.llm.push_frame(
-            RTVIServerMessageFrame(
-                data={
-                    "type": "artifact.created",
-                    "artifact": {
-                        "id": row.id,
-                        "title": title,
-                        "kind": kind,
-                        "content": content,
-                        "created_at": created_at.isoformat(),
-                    },
-                }
-            )
-        )
-        # No title in the log line: artifacts.title is a 🔒 sensitive column,
-        # and INFO-level lines ship to Cloud Logging (FR-39/NFR-9).
-        log.bind(event="tool.invoked", tool="create_artifact", kind=kind).info(
-            f"artifact saved ({kind}, {len(content)} chars)"
-        )
-        await params.result_callback(
-            {
-                "status": "created",
-                "title": title,
-                "note": "Artifact is now visible on the user's screen.",
-            }
-        )
-
-    return create_artifact

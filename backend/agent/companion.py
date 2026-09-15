@@ -1,7 +1,15 @@
-"""CompanionAgent: builds and runs one session's pipeline (SDD §2.3, §2.4)."""
+"""CompanionAgent: builds and runs one session's pipeline (SDD §2.3, §2.4).
+
+§4.10: the pipeline's LLM slot holds our AgentLoopProcessor — Pipecat stays
+the chassis (transport, STT/turn detection, TTS, barge-in propagation); the
+loop is the brain. The user-side aggregator STAYS as turn assembly (it folds
+transcription frames into one user message, deferring to Flux's external
+turn events); its context is scratch only — the FR-44 ContextProvider owns
+the conversation. The assistant-side aggregator and the provider LLM
+service are gone.
+"""
 
 import asyncio
-import os
 import time
 
 from loguru import logger
@@ -19,20 +27,32 @@ from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
 
+from agent.context import ContextProvider
+from agent.loop import AgentLoopObserver, AgentLoopProcessor
 from agent.prompts import build_document_context_block, build_system_prompt
-from agent.providers import make_llm, make_stt, make_tts
+from agent.providers import make_loop_llm, make_stt, make_tts
 from agent.sanitizer import make_text_filters
-from agent.tools import make_create_artifact_handler, tool_schemas
+from agent.tools import build_registry
 from app.config import Settings
 from db.sessions_repo import create_session_row, end_session_row
 from db.transcript_log import TranscriptWriter
 from obs.latency import make_latency_observer
+from obs.trace import TraceRecorder
 from obs.usage import UsageMetricsObserver, UsageRecorder
+
+# FR-46: ONE teardown grace budget for in-flight write tools, spent once —
+# per-session teardown awaits it, or the SIGTERM drain does for everyone;
+# never both.
+WRITE_GRACE_S = 5.0
 
 # Live pipelines by session_id. Serves FR-37's "live sessions now" count
 # (single-instance truth; resets on deploy — accepted in the spec) and the
 # graceful-shutdown goodbye below.
 _live_tasks: dict[str, PipelineTask] = {}
+# FR-46: session-level in-flight-write registry — drain-reachable by
+# construction (the drain must await every session's writes BEFORE its
+# cancel triggers their teardowns).
+_inflight_writes: dict[str, set[asyncio.Task]] = {}
 _draining = False
 
 
@@ -40,12 +60,28 @@ def live_session_count() -> int:
     return len(_live_tasks)
 
 
+async def _await_writes(writes: set[asyncio.Task], log) -> None:
+    """Await in-flight write tools under the single WRITE_GRACE_S budget;
+    a write the expired budget abandons is cancelled and logged at WARNING
+    (FR-46: its only trace must never be asyncio's destroyed-task noise)."""
+    pending = {t for t in writes if not t.done()}
+    if not pending:
+        return
+    done, still_pending = await asyncio.wait(pending, timeout=WRITE_GRACE_S)
+    for task in still_pending:
+        task.cancel()
+        log.bind(event="tool.write_abandoned").warning(
+            "in-flight write abandoned at teardown grace expiry"
+        )
+
+
 async def drain_live_sessions() -> int:
-    """Graceful-shutdown goodbye: before the process dies (SIGTERM — deploys,
-    restarts), tell every connected client its session is ending over the
-    data channel, then cancel the pipelines so each session closes its own
-    row cleanly (end_reason 'interrupted' via the _draining flag) instead of
-    dying hard and leaving orphans for the boot sweep."""
+    """Graceful-shutdown goodbye (SIGTERM — deploys, restarts): tell every
+    connected client the session is ending, await EVERY session's in-flight
+    writes under the one grace budget, and only then cancel the pipelines —
+    the cancel is what triggers per-session teardown, and waiting after it
+    would enqueue completed writes into recorders already stopping (FR-46:
+    the ORDER is the load-bearing part)."""
     global _draining
     _draining = True
     tasks = list(_live_tasks.items())
@@ -58,6 +94,10 @@ async def drain_live_sessions() -> int:
             pass  # a torn connection can't hear the goodbye; cancel anyway
     if tasks:
         await asyncio.sleep(0.5)  # let the message flush over the data channel
+        all_writes = {t for s in _inflight_writes.values() for t in s}
+        await _await_writes(
+            all_writes, logger.bind(component="agent.companion")
+        )
         for session_id, task in tasks:
             try:
                 await task.cancel()
@@ -69,45 +109,44 @@ async def drain_live_sessions() -> int:
     return len(tasks)
 
 
-def build_pipeline_parts(settings: Settings, documents=None):
-    """Per-session services, context, and aggregators — separated from the
-    transport so the assembly contracts are testable (test_pipeline_setup).
+def build_pipeline_parts(settings: Settings, documents=None, *, session_id=""):
+    """Per-session services, the context provider, and the turn-assembly
+    aggregator — separated from the transport so the assembly contracts are
+    testable (test_pipeline_setup).
 
-    `documents` (app.documents.Document list) are injected as a second system
-    message after the base prompt; with none, the context is just the prompt."""
+    `documents` (app.documents.Document list) become the second system
+    message via the FR-44 provider; the aggregator's LLMContext is EMPTY
+    scratch — turn assembly only, reset by the loop after each consumed
+    turn, never read as history."""
     stt = make_stt(settings)
-    llm = make_llm(settings)
     tts = make_tts(
         settings,
         text_filters=make_text_filters(settings.tts_sanitize_enabled),
     )
-
-    messages = [{"role": "system", "content": build_system_prompt()}]
-    if documents:
-        messages.append(
-            {"role": "system", "content": build_document_context_block(documents)}
-        )
-    context = LLMContext(
-        messages=messages,
-        tools=tool_schemas(),
+    context_provider = ContextProvider(
+        build_system_prompt(),
+        build_document_context_block(documents) if documents else None,
+        session_id=session_id,
     )
+    scratch = LLMContext()
     # Flux handles end-of-turn detection itself, so the user aggregator
     # defers to external turn events instead of running its own VAD logic.
-    user_agg, assistant_agg = LLMContextAggregatorPair(
-        context,
+    # The assistant side of the pair retires with the LLM service (FR-44).
+    user_agg, _ = LLMContextAggregatorPair(
+        scratch,
         user_params=LLMUserAggregatorParams(
             user_turn_strategies=ExternalUserTurnStrategies()
         ),
     )
-    return stt, llm, tts, context, user_agg, assistant_agg
+    return stt, tts, context_provider, scratch, user_agg
 
 
 class CompanionAgent:
     """One instance per session: builds the pipeline and runs it to completion.
 
     `user_id` arrives verified from the offer route (the auth seam) and rides
-    session state from here — the session row, transcript writer, and artifact
-    handler all scope by it."""
+    session state from here — the session row, writers, and every tool
+    handler scope by it."""
 
     def __init__(
         self, settings: Settings, documents=None, *, user_id: str, session_id: str
@@ -135,41 +174,53 @@ class CompanionAgent:
             ),
         )
 
-        stt, llm, tts, context, user_agg, assistant_agg = build_pipeline_parts(
-            self._settings, self._documents
+        stt, tts, context_provider, scratch, user_agg = build_pipeline_parts(
+            self._settings, self._documents, session_id=session_id
         )
-        # FR-42 spike switch: swap the LLM stage for the canned-response
-        # processor to prove the stage swap (TTS streaming + barge-in +
-        # observers intact) before the real loop is built in its place.
-        if os.getenv("AGENT_LOOP_SPIKE") == "1":
-            from agent.loop import SpikeLoopProcessor
 
-            llm_stage = SpikeLoopProcessor()
-            log_spike = logger.bind(
-                session_id=session_id, component="agent.loop"
-            )
-            log_spike.warning("AGENT_LOOP_SPIKE active — canned responses only")
-        else:
-            llm_stage = llm
-            llm.register_function(
-                "create_artifact",
-                make_create_artifact_handler(session_id, self._user_id),
-            )
+        writer = TranscriptWriter(session_id, self._user_id)
+        recorder = UsageRecorder(session_id, self._user_id)
+        traces = TraceRecorder(session_id, self._user_id)
+        write_tasks: set[asyncio.Task] = set()
+        _inflight_writes[session_id] = write_tasks
+
+        # FR-45/FR-46: the tools' server-message seam. Safe to call from a
+        # detached write task after the pipeline closed: a silent no-op,
+        # never an unretrieved exception (on teardown paths the client is
+        # gone, so the announce is skipped by design).
+        closed = False
+
+        async def emit(data: dict) -> None:
+            if closed:
+                return
+            try:
+                await task.queue_frames([RTVIServerMessageFrame(data=data)])
+            except Exception:
+                pass
+
+        loop_stage = AgentLoopProcessor(
+            context=context_provider,
+            llm=make_loop_llm(self._settings),
+            registry=build_registry(),
+            session_id=session_id,
+            user_id=self._user_id,
+            model_name=self._settings.llm_model,
+            recorder=recorder,
+            traces=traces,
+            emit=emit,
+            write_registry=write_tasks,
+        )
 
         pipeline = Pipeline(
             [
                 transport.input(),
                 stt,
                 user_agg,
-                llm_stage,
+                loop_stage,
                 tts,
                 transport.output(),
-                assistant_agg,
             ]
         )
-
-        writer = TranscriptWriter(session_id, self._user_id)
-        recorder = UsageRecorder(session_id, self._user_id)
 
         task = PipelineTask(
             pipeline,
@@ -183,6 +234,7 @@ class CompanionAgent:
                 make_latency_observer(session_id, recorder),
                 writer.observer(),
                 UsageMetricsObserver(recorder),
+                AgentLoopObserver(loop_stage),
             ],
             enable_turn_tracking=True,
             conversation_id=session_id,
@@ -232,6 +284,7 @@ class CompanionAgent:
         await create_session_row(session_id, self._user_id)
         writer.start()
         recorder.start()
+        traces.start()
         _live_tasks[session_id] = task
         log.bind(event="session.started").info("Pipeline starting")
         end_reason = "user"  # tap and connection drop are indistinguishable (resume is descoped)
@@ -243,19 +296,41 @@ class CompanionAgent:
             raise
         finally:
             _live_tasks.pop(session_id, None)
+            closed = True  # the emit callback goes silent from here
             if _draining and end_reason == "user":
                 # ended by the shutdown drain, not the user — same label the
                 # boot sweep uses, so deploys never pollute the error signal
                 end_reason = "interrupted"
+            # FR-46 teardown order: (1) await in-flight writes under the ONE
+            # grace budget — unless the drain already spent it for everyone;
+            # (2) flush + stop the writers; (3) close the row. A completed
+            # write's events must land in live queues, so the wait comes
+            # first; the drain path must NOT wait twice.
+            if not _draining:
+                await _await_writes(write_tasks, log)
+            _inflight_writes.pop(session_id, None)
             # FR-32: STT usage = streamed-time proxy, recorded at session end
             # (crash-orphaned sessions are covered by the boot sweep). A
             # session the client never reached streamed nothing: 0 seconds.
             recorder.record_stt_seconds(
                 time.monotonic() - connected_at if connected_at is not None else 0.0
             )
-            await recorder.stop()
-            await writer.stop()
-            await end_session_row(session_id, self._user_id, end_reason)
+            # Writers stop CONCURRENTLY (FR-46: bounded at the max of one
+            # flush ceiling, not the sum); each flush is already
+            # deadline-bounded by FLUSH_TIMEOUT_S. recorder.stop() also
+            # flushes a measured mid-turn row first (FR-47: teardown
+            # mid-turn is a turn end).
+            await asyncio.gather(recorder.stop(), writer.stop(), traces.stop())
+            try:
+                # deadline-bounded row close (FR-46's teardown arithmetic)
+                await asyncio.wait_for(
+                    end_session_row(session_id, self._user_id, end_reason),
+                    timeout=2.0,
+                )
+            except Exception as e:
+                log.bind(event="session.row_close_failed").error(
+                    f"end_session_row failed or timed out: {e!r}"
+                )
             log.bind(event="session.ended", end_reason=end_reason).info(
                 "Pipeline finished"
             )

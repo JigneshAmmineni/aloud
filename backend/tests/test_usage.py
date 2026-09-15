@@ -49,17 +49,15 @@ def test_recorder_writes_events_with_turn_identity(tmp_path):
         recorder.start()
 
         recorder.current_turn = 1
-        recorder.record_llm_usage(100, 40)
+        recorder.record_llm_usage(100, 40, turn_id=1)
         recorder.record_tts_characters(250)
-        recorder.record_turn_metric(1800, {"ttfb.llm": 900})
         recorder.current_turn = 2
-        recorder.record_llm_usage(120, 0)  # zero completion: only tokens_in
+        recorder.record_llm_usage(120, 0, turn_id=2)  # zero completion: only tokens_in
         recorder.record_stt_seconds(93.5)  # session-level, no turn
         await recorder.stop()
 
         async with session_factory()() as db:
             events = (await db.execute(select(UsageEvent))).scalars().all()
-            metrics = (await db.execute(select(TurnMetric))).scalars().all()
 
         by_key = {(e.stage, e.unit, e.turn_id): e.quantity for e in events}
         assert by_key == {
@@ -70,16 +68,12 @@ def test_recorder_writes_events_with_turn_identity(tmp_path):
             ("stt", "seconds", None): 93.5,
         }
         assert all(e.user_id == "uid-a" and e.session_id == "s-1" for e in events)
-        assert len(metrics) == 1
-        assert metrics[0].turn_id == 1
-        assert metrics[0].eot_to_first_audio_ms == 1800
-        assert metrics[0].stages_ms == {"ttfb.llm": 900}
 
     asyncio.run(run())
 
 
 def test_turn_metric_skipped_without_turn_context(tmp_path):
-    """A breakdown arriving before any turn started (no turn number) is
+    """A measurement arriving before any turn started (no turn number) is
     logged but not persisted — there is no turn to attribute it to."""
 
     async def run():
@@ -87,7 +81,9 @@ def test_turn_metric_skipped_without_turn_context(tmp_path):
         recorder = UsageRecorder("s-1", "uid-a")
         recorder.start()
         assert recorder.current_turn is None
-        recorder.record_turn_metric(1500, {})
+        recorder.record_step_stage(None, "step.1.ttfb.llm", 400)
+        recorder.record_measurement(1500)
+        recorder.turn_ended(None)
         await recorder.stop()
 
         async with session_factory()() as db:
@@ -96,9 +92,11 @@ def test_turn_metric_skipped_without_turn_context(tmp_path):
     asyncio.run(run())
 
 
-def test_metrics_observer_dispatches_and_dedups(tmp_path):
-    """UsageMetricsObserver: LLM/TTS usage metrics frames become events; the
-    same frame re-observed at the next pipeline hop records once."""
+def test_metrics_observer_keeps_tts_only_and_dedups(tmp_path):
+    """FR-47 mandated (iv), observer half: the metrics-frame observer
+    records TTS only — an LLM usage metric in the same frame is IGNORED,
+    because the loop records LLM usage directly from the provider response
+    and nothing may double-count. Dedup across pipeline hops unchanged."""
 
     async def run():
         await _setup_db(tmp_path)
@@ -125,8 +123,6 @@ def test_metrics_observer_dispatches_and_dedups(tmp_path):
         async with session_factory()() as db:
             events = (await db.execute(select(UsageEvent))).scalars().all()
         assert {(e.stage, e.unit, e.quantity, e.turn_id) for e in events} == {
-            ("llm", "tokens_in", 10.0, 3),
-            ("llm", "tokens_out", 5.0, 3),
             ("tts", "characters", 17.0, 3),
         }
 

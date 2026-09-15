@@ -26,7 +26,34 @@ EXPECTED_SCHEMA = {
         "turn_id",
         "latency_ms",
     },
-    "artifacts": {"id", "session_id", "user_id", "created_at", "kind", "title", "content"},
+    "artifacts": {
+        "id",
+        "session_id",
+        "user_id",
+        "created_at",
+        "updated_at",  # FR-45 edit_artifact
+        "kind",
+        "title",
+        "content",
+    },
+    # FR-49: per-call LLM traces — metadata plus two 🔒 content columns
+    "llm_traces": {
+        "id",
+        "user_id",
+        "session_id",
+        "turn_id",
+        "step",
+        "ts",
+        "model",
+        "purpose",
+        "finish_reason",
+        "prompt_tokens",
+        "completion_tokens",
+        "ttfb_ms",
+        "duration_ms",
+        "input_messages",
+        "output",
+    },
     # FR-32/FR-33: metadata-only usage + latency tables (no sensitive columns)
     "usage_events": {
         "id",
@@ -56,6 +83,10 @@ SENSITIVE_COLUMNS = {
     ("transcript_events", "text"),
     ("artifacts", "title"),
     ("artifacts", "content"),
+    # FR-49: a trace IS content — full text sent to and received from the
+    # LLM; excluded from every admin surface, prunable without ceremony.
+    ("llm_traces", "input_messages"),
+    ("llm_traces", "output"),
 }
 
 

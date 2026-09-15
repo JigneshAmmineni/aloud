@@ -21,13 +21,42 @@ Try to minimize interrupting the user's flow/train-of-thought when they are on a
 Only ask a question or make a suggestion when you genuinely have one. 
 
 When the user asks you to write something up — a summary, action items, or \
-a cleaned-up version of their idea — use the create_artifact tool. The \
-artifact appears on their screen, so after creating it, confirm in one short \
-spoken sentence that it's there; never read the artifact's content aloud. \
-Only create an artifact when the user asks for one.
+a cleaned-up version of their idea — use the create_artifact tool. When they \
+refer to an earlier write-up, from this session or a past one, use \
+list_artifacts to find it, read_artifact to see its content, and \
+edit_artifact to change or extend it. Before you invoke any tool, say one \
+short natural acknowledgment out loud first, like "let me write that up" — \
+then call the tool. Artifacts appear on the user's screen, so after creating \
+or editing one, confirm in one short spoken sentence that it's there; never \
+read an artifact's content aloud. Only touch artifacts when the user asks.
 
 When the conversation starts, greet the user with one short sentence and \
 invite them to start thinking out loud."""
+
+# FR-42: spoken when a step fails (LLM error, blocked or empty generation,
+# tool handler crash). Canned lines, never an LLM call — no trace row.
+FALLBACK_LINES = (
+    "Sorry, I hit a snag there. Where were we?",
+    "Hm, something went wrong on my end. Say that again?",
+    "I lost my train of thought for a second. Go ahead.",
+)
+
+# FR-43: the speak-first backstop before silent tool work. Generic and
+# topic-agnostic by design; varied to avoid repetition.
+FILLER_LINES = (
+    "One moment.",
+    "Let me get that.",
+    "Just a second.",
+    "On it.",
+)
+
+# FR-42: the cap's forced final step — injected into that one call's
+# message list, never appended to the context.
+WRAP_UP_INSTRUCTION = (
+    "You have used your tool budget for this turn. Do not call any more "
+    "tools. Wrap up now: tell the user in one or two short spoken sentences "
+    "where things stand and what you did."
+)
 
 
 def build_system_prompt() -> str:

@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 
 from loguru import logger
 from pipecat.frames.frames import MetricsFrame
-from pipecat.metrics.metrics import LLMUsageMetricsData, TTSUsageMetricsData
+from pipecat.metrics.metrics import TTSUsageMetricsData
 from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.processors.frame_processor import FrameDirection
 
@@ -122,20 +122,6 @@ class UsageRecorder:
             )
         )
 
-    def record_turn_metric(self, eot_to_first_audio_ms: int, stages_ms: dict) -> None:
-        if self.current_turn is None:
-            return  # no turn context; the latency log line still exists
-        self._writer.enqueue(
-            TurnMetric(
-                user_id=self._user_id,
-                session_id=self._session_id,
-                turn_id=self.current_turn,
-                ts=datetime.now(timezone.utc),
-                eot_to_first_audio_ms=eot_to_first_audio_ms,
-                stages_ms=stages_ms,
-            )
-        )
-
     # -- FR-47 per-turn metrics buffer (loop + latency observer) -----------
 
     def record_step_stage(self, turn_id: int | None, key: str, ms: int) -> None:
@@ -235,7 +221,11 @@ class UsageRecorder:
 
 class UsageMetricsObserver(BaseObserver):
     """Taps MetricsFrames for the usage the pipeline already emits
-    (enable_usage_metrics=True) and enqueues via the recorder."""
+    (enable_usage_metrics=True) and enqueues via the recorder.
+
+    TTS ONLY (FR-47): LLM usage is recorded in exactly one place — the
+    loop, directly from the provider's response — so nothing can
+    double-count even if a future stage emits LLM metrics frames."""
 
     def __init__(self, recorder: UsageRecorder, **kwargs):
         super().__init__(**kwargs)
@@ -250,10 +240,5 @@ class UsageMetricsObserver(BaseObserver):
             return
         self._seen.add(frame.id)
         for metric in frame.data:
-            if isinstance(metric, LLMUsageMetricsData):
-                usage = metric.value
-                self._recorder.record_llm_usage(
-                    usage.prompt_tokens or 0, usage.completion_tokens or 0
-                )
-            elif isinstance(metric, TTSUsageMetricsData):
+            if isinstance(metric, TTSUsageMetricsData):
                 self._recorder.record_tts_characters(metric.value or 0)
