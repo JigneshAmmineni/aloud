@@ -77,7 +77,7 @@ User explicitly asks for the agent's opinion, alternatives, or next steps. The a
 *FR-19 (resume after connection drop) — moved to §6 Out of Scope. A dropped connection simply ends the session.*
 
 ### 4.7 Documents
-- **FR-21** Before a session, the user may attach one or more documents (plain text, Markdown, or PDF). The agent reads the attached documents and can reference and discuss them during the session. Attached documents are held in memory for that session only and are not persisted — see §6 (persistence is deferred to the future memory layer).
+- **FR-21** Before a session, the user may attach one or more documents (plain text, Markdown, or PDF). The agent reads the attached documents and can reference and discuss them during the session. Uploaded documents persist to the user's document workspace (§4.11, FR-51); the attach-and-inject flow itself is unchanged, and mid-conversation upload remains deferred (§6 — feature 5 territory).
 
 ### 4.8 Authentication & Accounts
 
@@ -1146,6 +1146,265 @@ on session end: ONE WRITE_GRACE_S budget, spent once — End-tap/disconnect:
 
 ---
 
+### 4.11 Documents & Artifacts Rework
+
+Purpose: turn the single upload-at-start flow and the ephemeral artifact
+boxes into a real document workspace. Today an agent-written artifact is a
+copy-paste box that dies on page reload (client-only state, no HTTP route,
+no update path), and an uploaded document vanishes into an in-memory store
+the moment the session starts. Both become **documents**: persistent,
+listable, previewable rows the agent reads and edits through its §4.10
+tools and the user watches change live in a preview pane. This feature
+lands after §4.10 and assumes its machinery — the loop, the tool registry
+(FR-45), the emit callback, and the panel-upsert announce are what it
+extends. Four design principles govern every FR below:
+
+1. **One document model** (memory.md §11's decided direction). An
+   agent-produced artifact and a user-uploaded file are the same kind of
+   thing — a row in one `documents` table with a `source` discriminator —
+   never two parallel systems. One storage model, one tool family, one
+   announce path, one preview pane; and feature 6 later chunks and embeds
+   one table, not two.
+2. **The agent is the editor; the UI is a viewer.** The workspace is
+   defined as tools of the §4.10 agent — the roadmap's charter for this
+   feature: list/read/create/edit run through the loop's registry. The
+   browser renders, downloads, and uploads; it never edits content.
+   User-side editing and two-way co-editing are explicitly later (own
+   spec).
+3. **Content is 🔒, metadata is not, admin stays blind.** `title` and
+   `content` are dedicated sensitive columns (NFR-6) — filenames included:
+   the existing log discipline already treats filenames as content-class.
+   `documents` joins the RLS tables and is never admin-readable (FR-38's
+   enumeration is amended). Admin counting stays on usage events, which
+   keep their existing `artifact` stage vocabulary — an accepted naming
+   seam, documented below, not an oversight.
+4. **Off the hot path, on the existing paths.** The workspace's HTTP
+   surface (list/fetch) is ordinary authed request/response the voice
+   pipeline never sees; in-session changes reach the client through the
+   same data-channel server-message path the panel already consumes
+   (FR-45's upsert), renamed to the document vocabulary.
+
+Out of scope, deliberately: multiple/adjustable preview panes and live
+co-editing (later, own spec — roadmap); mid-conversation uploads and
+proactive pickup (feature 5, which also deprecates the
+upload-before-session flow); chunking/embedding/retrieval (feature 6);
+per-document delete (arrives with NFR-7's delete-my-data work — noted
+here so it is not silently dropped); PDF original-byte storage, preview,
+or re-download (v1 stores extracted text only — the consequence is named
+in FR-51); encryption at rest (post-MVP, NFR-6).
+
+- **FR-50** One `documents` table replaces `artifacts`. Metadata
+  columns: `id`; `user_id` (FK, indexed — FR-45's `list` reasoning
+  transfers); `session_id` (nullable FK: the creating session for agent
+  documents, NULL for uploads, which precede `/start`); `source`
+  (`uploaded` | `agent`); `kind` (agent documents keep FR-12's
+  `summary` | `action_items` | `cleaned_idea`; NULL for uploads);
+  `format` (`markdown` | `text` | `pdf` — the render/edit switch: agent
+  documents are always `markdown`, uploads get it from the existing
+  extension-first detection); `created_at`; `updated_at` (nullable —
+  FR-45's activity ordering `COALESCE(updated_at, created_at)`
+  transfers). Content-class 🔒 columns: `title` (for uploads, the
+  original filename — filenames are content by the established log
+  rule) and `content` (generated or extracted text). RLS: `documents`
+  joins the user-owned table set with the standard four policies and is
+  **not** in the admin-read set — **FR-31's table list, FR-38's
+  content-table enumeration, and FR-38 test (d) are amended to read
+  `documents` for `artifacts`**. Usage-event vocabulary is deliberately
+  unchanged: creates and edits keep `stage='artifact'`
+  (`artifact_created` / `artifact_edited`, FR-32) so §4.9's stage.unit
+  aggregation, FR-38's event-sourced counts, and recorded history all
+  hold with no data migration — the stage label is a historical wire
+  name; the product noun is "document". Uploads emit **no** usage event
+  (nothing was spent; the existing `document.uploaded` structured log —
+  char count, never filename — remains the operational record).
+  Migration: implementation ships an **idempotent pre-serve migration**
+  (the RLS-bootstrap / boot-sweep slot) carrying every existing
+  `artifacts` row into `documents` with `source='agent'`,
+  `format='markdown'`, title/content/timestamps intact — dogfooding
+  rows are real user data; loss is not acceptable. The standing deploy
+  caveat applies and is accepted: rollback does not reverse migrations
+  (CURRENT-ARCHITECTURE.md), so rolling back past this release needs
+  manual DB attention. Mandated tests: a seeded legacy `artifacts` row
+  surfaces post-migration as an agent document, fields intact; the
+  migration is idempotent (a second boot no-ops); the NFR-8 negative on
+  `documents` (user A cannot read user B's rows); FR-38 test (d)
+  extended — the admin context reads zero `documents` rows.
+- **FR-51** Uploads persist; the attach flow is behavior-identical.
+  `POST /documents` keeps its contract (multipart, one file per
+  request, extension-first type detection, extraction rules and error
+  strings, `MAX_FILE_BYTES` 5 MB, `MAX_DOC_CHARS` 200k) and now writes
+  a `documents` row (`source='uploaded'`) through `user_scoped_session`
+  instead of the in-memory store — the `InMemoryDocumentStore` retires
+  into `db/documents_repo.py`, the swap its own docstring names. The
+  response's `id` becomes the row id. Session attach is unchanged in
+  semantics: the client sends the ids of **this visit's uploads** to
+  `/start`, attach resolution reads them owner-scoped from the repo,
+  and `build_document_context_block` injects them in full under
+  `MAX_TOTAL_CHARS` (400k) exactly as today (FR-21). Workspace
+  documents from past visits are **not** auto-attached — a workspace of
+  thirty documents would drown the injected block; the agent reaches
+  older documents on request through FR-53's tools, and automatic
+  pickup is feature 5/6 territory. The upload list's × removes a
+  document from the attach set only — it never deletes the row (there
+  is no delete in v1). Named consequence of extracted-text-only
+  storage: a PDF's original bytes are gone after extraction — preview,
+  agent reads, and download all see the extracted text; download of an
+  upload reproduces that text, never the original file. Accepted for
+  v1; original-byte storage is out of scope above. One robustness win
+  is stated so it gets tested, not stumbled into: uploads now survive a
+  process restart between upload and `/start` (the ids the client holds
+  resolve from the DB, not from process memory). Mandated tests: the
+  existing extraction/cap/ownership suites hold against the repo-backed
+  store; upload → restart → `/start` still attaches; user A's `/start`
+  naming user B's document id attaches nothing (owner-scoped get, RLS
+  backstop).
+- **FR-52** Workspace HTTP surface, owner-scoped via
+  `get_current_user_id` (never an admin path): `GET /documents` — the
+  user's documents, both sources, newest-activity-first
+  (`COALESCE(updated_at, created_at)` DESC), capped
+  (`WORKSPACE_LIST_CAP`, default 100 — a revisit note, not a pager;
+  paginate when someone hits it), returning metadata plus `title` and a
+  computed `char_count`, **never `content`**. `GET /documents/{id}` —
+  one owned document with full content, serving preview and download;
+  another user's id is not-found (the NFR-8 negative is mandated).
+  Download is client-composed from the fetched content (a Blob saved
+  under the document's title with `.md`/`.txt` extension) — no extra
+  endpoint, nothing new to secure. Routing must be explicit in both
+  environments: the Next rewrite covers only the literal `/documents`
+  today and must cover `/documents/{id}`; the prod Caddyfile's backend
+  matcher lists no `/documents` path at all (prod currently reaches the
+  upload endpoint only through Next's rewrite hop) — both matchers are
+  fixed as part of this FR.
+- **FR-53** The agent's document tools — FR-45 amended: same registry,
+  same discipline, renamed and extended. Renames: `create_artifact` →
+  `create_document`, `list_artifacts` → `list_documents`,
+  `read_artifact` → `read_document`, `edit_artifact` →
+  `edit_document`; knobs follow (`LIST_DOCUMENTS_CAP`,
+  `READ_DOCUMENT_MAX_CHARS`). Every FR-45 rule not amended here
+  transfers verbatim under the new names: provenance (`user_id` never
+  from model arguments; the NFR-8 negative), repo-layer caps and
+  ordering, structured-JSON results, logs carrying names/ids/durations
+  and never content, the create transaction (row + usage event, one
+  commit), the announce-through-emit-callback path, and FR-12's verbal
+  contract (confirm briefly, never read content aloud, act only when
+  asked). What changes:
+  - `list_documents` returns both sources (id, source, kind, format,
+    timestamps, title 🔒) — the agent now sees past uploads too. This
+    widens §6's deliberate cross-session carve-out from artifacts to
+    documents; it stays narrow, explicit, and user-asked.
+  - `read_document` gains **pagination** — FR-45's named escape: a
+    1-based `page` over `READ_DOCUMENT_MAX_CHARS`-sized slices; the
+    result carries `page` and `total_pages`, and the truncation marker
+    appears only when further pages exist. No `page` argument = page 1
+    = today's behavior.
+  - `edit_document` keeps `replace` and `append` exactly as FR-45
+    specced them — the over-cap `replace` refusal and the atomic
+    DB-side `append` concatenation transfer verbatim — and adds
+    **`str_replace`**, the real-editing mode FR-45's accepted
+    consequence promised: `old_str` (non-empty) must occur **exactly
+    once** in the stored content and is replaced by `new_str` (possibly
+    empty — deletion). Enforcement is **atomic and DB-side like
+    `append`**: one UPDATE whose predicate verifies the single
+    occurrence and whose SET performs the replacement, `RETURNING
+    content` for the announce — never read-modify-write (the same
+    outlived-write race FR-46/FR-45 close for `append`). Zero
+    occurrences → a steering tool result ("no match — read the document
+    and copy the text exactly"); more than one → "ambiguous — include
+    more surrounding text". `str_replace` works at **any** content
+    size: an exact match proves the model has seen the text it touches,
+    which is precisely the knowledge the over-cap `replace` refusal
+    exists to guarantee. **FR-45's "effectively append-only past the
+    read cap" consequence is hereby retired** — the escape it named has
+    landed.
+  - Editability is format-gated, not source-gated: `markdown` and
+    `text` documents are editable whichever source they came from
+    (cleaning up an uploaded notes file is a first-class ask);
+    `format='pdf'` is read-only — `edit_document` refuses with a
+    steering result ("read it and create a new document instead"),
+    because extracted PDF text is a lossy projection and editing it in
+    place would misrepresent the upload.
+  - Announces: `document.created` / `document.updated` replace
+    `artifact.created` / `artifact.updated` with the same upsert
+    contract (FR-45); the payload is the document's metadata plus
+    post-edit `content` (the `RETURNING` value — no follow-up SELECT).
+    Frontend and backend ship in one release; in-flight sessions across
+    that deploy die as they do on every deploy (standing behavior,
+    accepted).
+  Mandated tests: (i) FR-45's transferred tests hold under the new
+  names — cap termination, atomic-append concurrency, the 1 `count` /
+  N `edits` aggregation, the NFR-8 negatives; (ii) `str_replace`:
+  zero / one / many occurrence outcomes; empty `new_str` deletes; and a
+  concurrent `append` racing a `str_replace` loses neither edit (both
+  are single statements); (iii) the PDF edit refusal; (iv) pagination:
+  page boundaries are exact, `total_pages` is correct, an out-of-range
+  page returns a steering result, and page 1 equals the unpaginated
+  read.
+- **FR-54** The workspace UI replaces the fixed artifact drawer and the
+  bare upload list on the session console: a workspace region with
+  **two side-by-side scrollable lists** — **Uploaded**
+  (`source='uploaded'`) and **Created** (`source='agent'`) — populated
+  from `GET /documents` when a signed-in user loads the page. Each item
+  shows title, kind/format badge, and timestamp (uploads add char
+  count), with per-item **preview** and **download** affordances
+  (memory.md §11's decided UI). Selecting an item opens the **single
+  preview pane** — one document at a time, whichever was selected last:
+  `markdown` renders as markdown, `text` and `pdf` (extracted text)
+  render preformatted. **Sanitization is a requirement, not a style
+  choice**: document content is model- or user-authored and untrusted
+  in the render context — raw HTML must never execute (markdown
+  rendered with HTML disabled or escaped; a mandated test or lint
+  guard, not an assumption). The upload button lives with the Uploaded
+  list and stays idle-gated — FR-51's attach semantics are unchanged,
+  and the list marks which documents are attached to the next session.
+  The workspace and preview are available both while idle and during an
+  active session (the user talks about what they're previewing); only
+  upload is idle-gated. Empty, loading, and error states exist on the
+  lists and the pane; the pane is dismissible; finer visual design is
+  not specified; NFR-3 applies — on phone widths the lists may stack
+  and the preview may overlay the console full-width. Testable UI
+  notes: a reload shows the same lists (server-backed truth, FR-55);
+  preview renders markdown sanitized; download saves the fetched
+  content under the document's title.
+- **FR-55** Live preview: during a session, `document.created` upserts
+  into the Created list (prepend — newest first), and
+  `document.updated` upserts the item, re-orders by activity, **and, if
+  that document is open in the preview pane, re-renders the pane's
+  content in place** — the roadmap's "watch it write" moment; no
+  polling, no refetch (FR-53's payload carries the full post-edit
+  content). The upsert's insert half stays load-bearing even with
+  FR-54's fetch: an edited document can be absent from the client's
+  capped list. On reload or a fresh visit the workspace rehydrates from
+  `GET /documents` — client-only artifact state (and its lost-on-reload
+  behavior) is retired, and the old "artifacts deliberately kept on
+  unexpected session death" rule is subsumed: the lists are
+  server-backed truth. Mandated tests: backend — the `document.updated`
+  payload carries the post-edit content (per FR-53); client behavior
+  notes — an upsert for an unknown id inserts, an update for the
+  previewed document re-renders it, and a reload shows server truth.
+
+**Amendments this feature makes** (recorded here; the amended FRs stay
+authoritative for everything not named): FR-45 — tool and knob renames,
+`str_replace`, read pagination, announce renames, append-only
+consequence retired (FR-53). FR-31 / FR-38 — `documents` replaces
+`artifacts` in the user-owned table list, the content-table enumeration,
+and test (d) (FR-50). FR-32 / FR-38 counts — deliberately unchanged
+(`stage='artifact'` kept, FR-50). FR-21 — uploads persist (FR-51); the
+attach-and-inject flow is unchanged. §6 — the document-persistence
+deferral narrows to indexing/retrieval; the cross-session carve-out
+speaks the document-tool vocabulary and now includes uploads.
+
+| Knob | Default | Where |
+|---|---|---|
+| `WORKSPACE_LIST_CAP` (`GET /documents`) | 100 | `db/` documents repo (FR-45's rule: caps live in the repo layer) |
+| `LIST_DOCUMENTS_CAP` (tool; renamed from `LIST_ARTIFACTS_CAP`) | 20 | `db/` documents repo |
+| `READ_DOCUMENT_MAX_CHARS` (renamed from `READ_ARTIFACT_MAX_CHARS`; also the `read_document` page size) | 8,000 | `agent/tools.py` |
+| `MAX_FILE_BYTES` (per uploaded file) | 5 MB | unchanged (upload/extraction module) |
+| `MAX_DOC_CHARS` (per document, post-extraction) | 200,000 | unchanged |
+| `MAX_TOTAL_CHARS` (per-session injected block, FR-21) | 400,000 | unchanged |
+| Editable formats (`edit_document` gate) | `markdown`, `text` | `agent/tools.py` |
+
+---
+
 ## 5. Non-Functional Requirements
 
 ### 5.1 Latency
@@ -1160,7 +1419,7 @@ on session end: ONE WRITE_GRACE_S budget, spent once — End-tap/disconnect:
 
 ### 5.3 Privacy
 - **NFR-5** All voice data and transcripts are processed server-side. The privacy policy must disclose this clearly.
-- **NFR-6** Sensitive session content (transcripts, artifacts, future memory entries) must live in dedicated database columns, separable from session metadata, so that encryption at rest can be added post-MVP without schema rework. The encryption itself is deferred — see §6 Out of Scope.
+- **NFR-6** Sensitive session content (transcripts, documents — uploaded and agent-produced, future memory entries) must live in dedicated database columns, separable from session metadata, so that encryption at rest can be added post-MVP without schema rework. The encryption itself is deferred — see §6 Out of Scope.
 - **NFR-7** The user must be able to delete all their data.
 - **NFR-8** User isolation: no authenticated user can read or write another
   user's data. Every query on user-owned tables is scoped by the verified
@@ -1187,9 +1446,9 @@ The following are explicitly not part of this product:
 
 ### Deferred — planned, but out of scope for the MVP demo
 
-- **Cross-session memory** (formerly FR-15–FR-17). The agent starts every session fresh; *automatic* recall is in-session only. Planned later following the MemGPT framework, possibly integrating RAG with clever indexing and semantic vector search, depending on performance. One deliberate carve-out (§4.10, FR-45): the explicit, user-asked artifact tools (`list_artifacts`/`read_artifact`/`edit_artifact`) do reach the user's own artifacts from past sessions — narrow, on-request reads and edits, not memory.
+- **Cross-session memory** (formerly FR-15–FR-17). The agent starts every session fresh; *automatic* recall is in-session only. Planned later following the MemGPT framework, possibly integrating RAG with clever indexing and semantic vector search, depending on performance. One deliberate carve-out (§4.10 FR-45, renamed and widened by §4.11 FR-53): the explicit, user-asked document tools (`list_documents`/`read_document`/`edit_document`) do reach the user's own documents — agent-produced and uploaded — from past sessions: narrow, on-request reads and edits, not memory.
 - **Streaming memory processing.** When cross-session memory lands, it must run in parallel while the user is still speaking — context editing during input, not after the session ends.
-- **Document persistence.** Uploaded documents (FR-21) are ephemeral for the MVP — held in memory for the session and discarded when the process restarts. When cross-session memory lands, documents will persist alongside the conversation.
+- **Document indexing & retrieval.** Document *storage* landed with the workspace (§4.11): uploads and agent output persist as `documents` rows. What stays deferred to the memory layer is making them *retrievable* — chunking, embedding, semantic search — and the proactive mid-conversation pickup that depends on the context engine (feature 5).
 - **Proactive flagging** (formerly FR-8; demo stretch goal). The agent surfacing gaps, contradictions, or connections unprompted, with a user-configurable on/off setting.
 - **Brainstorm/critique mode inference** (formerly FR-10; demo stretch goal). Distinct generative vs. analytical behavior, inferred from context or set explicitly.
 - **Session resume** (formerly FR-19 / NFR-4). A dropped connection ends the session; the user starts a new one.
