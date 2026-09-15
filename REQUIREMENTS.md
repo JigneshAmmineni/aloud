@@ -279,10 +279,13 @@ principles govern every FR below:
   TTS characters per utterance, and an `artifact_created` event
   (`stage = 'artifact'`, `unit = 'count'`, `quantity = 1`, `detail` = the
   artifact's `kind` — never title/content) whenever the create_artifact
-  tool succeeds — and, once §4.10 lands, an `artifact_edited` event in
-  the same shape whenever the `edit_artifact` tool succeeds — so admin
-  views can count artifact activity without touching the content-bearing
-  table (FR-38). STT usage is recorded at session end as the
+  tool succeeds — and, once §4.10 lands, an `artifact_edited` event
+  whenever the `edit_artifact` tool succeeds, with **`unit = 'edits'`**
+  (creates keep `unit = 'count'`): the stage.unit aggregation §4.9's
+  views are built on then separates the two for free, so one create plus
+  three edits can never render as four artifacts — so admin views can
+  count artifact activity without touching the content-bearing table
+  (FR-38). STT usage is recorded at session end as the
   session's audio duration (connect → disconnect, in seconds; the session
   row's start/end timestamps are written in the pipeline's cleanup path, so
   ungraceful disconnects are covered the same as a clean "End" tap) — a
@@ -388,7 +391,8 @@ principles govern every FR below:
     context fails at two independent layers — the untouched write policies
     and the transaction's `READ ONLY` mode (below) — neither a single point
     of failure for the other. The content-bearing tables
-    (`transcript_events`, `artifacts`) never receive it: even with the admin
+    (`transcript_events`, `artifacts` — and `llm_traces` once §4.10
+    lands) never receive it: even with the admin
     context set, a query against them returns zero rows, giving NFR-9 the
     same DB-level backstop that FR-31 gives NFR-8. Where admin views need
     metadata *about* content rows (FR-36's artifact count), the count comes
@@ -415,7 +419,8 @@ principles govern every FR below:
     session): (a) user-scoped contexts remain isolated exactly as before,
     (b) a context with neither setting still returns zero rows, (c) the
     admin context reads across users on the scoped tables, (d) the admin
-    context gets zero rows from `transcript_events` and `artifacts`, and
+    context gets zero rows from `transcript_events` and `artifacts` (and
+    `llm_traces` once §4.10 lands), and
     admin API responses never serialize content columns, (e) writes
     attempted through the admin context fail — covering INSERT, UPDATE,
     **and DELETE** — and, on a non-READ-ONLY transaction with
@@ -710,17 +715,29 @@ FR-7 still governs: the agent acts when the user asks.
     marker.
   - `edit_artifact` — replace or append to one owned artifact's content
     (optionally its title); v1 modes are exactly `replace` and `append` —
-    no diff/patch formats, which are feature-4 territory. Deliberately
-    the second **write** tool: it exercises the FR-46 in-flight-write
-    machinery beyond creation, completes the read → edit chain ("fix the
-    third bullet in yesterday's summary" cannot be answered by context
-    alone — it requires reading and editing the real row), and is
-    therefore the inventory's most clearly evaluatable behavior. Same
-    discipline as create: row update + an `artifact_edited` usage event
-    in `artifact_created`'s shape (FR-32 is amended to name it), panel
-    update announced through the FR-45 emit callback
-    (`artifact.updated`), ownership resolved via the user-scoped repo —
-    the mandated NFR-8 negative test covers it too.
+    no diff/patch formats, which are feature-4 territory. Two rules keep
+    the modes honest: **`replace` is refused — as a tool result steering
+    the model to `append` — whenever the stored content exceeds
+    `READ_ARTIFACT_MAX_CHARS`** (the model would be replacing a tail it
+    provably never saw through the truncating read; there is no
+    versioning or undo in v1, so unseen content must be undeletable);
+    and **`append` is an atomic DB-side concatenation in the repo layer**
+    (`content = content || :text`) — never read-modify-write, which
+    would silently lose an edit when FR-46 lets a write outlive its
+    turn. Deliberately the second **write** tool: it exercises the FR-46
+    in-flight-write machinery beyond creation, completes the read → edit
+    chain ("fix the third bullet in yesterday's summary" cannot be
+    answered by context alone — it requires reading and editing the real
+    row), and is therefore the inventory's most clearly evaluatable
+    behavior. Same discipline as create: row update (artifacts gain an
+    `updated_at` metadata column; `list_artifacts` orders by most-recent
+    activity — `COALESCE(updated_at, created_at)` — so a just-edited
+    artifact surfaces) + an `artifact_edited` usage event (`unit =
+    'edits'`, FR-32 amended to name it), panel update announced through
+    the FR-45 emit callback (`artifact.updated`, which the frontend
+    panel handles by updating the entry in place — `artifact.created` is
+    the only type it knows today), ownership resolved via the
+    user-scoped repo — the mandated NFR-8 negative test covers it too.
   Tool results are structured JSON. Artifact titles/content flowing into
   the model's context is the owner's own data in the owner's own session
   (NFR-5 covers the processing disclosure); logs carry tool names, ids,
@@ -793,12 +810,15 @@ FR-7 still governs: the agent acts when the user asks.
   provisioned by arithmetic, not assertion — every teardown database
   operation is **deadline-bounded** (each background writer's stop
   flushes under `FLUSH_TIMEOUT_S`; `end_session_row` gets an explicit
-  bound of 2s), and the worst-case sum is the spec for the window:
-  0.5s goodbye + 5s grace + ~11s of bounded flushes (two writers, two
-  flush attempts each in the DB-degraded case) + bounded row closes
-  ≈ 19s → `docker-compose.prod.yml` sets **`stop_grace_period: 30s`**
-  (margin included; Docker's 10s default is what SIGKILL — the outcome
-  this clause exists to prevent — was measured against). Usage follows FR-33's rule — *spent is recorded* —
+  bound of 2s), the writers are **stopped concurrently** (three of them
+  once FR-49's trace writer exists — serial stops would price the
+  DB-degraded case at the *sum* of their ceilings, ~33s, past any sane
+  window; concurrent stops bound it at the *max* of one, ~11s), and the
+  worst-case sum is the spec for the window: 0.5s goodbye + 5s grace +
+  ~11s of concurrent bounded flushes + 2s bounded row closes ≈ 19s →
+  `docker-compose.prod.yml` sets **`stop_grace_period: 30s`** (margin
+  included; Docker's 10s default is what SIGKILL — the outcome this
+  clause exists to prevent — was measured against). Usage follows FR-33's rule — *spent is recorded* —
   including partial usage of cancelled steps when the provider reports
   it. Mandated tests: interrupt mid-chain — the write completes, the
   context records the spoken prefix, the cancelled reads' terminal
@@ -873,9 +893,12 @@ FR-7 still governs: the agent acts when the user asks.
 - **FR-48** The loop calls the LLM through a thin provider-agnostic
   streaming client built by an `agent/providers.py` factory, exposing
   four things: text deltas, tool calls, usage counts, and a **finish
-  reason** (normal stop vs. blocked vs. truncated — without it the loop
-  cannot tell an empty ending from a blocked generation, FR-42's
-  empty-step rule). Gemini first
+  reason** (normal stop vs. blocked vs. truncated vs. **interrupted** —
+  the stream cancelled mid-generation by barge-in, whose partial
+  consumption FR-46 records and whose trace row FR-49 keeps; without the
+  vocabulary the loop cannot tell an empty ending from a blocked
+  generation — FR-42's empty-step rule — nor a finished turn from a cut
+  one). Gemini first
   (the provider SDK lives inside the factory, per the hard constraint);
   Claude remains the runner-up swap. Implementation MUST begin with a
   **spike** proving streamed text + native function calling + usage
@@ -889,28 +912,49 @@ FR-7 still governs: the agent acts when the user asks.
   by that feature's own clause — the loop is *built through* its trace,
   not traced after the fact. Every LLM call the loop makes writes one
   row to an `llm_traces` table: `session_id`, `turn_id`, step number,
-  timestamp, model, purpose (`turn` | `greeting` | `wrap_up` |
-  `fallback`), finish reason, prompt/completion tokens, TTFB ms, and
-  duration (metadata) — plus `input_messages` and `output`, the full
-  text sent and received, as **dedicated 🔒 content columns** (NFR-6:
-  separable, encryption-ready). Rows are user-keyed and RLS-covered like
-  every content table, join NFR-7's future delete cascade, and are
-  **excluded from the FR-38 admin escape — no admin surface ever renders
-  a trace** (NFR-9: a trace *is* content; the developer path below is
-  not an admin surface). Capture is NFR-10-shaped: the loop enqueues the
-  row it already holds every field of; the shared background writer
-  flushes; a dropped trace batch logs and drops, never touching the
-  conversation. Access, until feature 7 builds the real surface, is
-  **developer-grade by design**: query the database directly (compose
-  `psql` locally; SSH + `psql` on the VM — 5432 is never public), plus a
-  mandated convenience — `scripts/show_trace.py <session_id>`
-  (local-only, `grant_admin.py`'s pattern): pretty-prints the session
-  turn by turn — each step's input messages, streamed output, tool calls
-  with results and timings, finish reason — the exact execution story of
-  the loop. At `LOG_LEVEL=DEBUG` (dev only, never shipped — FR-39) the
-  loop additionally logs each step's input/output inline: the live view
-  while testing. Retention follows §4.9's usage tables: indefinite at
-  current scale, same revisit trigger.
+  timestamp, model, purpose (`turn` | `greeting` | `wrap_up` — exactly
+  the calls that exist; the FR-42 fallback is a canned line, not an LLM
+  call, so it can have no trace row), finish reason (FR-48's vocabulary,
+  `interrupted` included — the cut-off turns are precisely the ones a
+  trace is for), prompt/completion tokens, TTFB ms, and duration
+  (metadata) — plus `input_messages` and `output`, the full text sent
+  and received, as **dedicated 🔒 content columns** (NFR-6: separable,
+  encryption-ready). Rows are user-keyed and RLS-covered like every
+  content table, join NFR-7's future delete cascade, and are **excluded
+  from the FR-38 admin escape — no admin surface ever renders a trace**
+  (NFR-9: a trace *is* content; the developer path below is not an admin
+  surface; FR-38's content-table enumeration and its test (d) are
+  amended to include `llm_traces`, so the exclusion is guarded, not
+  asserted). Capture is NFR-10-shaped and **per-session like every
+  writer** (FR-31's rule: a write batch never spans users — a
+  cross-session batch would have no single `app.user_id` to set): the
+  loop enqueues the row it already holds every field of into the
+  session's own instance of the shared writer *class*; a dropped trace
+  batch logs and drops, never touching the conversation. Access, until
+  feature 7 builds the real surface, is **developer-grade by design and
+  its role is named**: the application role sees traces only inside the
+  owner's RLS scope; the developer path — compose `psql` locally, SSH +
+  `psql` on the VM (5432 is never public), and the mandated
+  `scripts/show_trace.py <session_id>` (local-only, `grant_admin.py`'s
+  pattern; connects via `DATABASE_URL` as the database owner) — runs as
+  the **owner role, which RLS does not bind**: it reads any session's
+  trace from a `session_id` alone, deliberately, and that is exactly why
+  it exists only behind DB access and never as a product surface. The
+  script pretty-prints the session turn by turn — each step's input
+  messages, streamed output, tool calls with results and timings, finish
+  reason — the exact execution story of the loop. At `LOG_LEVEL=DEBUG`
+  (dev only, never shipped — FR-39) the loop additionally logs each
+  step's input/output inline: the live view while testing. Retention is
+  its own stance, not §4.9's: `input_messages` stores the full built
+  context per step, so traces grow **quadratically per turn** and the
+  "kilobytes per session" basis for indefinite retention does not
+  transfer — traces are a **debugging artifact, prunable without
+  ceremony** (unlike `usage_events`, which is an audit record), with the
+  same revisit trigger as §4.9 as the outer bound. Mandated tests:
+  NFR-8's negative (the app role scopes traces to their owner; user A
+  cannot read user B's), FR-38 test (d) extended (the admin context gets
+  zero rows from `llm_traces`), and NFR-10's fake-queue/no-database
+  split for the trace recorder.
 
 **How the loop works — reference pseudocode and knobs.** Normative for
 FR-42; kept here so the mechanism is editable knowingly.
@@ -972,8 +1016,8 @@ on interruption (FR-46): cancel stream + read tools; writes finish
 on session end: ONE WRITE_GRACE_S budget, spent once — End-tap/disconnect:
     per-session teardown awaits the in-flight-write set BEFORE the
     recorders/writer stop; SIGTERM: the drain owns the wait across all
-    sessions and per-session teardowns do NOT wait again. The whole
-    shutdown fits stop_grace_period=15s (FR-46).
+    sessions and per-session teardowns do NOT wait again; writers stop
+    CONCURRENTLY. The whole shutdown fits stop_grace_period=30s (FR-46).
 ```
 
 | Knob | Default | Where |
@@ -1032,7 +1076,7 @@ The following are explicitly not part of this product:
 
 ### Deferred — planned, but out of scope for the MVP demo
 
-- **Cross-session memory** (formerly FR-15–FR-17). The agent starts every session fresh; *automatic* recall is in-session only. Planned later following the MemGPT framework, possibly integrating RAG with clever indexing and semantic vector search, depending on performance. One deliberate carve-out (§4.10, FR-45): the explicit, user-asked artifact tools (`list_artifacts`/`read_artifact`) do reach the user's own artifacts from past sessions — that is a narrow, on-request read, not memory.
+- **Cross-session memory** (formerly FR-15–FR-17). The agent starts every session fresh; *automatic* recall is in-session only. Planned later following the MemGPT framework, possibly integrating RAG with clever indexing and semantic vector search, depending on performance. One deliberate carve-out (§4.10, FR-45): the explicit, user-asked artifact tools (`list_artifacts`/`read_artifact`/`edit_artifact`) do reach the user's own artifacts from past sessions — narrow, on-request reads and edits, not memory.
 - **Streaming memory processing.** When cross-session memory lands, it must run in parallel while the user is still speaking — context editing during input, not after the session ends.
 - **Document persistence.** Uploaded documents (FR-21) are ephemeral for the MVP — held in memory for the session and discarded when the process restarts. When cross-session memory lands, documents will persist alongside the conversation.
 - **Proactive flagging** (formerly FR-8; demo stretch goal). The agent surfacing gaps, contradictions, or connections unprompted, with a user-configurable on/off setting.
