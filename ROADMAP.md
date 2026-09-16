@@ -162,7 +162,7 @@ The rules:
   - `frontend/app/layout.tsx:21` — the user-facing meta description
   - `.github/workflows/claude-code-review.yml:38` — the reviewer's
     product context
-  - `memory.md:346` — passing mention in a scaling note
+  - `docs/notes/memory.md` — passing mention in a scaling note
 - C-3 still binds everywhere: never therapy/therapist/counselor.
 
 ### 4. Documents & artifacts rework
@@ -194,7 +194,7 @@ agent loop (feature 3), which already owns context assembly per turn.
   and the current conversation.
 - Auto-compression of the conversation section under memory pressure
   (recursive summarization: oldest turns compressed into summaries, raw turns
-  evicted) — per memory.md's MemGPT-style sketch.
+  evicted) — per docs/notes/memory.md's MemGPT-style sketch.
 - Full programmatic control of context assembly each turn, with per-section
   token accounting and instrumentation.
 
@@ -263,6 +263,7 @@ features land:
 
 ## Working notes
 
-[auth.md](auth.md) and [memory.md](memory.md) are brainstorming/learning notes,
-not specs — useful background when speccing features 1 and 4, but REQUIREMENTS.md
-is what implementation and review are held to.
+[docs/notes/auth.md](docs/notes/auth.md) and
+[docs/notes/memory.md](docs/notes/memory.md) are brainstorming/learning
+notes, not specs — useful background when speccing features 1 and 4, but
+REQUIREMENTS.md is what implementation and review are held to.
