@@ -426,6 +426,22 @@ In rough order of when they'd pay off:
 
 1. **DB off the VM** → Cloud SQL or managed Postgres (backups, point-in-time
    recovery) — first move once user data matters.
+   **Latency caveat — read before making this move:** today every
+   backend → Postgres query is a loopback call on the same VM
+   (sub-millisecond round trip), and the system is priced on that
+   assumption: each user-scoped transaction is at least two round trips
+   (`SET LOCAL app.user_id` + the query), the agent loop's DB-backed
+   tools (artifact list/read/edit today; §4.11's document tools next)
+   each hit the DB mid-turn inside NFR-1's 3s budget, and the
+   background writers flush batches every ~1s. A hosted
+   DB adds network RTT to *every one* of those (~1–5 ms same-zone,
+   more across zones — and it multiplies by round trips per
+   transaction, not per request). At today's per-query volume that is
+   likely still fine, but verify, don't assume: keep the DB in
+   `us-west1` on private IP, re-measure per-tool durations and
+   per-stage latency (`turn_metrics` / `llm_traces`, C-1's 1s/stage
+   advisory) after the move, and consider batching or pipelining the
+   `SET LOCAL` with its query if tool latency regresses.
 2. **Secrets** → GCP Secret Manager (per-service access instead of one .env).
 3. **TURN server** (rented: Twilio/Cloudflare/Metered, or coturn) — required
    for users on UDP-blocking networks; also the prerequisite for any
