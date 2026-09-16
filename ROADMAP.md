@@ -118,6 +118,45 @@ it.**
   All of them get vetted in this pass, with A/B listening tests against
   real brain-dump sessions as the acceptance bar.
 
+### 3.2 Product repositioning — from "thinking partner" to work assistant
+
+Not part of the feature-3 PR (identity cuts across prompts, docs, and
+user-facing copy; its prompt half belongs with 3.1's pass — implement the
+two together or back-to-back). The user's brief, captured verbatim in
+intent:
+
+> An experience where your work becomes a conversation with someone that
+> is doing the tiny details. Your reading becomes an audio book, or
+> listening to an expert who read what you need to read and can
+> summarize, recite, or answer questions. Writing becomes discussing your
+> ideas, letting your train of thought run, and having an assistant you
+> can bounce ideas off of, who will put them down in writing in a
+> coherent way — and you can review the writing, go over specific lines
+> or phrasing as needed. You can be as hands-on or as imprecise as you
+> want, and the assistant will structure your creativity.
+
+The rules:
+
+- Every description of the agent's overall purpose/experience changes
+  from "thinking partner" (and any "journal" framing, should it appear)
+  to **work assistant** in the sense above: the user works out loud, the
+  assistant does the tiny details and structures the creativity.
+- Pressure-testing and guiding questions REMAIN capabilities — do not
+  remove them or disclaim them — but they are no longer the identity or
+  the selling point, so no headline description should lead with them.
+- Where the old identity lives (the full inventory, main tree):
+  - `backend/agent/prompts.py:7` — the system prompt's identity line
+    (the agent's self-concept; coordinate with 3.1's behavior pass)
+  - `CLAUDE.md:5` — the "What this is" paragraph
+  - `README.md:3` — the tagline
+  - `REQUIREMENTS.md:5` — the purpose statement
+  - `ROADMAP.md:13` — the Vision section (rewrite around the brief above)
+  - `frontend/app/layout.tsx:21` — the user-facing meta description
+  - `.github/workflows/claude-code-review.yml:38` — the reviewer's
+    product context
+  - `memory.md:346` — passing mention in a scaling note
+- C-3 still binds everywhere: never therapy/therapist/counselor.
+
 ### 4. Documents & artifacts rework
 
 From single upload-at-start + copy-paste artifacts to a real document workspace.
