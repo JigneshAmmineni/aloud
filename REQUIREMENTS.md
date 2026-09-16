@@ -182,7 +182,9 @@ Caddy `basic_auth` gate, which is removed at rollout.
   semantics, in effect-order:
   - New sessions are blocked immediately: `/start` and the session-establishment
     signaling endpoints (`/api/offer`, `/sessions/{id}/api/offer`) verify with
-    `check_revoked=True` — an accepted extra network round trip on session
+    `check_revoked=True` (§4.11 adds `POST /documents` to this set —
+    it provisions the users row and writes persistent rows, off the
+    NFR-1 path; FR-51) — an accepted extra network round trip on session
     bootstrap (off the NFR-1 hot path), paid so lockout is instant and a
     disable landing mid-handshake cannot still complete a session.
   - Other endpoints verify locally, so remaining API access dies when the
@@ -1331,7 +1333,10 @@ asking to delete by voice.
   `provision_user` upsert before inserting (FR-24 amended in place) —
   without it, `documents.user_id`'s FK makes the first action of
   every new account (attach a document before tapping Talk) a
-  foreign-key 500. Persistence gets the guardrails ephemerality never needed:
+  foreign-key 500. And because it now provisions and writes
+  persistent rows, it verifies with `check_revoked=True` — FR-29's
+  set, amended in place: a just-disabled account must not
+  self-provision and store rows for its residual token hour. Persistence gets the guardrails ephemerality never needed:
   `POST /documents` is **rate-limited per user** — the endpoint
   already resolves `user_id`, which keys the limiter (not per-IP; the
   email-check pattern predates having an identity to key on) —
@@ -1391,7 +1396,10 @@ asking to delete by voice.
   process restart between upload and `/start` (the ids the client holds
   resolve from the DB, not from process memory). Mandated tests: the
   existing extraction/cap/ownership suites hold against the repo-backed
-  store; upload → restart → `/start` still attaches; user A's `/start`
+  store; a fresh uid whose first-ever request is an upload succeeds
+  and provisions its `users` row (the FR-24 path — the failure is a
+  foreign-key 500, invisible to any test that calls `/start` first);
+  upload → restart → `/start` still attaches; user A's `/start`
   naming user B's document id attaches nothing (owner-scoped get, RLS
   backstop).
 - **FR-52** Workspace HTTP surface, owner-scoped via
@@ -1426,7 +1434,10 @@ asking to delete by voice.
   endpoint, nothing new to secure — saved under the document's title
   as `.md` (`markdown`) or `.txt` (`text` **and** `pdf`: the stored
   content is extracted text, and a `.pdf` extension on it would be a
-  broken file). Routing must be explicit in both environments: the
+  broken file). The filename derives from an untrusted 🔒 title and
+  is sanitized like any rendered content: path separators and
+  control characters stripped, length-capped, empty result →
+  `document-{id}`. Routing must be explicit in both environments: the
   Next rewrite covers only the literal `/documents` today and must
   cover `/documents/{id}`; the prod Caddyfile's backend matcher lists
   no `/documents` path at all (prod currently reaches the upload
@@ -1464,7 +1475,10 @@ asking to delete by voice.
     compose into an unreachable region: 20 listed, 50 scanned, 200
     permitted leaves documents 51–200 by activity permanently
     invisible to the agent — and activity ordering buries exactly the
-    old past-session documents the carve-out exists to reach.
+    old past-session documents the carve-out exists to reach. Offset
+    paging over an ordering the agent's own edits mutate can drift
+    between pages — accepted for v1 (a shifted page steers fine);
+    keyset on `(activity, id)` is the revisit.
   - `read_document` gains **pagination and line numbers** — FR-45's
     named escape, in the shape Anthropic's file tools use: each line
     is prefixed with its absolute 1-based line number, and content is
@@ -1511,12 +1525,26 @@ asking to delete by voice.
     workspace-wide search scans the newest `SEARCH_SCAN_CAP` (default
     50) documents by activity, the result says so when that cap
     truncated the scan ("searched your 50 most recent documents"), and
-    FR-47's 1s per-tool WARN is the standing tripwire. Scope: the user's own documents' title and content;
+    FR-47's 1s per-tool WARN is the standing tripwire. Stated
+    honestly: the cap is a document-count proxy for a byte bound —
+    50 documents is 100 KB or 10 MB of detoasted content depending on
+    the workspace, two orders of magnitude apart; a byte-budgeted
+    scan is the named lever if the WARN fires. Scope: the user's own documents' title and content;
     one document via optional `document_id`, or across the workspace
-    without it. Results: document id, title, a `match` discriminator
-    (`title` | `content`), and — for content matches — line number
-    and a bounded snippet; a title match carries null line/snippet
-    (the shape promises a location only where one exists). **Snippets
+    without it. **Result granularity is defined, not guessable, and
+    differs by scope.** Workspace-wide: **one result per document** —
+    id, title, a `match` discriminator (`title` | `content`), the
+    first content match's line and bounded snippet (null for title
+    matches — the shape promises a location only where one exists),
+    and that document's exact `match_count` — capped at
+    `SEARCH_RESULTS_CAP` documents, so one 30-hit document cannot eat
+    the budget and hide the other scanned documents. Single-document
+    (`document_id` given): **one result per match** (line + snippet,
+    up to `SEARCH_RESULTS_CAP`) plus an exact, uncapped
+    `total_matches` — one SQL aggregate, and **the designed source
+    for `replace_all`'s `expected_occurrences`**: search once,
+    replace once, the predicate stays the verifier — no workflow is
+    priced at a deliberate refusal round out of MAX_STEPS' five. **Snippets
     are cut in SQL, in the repo layer** (`SEARCH_SNIPPET_CHARS`,
     capped at `SEARCH_RESULTS_CAP` results): the query returns match
     line and snippet, never whole `content` columns — FR-45's
@@ -1562,7 +1590,13 @@ asking to delete by voice.
     replacement was performed: old_str `{old_str}` did not appear
     verbatim."; more than one (without `replace_all`) → "Found {N}
     occurrences of old_str, at lines {line_numbers}. Provide more
-    surrounding context, or pass replace_all.". **The two steering results are producible,
+    surrounding context, or pass replace_all.". **Both strings are
+    bounded** — they are model-controlled and the loop re-sends every
+    tool result on each remaining step: the echoed `old_str`
+    truncates at 200 chars with a marker, and the line enumeration
+    lists the first 10 plus "and {N-10} more" (an `old_str` of
+    `"the "` against a 200k-char document must not mint a
+    4,000-line tool result). **The two steering results are producible,
     not aspirational** — a bare UPDATE's zero rowcount cannot tell
     no-match from ambiguous: either the statement computes the
     occurrence count alongside the update (a CTE returning it), or the
@@ -1602,6 +1636,17 @@ asking to delete by voice.
     steers with the memory tool's shape — "Invalid `insert_line`:
     {n}. It should be within [0, {n_lines}]." — with `{n_lines}`
     sourced by the generalized diagnostic read above.
+  - **`MAX_DOC_CHARS` becomes a storage ceiling, not just an upload
+    cap**: today it is enforced only in `extract_text`, and no write
+    path checks length — forty individually-legal 5k appends would
+    mint a 250k-char row that `read_document` fetches whole on every
+    page and `search_documents` scans unbounded, breaking the two
+    bounds this FR leans on. Every write mode's predicate also
+    refuses when the post-edit content would exceed the ceiling (the
+    resulting length is computable in the same statement), steering
+    with FR-51's typed pattern: "this document is at its size limit —
+    create a new one." Mandated test: an append that would cross the
+    ceiling refuses, steers, and writes nothing.
   - Editability is format-gated, not source-gated: `markdown` and
     `text` documents are editable whichever source they came from
     (cleaning up an uploaded notes file is a first-class ask);
@@ -1612,6 +1657,24 @@ asking to delete by voice.
     UPDATE predicate itself** (`AND format` in the editable set) —
     free at the statement level, no pre-SELECT; the refusal message
     composes via the diagnostic read.
+  - **Editing an attached document reconciles with the FR-21 block —
+    the block and the tools now describe the same rows, and the spec
+    says which wins.** The block's per-document header gains the
+    document's id (`--- DOCUMENT id=42: notes.md ---`): without it,
+    addressing an attached document costs a `list_documents` round
+    plus title matching that two `notes.md` make ambiguous. And the
+    block is **provider-owned state, not a fossil**: it is built at
+    pipeline construction and re-sent every step, so an
+    `edit_document` on an attached id would otherwise leave the model
+    holding pre-edit text as authoritative system context — copying a
+    stale `old_str` into "did not appear verbatim" loops on a
+    document it just edited. On a successful edit whose id is in the
+    session's attach set, the loop hands the post-edit content — 
+    already in hand via `RETURNING` — to the context provider, which
+    re-renders that document's section at the next `build()`: no
+    hot-path DB read, no stale copy. Mandated test: edit an attached
+    document → the next built context's block carries the post-edit
+    text.
   - Announces: `document.created` / `document.updated` replace
     `artifact.created` / `artifact.updated` with the same upsert
     contract (FR-45); the payload is the document's metadata plus
@@ -1694,7 +1757,14 @@ asking to delete by voice.
   format gate made uploads editable, and inserting an edited upload
   under Created would break FR-54's organizing idea. The client test
   gains the case: an update for an unknown **uploaded** id inserts
-  into the Uploaded list. On reload or a fresh visit the workspace rehydrates from
+  into the Uploaded list. **Deleted ids are tombstoned for the
+  session**: FR-46 lets a write outlive its turn, so a
+  `document.updated` can land after the user deleted that document —
+  and the insert half would faithfully resurrect the card, the
+  client-side twin of the resurrection FR-50 forbids at the DB. The
+  client keeps the session's deleted ids and the upsert ignores
+  them; deleting the document open in the preview pane closes the
+  pane. Client test notes gain both cases. On reload or a fresh visit the workspace rehydrates from
   `GET /documents` — client-only artifact state (and its lost-on-reload
   behavior) is retired, and the old "artifacts deliberately kept on
   unexpected session death" rule is subsumed: the lists are
