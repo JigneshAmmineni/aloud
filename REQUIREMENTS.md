@@ -96,8 +96,12 @@ Caddy `basic_auth` gate, which is removed at rollout.
   from a request body, query param, or client-set header. Repo functions take
   `user_id: str` with no default value.
 - **FR-24** A `users` row keyed by the Firebase `uid` is auto-provisioned in
-  Postgres at `/start` — the one endpoint that begins creating user-owned
-  rows (the upload-time document store is in-memory; no row needed) — not
+  Postgres at `/start` — and, once §4.11 lands, at `POST /documents`
+  too: the endpoints that begin creating user-owned rows. (Pre-§4.11
+  the upload-time document store was in-memory, no row needed, and
+  `/start` was the one such endpoint; §4.11/FR-51 makes an upload the
+  first user-owned row a new account can create, and it can precede
+  the first `/start`.) Not
   inside `get_current_user_id`, which stays a pure verifier with no DB writes
   (no per-request write amplification). The `uid` is the foreign key
   for all user-owned data. Provisioning is an atomic upsert keyed on the
@@ -1239,11 +1243,17 @@ asking to delete by voice.
   content-table enumeration, and FR-38 test (d) are amended so
   `documents` *joins* them; nothing is substituted out**: `artifacts`
   leaves no protected set while it exists. The legacy table's fate is
-  stated, not implied: after the migration nothing reads or writes it,
-  but it still holds 🔒 rows, so it stays RLS-covered and admin-blind
-  through the release that ships this feature — it is the rollback
-  target's live table (this FR's own rollback caveat) — and is
-  **dropped in the following release** once the deploy is verified.
+  stated, not implied: after the migration nothing on the request
+  path reads or writes it **except FR-52's paired delete — the one
+  deliberate writer** — and it still holds 🔒 rows, so it stays
+  RLS-covered and admin-blind through the release that ships this
+  feature — it is the rollback target's live table (this FR's own
+  rollback caveat) — and is **dropped in the following release** once
+  the deploy is verified. **That drop release is code + DB, specced
+  here because it is specced nowhere else**: it drops `artifacts`,
+  removes FR-52's paired-delete clause, and drops
+  `legacy_artifact_id` — a DB-only drop would 500 every delete of a
+  migrated document while leaving its `documents` row intact.
   Until the drop, FR-38 test (d) asserts zero admin-context rows from
   **both** tables — a test against the empty leftover alone would ship
   green while proving nothing. Usage-event vocabulary is deliberately
@@ -1316,7 +1326,12 @@ asking to delete by voice.
   into `db/documents_repo.py`, the swap its own docstring names. The
   response becomes `{id, title, format, char_count}` — `mime_type`
   disappears with the store, since `format` subsumed it and no column
-  backs it. Persistence gets the guardrails ephemerality never needed:
+  backs it. **Uploads precede `/start`, so `POST /documents`
+  provisions too**: the endpoint runs FR-24's idempotent
+  `provision_user` upsert before inserting (FR-24 amended in place) —
+  without it, `documents.user_id`'s FK makes the first action of
+  every new account (attach a document before tapping Talk) a
+  foreign-key 500. Persistence gets the guardrails ephemerality never needed:
   `POST /documents` is **rate-limited per user** — the endpoint
   already resolves `user_id`, which keys the limiter (not per-IP; the
   email-check pattern predates having an identity to key on) —
@@ -1324,8 +1339,18 @@ asking to delete by voice.
   `DOCUMENTS_RATE_LIMIT`, default 20/min), and a **per-user
   document quota** (`MAX_DOCUMENTS_PER_USER`, default 200) is enforced
   in the repo's insert path — so it binds the upload endpoint and
-  `create_document` alike (an upload over quota gets a clear 400; the
-  tool gets a steering result). Rationale recorded: nothing else caps
+  `create_document` alike, while the migration's `INSERT … SELECT` is
+  exempt (a pre-existing corpus larger than the quota must never
+  abort the migration). **The two required outcomes are typed, not
+  incidental**: the repo's quota check raises a dedicated quota
+  error, which `POST /documents` maps to a clear 400 naming the
+  limit and the tool layer maps to a steering result — never the
+  generic could-not-be-saved fallback, which would 500 the upload and
+  hand the model an unsteerable error to burn toward MAX_STEPS.
+  Mandated tests: an over-quota upload → 400 with the quota named; an
+  over-quota `create_document` → a steering result; and the limiter's
+  per-user proof — user A rate-limited while **user B succeeds in the
+  same window** (the half that proves it is not keyed per-IP). Rationale recorded: nothing else caps
   rows per user (`WORKSPACE_LIST_CAP` caps the list, not the table),
   and 20 GB of shared VM disk with a 15-minute disk alert is the only
   backstop behind it. One prefill cost is recorded rather than
@@ -1373,10 +1398,12 @@ asking to delete by voice.
   `get_current_user_id` (never an admin path): `GET /documents` — the
   user's documents, both sources, newest-activity-first
   (`COALESCE(updated_at, created_at)` DESC), capped
-  (`WORKSPACE_LIST_CAP`, default 100 — a revisit note, not a pager;
-  paginate when someone hits it), returning metadata plus `title` and a
-  computed `char_count`, **never `content`** — and a `total` count, so
-  truncation is visible ("showing 100 of 212"), never silent.
+  (`WORKSPACE_LIST_CAP`, default 200 — tracking
+  `MAX_DOCUMENTS_PER_USER`, so the workspace list is complete below
+  quota; a pager is the revisit if the quota ever rises), returning
+  metadata plus `title` and a computed `char_count`, **never
+  `content`** — and a `total` count, so truncation is visible if the
+  two knobs ever diverge, never silent.
   `GET /documents/{id}` — one owned document with full content, serving
   preview, download, and FR-53/55's oversized-announce refetch.
   `DELETE /documents/{id}` — pulled into v1 by review (the scope note
@@ -1431,7 +1458,13 @@ asking to delete by voice.
   - `list_documents` returns both sources (id, source, kind, format,
     timestamps, title 🔒) — the agent now sees past uploads too. This
     widens §6's deliberate cross-session carve-out from artifacts to
-    documents; it stays narrow, explicit, and user-asked.
+    documents; it stays narrow, explicit, and user-asked. It gains an
+    optional 1-based `page` (`LIST_DOCUMENTS_CAP`-sized pages,
+    `total_pages` in the result), because three caps otherwise
+    compose into an unreachable region: 20 listed, 50 scanned, 200
+    permitted leaves documents 51–200 by activity permanently
+    invisible to the agent — and activity ordering buries exactly the
+    old past-session documents the carve-out exists to reach.
   - `read_document` gains **pagination and line numbers** — FR-45's
     named escape, in the shape Anthropic's file tools use: each line
     is prefixed with its absolute 1-based line number, and content is
@@ -1506,9 +1539,18 @@ asking to delete by voice.
     consequence promised: `old_str` (non-empty) must occur **exactly
     once** in the stored content and is replaced by `new_str` (possibly
     empty — deletion); **`replace_all: true`** (optional, default
-    false) waives uniqueness and replaces every occurrence in the same
-    single statement — an explicit flag, never an implicit fallback,
-    exactly the Agent SDK Edit contract. Enforcement is **atomic and
+    false) waives uniqueness — and because it is the one mode
+    exact-match knowledge does NOT cover (one seen occurrence would
+    license rewriting N unseen ones across pages never read: the
+    data-loss class the over-cap `replace` refusal exists to prevent,
+    and the Agent SDK precedent does not transfer — its Edit reads
+    whole files, our reads are capped), it **requires
+    `expected_occurrences`**: the counting predicate refuses unless
+    the actual count equals the model's stated expectation, and the
+    mismatch steering names the actual count and lines (the
+    multi-match steering is where the model typically learned the
+    number). All N then replace in the same single statement — an
+    explicit flag with a verified count, never an implicit fallback. Enforcement is **atomic and
     DB-side like
     `append`**: one UPDATE whose predicate verifies the single
     occurrence and whose SET performs the replacement, `RETURNING
@@ -1538,9 +1580,10 @@ asking to delete by voice.
     no-match steering, not a mystery); test (ii) gains the case — an
     `old_str` copied with its decoration, and one spanning a hard-cut
     page boundary. `str_replace` works at **any** content
-    size: an exact match proves the model has seen the text it touches,
-    which is precisely the knowledge the over-cap `replace` refusal
-    exists to guarantee. **FR-45's "effectively append-only past the
+    size: a unique exact match proves the model has seen the text it
+    touches — and `replace_all` earns the same license only through
+    its verified `expected_occurrences` — which is precisely the
+    knowledge the over-cap `replace` refusal exists to guarantee. **FR-45's "effectively append-only past the
     read cap" consequence is hereby retired** — the escape it named has
     landed.
   - `edit_document` also gains **`insert`** (the text-editor tool's
@@ -1645,7 +1688,13 @@ asking to delete by voice.
   refetches `GET /documents/{id}` — only when that document is open in
   the pane; the list updates from the announce's metadata either way. The upsert's insert half stays load-bearing even with
   FR-54's fetch: an edited document can be absent from the client's
-  capped list. On reload or a fresh visit the workspace rehydrates from
+  capped list. **And the insert half routes by `source`** — the
+  announce's metadata carries it, and an unknown-id upsert lands in
+  the matching list (uploaded → Uploaded, agent → Created): FR-53's
+  format gate made uploads editable, and inserting an edited upload
+  under Created would break FR-54's organizing idea. The client test
+  gains the case: an update for an unknown **uploaded** id inserts
+  into the Uploaded list. On reload or a fresh visit the workspace rehydrates from
   `GET /documents` — client-only artifact state (and its lost-on-reload
   behavior) is retired, and the old "artifacts deliberately kept on
   unexpected session death" rule is subsumed: the lists are
@@ -1665,6 +1714,9 @@ append-only consequence retired (FR-53). FR-31 / FR-38 — `documents`
 test (d); `artifacts` leaves no protected set until its stated drop
 release, and test (d) covers both tables until then (FR-50). FR-32 /
 FR-38 counts — deliberately unchanged (`stage='artifact'` kept, FR-50).
+FR-24 — `POST /documents` joins `/start` as a user-provisioning
+endpoint (FR-51; applied in place). NFR-6 — the encryption deferral's
+true cost (DB-side edit atomicity, not schema rework) named in place.
 FR-21 — uploads persist (FR-51); attach becomes a user-curated
 selection with this visit's uploads default-attached. §6 — the
 document-persistence deferral narrows to indexing/retrieval; the
@@ -1679,7 +1731,7 @@ This block remains as the index of what changed.
 
 | Knob | Default | Where |
 |---|---|---|
-| `WORKSPACE_LIST_CAP` (`GET /documents`) | 100 | `db/` documents repo (FR-45's rule: caps live in the repo layer) |
+| `WORKSPACE_LIST_CAP` (`GET /documents`; tracks the quota) | 200 | `db/` documents repo (FR-45's rule: caps live in the repo layer) |
 | `LIST_DOCUMENTS_CAP` (tool; renamed from `LIST_ARTIFACTS_CAP`) | 20 | `db/` documents repo |
 | `READ_DOCUMENT_MAX_CHARS` (renamed from `READ_ARTIFACT_MAX_CHARS`; also the `read_document` page size) | 8,000 | `agent/tools.py` |
 | `ANNOUNCE_CONTENT_MAX_CHARS` (announce payload cap; above it `content_omitted: true` + client refetch) | 16,000 | `agent/tools.py` |
@@ -1687,7 +1739,7 @@ This block remains as the index of what changed.
 | `SEARCH_SCAN_CAP` (workspace-wide search scans this many newest documents) | 50 | `db/` documents repo |
 | `SEARCH_SNIPPET_CHARS` (context around each search match; cut in SQL) | 200 | `db/` documents repo |
 | `MAX_DOCUMENTS_PER_USER` (per-user row quota; binds upload and `create_document`) | 200 | `db/` documents repo |
-| `DOCUMENTS_RATE_LIMIT` (`POST /documents` per-caller limit) | 20/min | `app/ratelimit.py` wiring |
+| `DOCUMENTS_RATE_LIMIT` (`POST /documents` per-user limit) | 20/min | `app/ratelimit.py` (gains a caller-key parameter; keyed by `user_id` here, not IP) |
 | `MAX_FILE_BYTES` (per uploaded file) | 5 MB | unchanged (upload/extraction module) |
 | `MAX_DOC_CHARS` (per document, post-extraction) | 200,000 | unchanged |
 | `MAX_TOTAL_CHARS` (per-session injected block, FR-21) | 400,000 | unchanged |
@@ -1709,7 +1761,7 @@ This block remains as the index of what changed.
 
 ### 5.3 Privacy
 - **NFR-5** All voice data and transcripts are processed server-side. The privacy policy must disclose this clearly.
-- **NFR-6** Sensitive session content (transcripts, documents — uploaded and agent-produced, future memory entries) must live in dedicated database columns, separable from session metadata, so that encryption at rest can be added post-MVP without schema rework. The encryption itself is deferred — see §6 Out of Scope.
+- **NFR-6** Sensitive session content (transcripts, documents — uploaded and agent-produced, future memory entries) must live in dedicated database columns, separable from session metadata, so that encryption at rest can be added post-MVP without schema rework. The encryption itself is deferred — see §6 Out of Scope. (§4.11 names the deferral's true cost, which is wider than schema: the document tools' atomic DB-side edit modes — `append`'s concatenation, `str_replace`'s counting predicate, `insert`'s offset arithmetic, `ILIKE` search with SQL-side snippets, the diagnostic reads — all require plaintext in the 🔒 column. Adding encryption keeps the schema but forfeits DB-side atomicity, handing FR-46's outlived-write race back to the application layer to re-solve. Deferred knowingly, not cheaply.)
 - **NFR-7** The user must be able to delete all their data.
 - **NFR-8** User isolation: no authenticated user can read or write another
   user's data. Every query on user-owned tables is scoped by the verified
