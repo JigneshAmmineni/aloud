@@ -128,6 +128,7 @@ class AgentLoopProcessor(FrameProcessor):
         traces,
         emit,
         write_registry: set,
+        greeting_trigger: str = GREETING_TRIGGER,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -144,6 +145,7 @@ class AgentLoopProcessor(FrameProcessor):
         # FR-46: session-level in-flight-write set, owned by companion so
         # teardown and the SIGTERM drain can await it; the loop only adds.
         self._write_registry = write_registry
+        self._greeting_trigger = greeting_trigger
         self._log = logger.bind(session_id=session_id, component="agent.loop")
 
         self._turn_task: asyncio.Task | None = None
@@ -320,7 +322,9 @@ class AgentLoopProcessor(FrameProcessor):
             # Ephemeral trigger, this call only (never appended): the built
             # context is system-prompt-only here, and Gemini rejects a call
             # with an empty contents list.
-            messages = messages + [{"role": "user", "content": GREETING_TRIGGER}]
+            messages = messages + [
+                {"role": "user", "content": self._greeting_trigger}
+            ]
         state.purpose = purpose
         state.messages = messages
         state.step_text = ""

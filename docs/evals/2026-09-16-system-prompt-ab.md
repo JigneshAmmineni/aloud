@@ -195,4 +195,61 @@ confirmation; edit updates the panel; behavior identical across arms.
 
 ## Results
 
-*(to be appended after the run)*
+### Iteration 1 — arm B only (2026-09-16, ~08:40–09:10 UTC)
+
+Arm A deferred by decision: B iterates until it behaves as intended, then
+the comparative run happens. Verdicts below combine listening notes with
+trace audit (`show_trace.py`, sessions `587f42ce…`, `d9d8b6c9…`,
+`651dd743…`, `549dc72d…`, `6952b7ab…`, `ff39bf64…`, `4b588a16…`,
+`1791a3be…`).
+
+| Scenario | Listening verdict | Trace audit |
+|---|---|---|
+| S1 direct address | **pass** — "How are you?" got a real answer + question back | confirmed |
+| S2 brain dump | acks right in kind but **too wordy**; **agent created an artifact UNPROMPTED** at the dump's end | confirmed: STT clipped "I'm just getting it all out" to *"getting out."* and the model invented a `create_artifact` — a real FR-7-style violation, prompt-level |
+| S3 pause | **fail** — "Hmm, pricing. That makes sense. Go on." where a bare "Mm-hmm" (or nothing) was wanted; multi-word acks collide with the user resuming (barge-in cuts in only after several words — bad UX) | confirmed across three sessions |
+| S4 no steering | **fail** — "alright, is there something else you'd like to discuss?" | (listening) |
+| S5 invited challenge | *looked* like overcorrection ("right…", "that makes sense" to "poke holes, be honest") | **exonerated — STT never delivered the invite.** Four attempts arrived as *"pork horns in this"*, *"for calling centers"*, *"Pork wholesalers"*, *"Cook holds not plan"*. In the session where STT correctly heard **"stress test this plan"**, the model challenged immediately and concretely — rule 4 works when the words arrive |
+| S5b "tell me the plan so far" | **fail** — created an artifact + "I've put a summary on the screen" instead of speaking the plan | confirmed |
+| S6 un-invited flaw | **pass on substance** (no unsolicited critique) but parroted the user's full sentence back | confirmed |
+| S7 tools | edit worked; "add a bullet" first got "Right." | **partially exonerated:** STT heard *"I **had** a bullet…"* — a statement. The retry ("Add the bold." — also garbled but imperative) was understood from context and executed. Confirmations still too long |
+| Greeting | **fail** — "Hi there. I'm ready when you are, so feel free to start talking…" every session; wanted "Hey" |confirmed, near-identical wording all 8 sessions |
+
+**Cross-cutting finding — STT noise is a first-class factor.** Deepgram
+Flux garbled meaning-bearing phrases repeatedly: *poke holes* (4/4
+attempts), *core loop → "code loop"*, *ranking **isn't** stars → "Ranking
+**is in** stars"* (meaning inverted), *add → "had"*, *fund the bakery →
+"fondo bakery"*, *write this up → "Wrap this up"* (survivable). The prompt
+can't fix STT, but it can stop the model treating garble as content —
+iteration 2 adds exactly that rule. Scenario scripts stay unchanged so
+the garble-handling path gets exercised deliberately.
+
+### Iteration 2 — prompt v2 changes (commit on this branch)
+
+1. **Global brevity economy:** "say no more than utility requires"; never
+   restate/parrot the user; agreement is a word or two.
+2. **Brain-dump acks exclusively "Hmm." / "Mm-hmm."** — nothing longer
+   (was: an open set incl. "that makes sense", "go on").
+3. **Greeting: a few words at most** — "Hey.", "Hey, what's up?",
+   "Hey {name}." (the FR-24 preferred name now rides the greeting trigger
+   — small code change in `users_repo`/`companion`/`loop`); no offers, no
+   "I'm ready", no invitations.
+4. **Topic close:** acknowledge in a word or two, never ask what's next.
+5. **Artifacts explicit-only:** never volunteered, never the answer to a
+   question — "tell me the plan" gets a SPOKEN recap.
+6. **STT-garble rule:** a garbled instruction/question → briefly ask to
+   repeat, never guess; garble mid-dump → just "Hmm."
+7. **Tool confirmations:** a few words ("Done — it's on your screen.").
+
+Design note recorded for later: true *silence* on a mid-dump turn is not
+prompt-expressible today — an empty generation triggers the FR-42
+empty-step fallback (it would SPEAK a snag line). If "say nothing" is
+wanted, the loop needs a deliberate quiet-turn mechanism (e.g., a
+sentinel the loop swallows); parked unless single-syllable acks still
+feel like too much. The barge-in overlap complaint (agent gets words out
+as the user resumes) is mitigated by shorter acks; the residual is
+turn-detection timing, out of scope by decision.
+
+### Iteration 2 — listening results
+
+*(to be appended after the rerun)*

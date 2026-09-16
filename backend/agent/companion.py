@@ -29,13 +29,18 @@ from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
 
 from agent.context import ContextProvider
 from agent.loop import AgentLoopObserver, AgentLoopProcessor
-from agent.prompts import build_document_context_block, build_system_prompt
+from agent.prompts import (
+    build_document_context_block,
+    build_greeting_trigger,
+    build_system_prompt,
+)
 from agent.providers import make_loop_llm, make_stt, make_tts
 from agent.sanitizer import make_text_filters
 from agent.tools import build_registry
 from app.config import Settings
 from db.sessions_repo import create_session_row, end_session_row
 from db.transcript_log import TranscriptWriter
+from db.users_repo import get_preferred_name
 from obs.latency import make_latency_observer
 from obs.trace import TraceRecorder
 from obs.usage import UsageMetricsObserver, UsageRecorder
@@ -216,6 +221,14 @@ class CompanionAgent:
             except Exception:
                 pass
 
+        # 3.1: "Hey {name}" — the FR-24 preferred name rides the greeting
+        # trigger. A lookup failure must never cost the session: fall back
+        # to the nameless greeting.
+        try:
+            preferred_name = await get_preferred_name(self._user_id)
+        except Exception:
+            preferred_name = None
+
         loop_stage = AgentLoopProcessor(
             context=context_provider,
             llm=make_loop_llm(self._settings),
@@ -227,6 +240,7 @@ class CompanionAgent:
             traces=traces,
             emit=emit,
             write_registry=write_tasks,
+            greeting_trigger=build_greeting_trigger(preferred_name),
         )
 
         pipeline = Pipeline(

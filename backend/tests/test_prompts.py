@@ -65,3 +65,27 @@ def test_prompt_pins_the_pause_rule():
     """Feature 3.1: a thinking pause is not an invitation to jump in."""
     prompt = build_system_prompt().lower()
     assert "a pause is not an invitation" in prompt
+
+
+def test_prompt_pins_the_brevity_economy():
+    """3.1 iteration 2 (A/B run 1 feedback): the agent must not talk more
+    than utility requires — no parroting, single-syllable brain-dump acks,
+    explicit-only artifacts, STT-garble awareness, terse greeting."""
+    prompt = build_system_prompt().lower()
+    assert "never restate or parrot" in prompt
+    assert 'your entire reply is "hmm." or "mm-hmm."' in prompt
+    assert "explicitly asks" in prompt
+    assert "never volunteer" in prompt
+    assert "never answer a question by creating one" in prompt
+    assert "mis-heard" in prompt  # transcripts are STT output, not ground truth
+    assert "a few words at most" in prompt  # the greeting
+    assert "no offers of help" in prompt
+
+
+def test_greeting_trigger_carries_the_preferred_name():
+    from agent.prompts import GREETING_TRIGGER, build_greeting_trigger
+
+    assert build_greeting_trigger(None) == GREETING_TRIGGER
+    named = build_greeting_trigger("Jignesh")
+    assert "Jignesh" in named
+    assert "Greet them" in named
