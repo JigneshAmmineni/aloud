@@ -122,7 +122,9 @@ it.**
   documents block, fallback/filler/greeting lines, wrap-up instruction)
   and `agent/tools.py` (tool descriptions — the model reads these too).
   All of them get vetted in this pass, with A/B listening tests against
-  real brain-dump sessions as the acceptance bar.
+  real brain-dump sessions as the acceptance bar — the test plan, scripted
+  scenarios, and results live in
+  [docs/evals/2026-09-16-system-prompt-ab.md](docs/evals/2026-09-16-system-prompt-ab.md).
 
 ### 3.2 Product repositioning — from "thinking partner" to work assistant
 
