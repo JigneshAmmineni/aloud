@@ -34,10 +34,6 @@ MEASUREMENT_WINDOW_S = 2.0
 # handler to the loop's step entries (FR-47).
 STEP_STAGE_WARN_MS = 1000
 
-# Sentinel: "sample current_turn at enqueue" — the legacy metrics-frame
-# path. The loop always passes its own turn number explicitly (FR-47: a
-# cancelled step's late usage must land on the turn that spent it).
-_SAMPLE = object()
 
 
 class UsageRecorder:
@@ -83,9 +79,14 @@ class UsageRecorder:
     # -- hot-path recording (enqueue only) ---------------------------------
 
     def record_llm_usage(
-        self, prompt_tokens: int, completion_tokens: int, *, turn_id=_SAMPLE
+        self, prompt_tokens: int, completion_tokens: int, *, turn_id: int | None
     ) -> None:
-        turn = self.current_turn if turn_id is _SAMPLE else turn_id
+        """`turn_id` is REQUIRED and comes from the step that made the
+        call, never sampled at enqueue time (FR-47): the tracker advances
+        on barge-in, and a cancelled step's late usage must land on the
+        turn that spent it. None means the call genuinely had no turn
+        identity (tracker unavailable)."""
+        turn = turn_id
         now = datetime.now(timezone.utc)
         if prompt_tokens:
             self._writer.enqueue(

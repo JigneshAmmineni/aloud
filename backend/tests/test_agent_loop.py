@@ -832,7 +832,9 @@ def test_fallback_keeps_model_text_the_user_already_heard():
     h = make_loop(scripts, tools=[read_tool(raises=RuntimeError("boom"))])
     asyncio.run(h.loop._run_turn("go"))
     assistants = [m["content"] for m in h.ctx.build() if m["role"] == "assistant"]
-    assert assistants == ["Here's the thing."]
+    # since round 4 the crashed round is appended via append_step (calls
+    # and terminal results included), text unstripped
+    assert [a.strip() for a in assistants] == ["Here's the thing."]
 
 
 def test_teardown_cleanup_finalizes_the_cut_turn():
@@ -988,3 +990,63 @@ def test_short_spoken_sentence_survives_the_earlier_step_filter():
     last = h.ctx.build()[-1]
     assert last["role"] == "assistant"
     assert last["content"].startswith("Okay.")  # kept, sentinel-marked
+
+
+def test_raising_read_does_not_discard_a_concurrent_writes_result():
+    """Round-4 blocking: gather doesn't cancel siblings — a read that
+    raises while a write commits must still leave the round in the
+    context (the write's row is committed AND announced; a blank context
+    means the next turn re-creates it)."""
+    scripts = [
+        [
+            LLMToolCall(name="save", arguments={}, id="w1"),
+            LLMToolCall(name="lookup", arguments={}, id="r1"),
+            _done(),
+        ],
+        [LLMTextDelta("Next turn."), _done()],
+    ]
+    h = make_loop(
+        scripts,
+        tools=[
+            write_tool(delay=0.05),
+            read_tool(name="lookup", raises=RuntimeError("db blip")),
+        ],
+    )
+
+    async def run():
+        await h.loop._run_turn("do both")
+        await asyncio.sleep(0.15)  # the write lands in its placeholder
+        await h.loop._run_turn("next")
+
+    asyncio.run(run())
+    assert any(line in _pushed_text(h) for line in FALLBACK_LINES)
+    results = {
+        m["tool_call_id"]: m["content"] for m in h.ctx.build() if m["role"] == "tool"
+    }
+    assert results["w1"]["status"] == "created"  # recorded, not vanished
+    assert results["r1"]["status"] == "error"
+    # and the NEXT turn's call could see the round
+    step2_input = h.llm.calls[1]["messages"]
+    assert any(m.get("role") == "tool" for m in step2_input)
+
+
+def test_cleanup_cancels_wedged_abandoned_reads():
+    """Round-4 nit 8: outstanding reads are cancelled at cleanup — never
+    destroyed-task noise after the session."""
+    read = read_tool(name="lookup", delay=60)
+    scripts = [[LLMToolCall(name="lookup", arguments={}, id="r1"), _done()]]
+    h = make_loop(scripts, tools=[read])
+
+    async def run():
+        task = asyncio.create_task(h.loop._run_turn("go"))
+        h.loop._turn_task = task
+        await asyncio.sleep(0.05)
+        assert len(h.loop._live_reads) == 1
+        await h.loop.cleanup()
+        await asyncio.sleep(0)  # let the cancellations land
+        assert all(t.cancelled() or t.done() for t in list(h.loop._live_reads) + [])
+        assert not h.loop._live_reads or all(
+            t.cancelling() or t.cancelled() for t in h.loop._live_reads
+        )
+
+    asyncio.run(run())

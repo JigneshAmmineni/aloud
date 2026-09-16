@@ -95,27 +95,34 @@ async def drain_live_sessions() -> int:
             pass  # a torn connection can't hear the goodbye; cancel anyway
     if tasks:
         await asyncio.sleep(0.5)  # let the message flush over the data channel
-        log = logger.bind(component="agent.companion")
         # ONE deadline for the whole budget (never composed): the sessions
         # are still live during this wait, so a write can START inside the
         # grace window — the post-cancel sweep below catches those on
-        # whatever remains of the same budget (review finding: a snapshot
-        # alone lets a late write die mid-commit at process exit,
-        # unlogged).
+        # whatever remains of the same budget (a snapshot alone lets a late
+        # write die mid-commit at process exit, unlogged). Awaited PER
+        # SESSION so an abandoned write's WARNING carries its session_id —
+        # FR-46 names it (round 4).
         deadline = time.monotonic() + WRITE_GRACE_S
-        all_writes = {t for s in _inflight_writes.values() for t in s}
-        await _await_writes(all_writes, log, deadline - time.monotonic())
+        await _await_all_sessions_writes(deadline)
         for session_id, task in tasks:
             try:
                 await task.cancel()
             except Exception:
                 pass
-        late_writes = {t for s in _inflight_writes.values() for t in s}
-        await _await_writes(late_writes, log, deadline - time.monotonic())
-        log.bind(event="session.drained").info(
+        await _await_all_sessions_writes(deadline)  # the late-starter sweep
+        logger.bind(component="agent.companion", event="session.drained").info(
             f"drained {len(tasks)} live session(s) for shutdown"
         )
     return len(tasks)
+
+
+async def _await_all_sessions_writes(deadline: float) -> None:
+    for session_id in list(_inflight_writes):
+        await _await_writes(
+            _inflight_writes.get(session_id, set()),
+            logger.bind(component="agent.companion", session_id=session_id),
+            deadline - time.monotonic(),
+        )
 
 
 def build_pipeline_parts(settings: Settings, documents=None, *, session_id=""):

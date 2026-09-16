@@ -435,3 +435,24 @@ def test_replace_race_where_row_grows_after_the_read_returns_refused(
         assert "tiny" not in content
 
     asyncio.run(run())
+
+
+def test_list_and_read_degrade_to_error_results_on_db_failure(monkeypatch):
+    """Round-4 finding 2: the read-side handlers get the same degrade
+    discipline as the writes — a DB blip is a tool result, never a raised
+    turn."""
+
+    async def broken(*args, **kwargs):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(tools, "list_artifact_rows", broken)
+    monkeypatch.setattr(tools, "get_artifact_row", broken)
+
+    async def run():
+        ctx = _ctx([])
+        listing = await _tool("list_artifacts").handler({}, ctx)
+        assert listing["status"] == "error"
+        got = await _tool("read_artifact").handler({"artifact_id": 1}, ctx)
+        assert got["status"] == "error"
+
+    asyncio.run(run())

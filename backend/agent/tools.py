@@ -97,7 +97,16 @@ async def _create_artifact(args: dict, ctx: ToolContext) -> dict:
 
 
 async def _list_artifacts(args: dict, ctx: ToolContext) -> dict:
-    rows = await list_artifact_rows(ctx.user_id)
+    try:
+        rows = await list_artifact_rows(ctx.user_id)
+    except Exception as e:
+        # same degrade discipline as the write handlers (round 4): a DB
+        # blip is a tool RESULT, never a raised turn. Exception type only
+        # (NFR-9).
+        logger.bind(session_id=ctx.session_id, component="agent.tools").bind(
+            event="tool.list_artifacts_failed"
+        ).error(f"artifact list failed: {type(e).__name__}")
+        return {"status": "error", "error": "could not list the artifacts"}
     return {
         "artifacts": [
             {
@@ -118,7 +127,13 @@ async def _read_artifact(args: dict, ctx: ToolContext) -> dict:
         artifact_id = int(args.get("artifact_id"))
     except (TypeError, ValueError):
         return {"status": "error", "error": "artifact_id must be an integer"}
-    row = await get_artifact_row(ctx.user_id, artifact_id)
+    try:
+        row = await get_artifact_row(ctx.user_id, artifact_id)
+    except Exception as e:
+        logger.bind(session_id=ctx.session_id, component="agent.tools").bind(
+            event="tool.read_artifact_failed"
+        ).error(f"artifact read failed: {type(e).__name__}")
+        return {"status": "error", "error": "could not read the artifact"}
     if row is None:
         return {"status": "not_found", "artifact_id": artifact_id}
     truncated = len(row.content) > READ_ARTIFACT_MAX_CHARS

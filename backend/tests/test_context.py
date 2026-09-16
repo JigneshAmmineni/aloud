@@ -122,3 +122,25 @@ def test_build_returns_copies():
     assert len(snapshot) == 4  # unchanged by the later append
     assert snapshot[2]["tool_calls"][0]["id"] == "c"
     assert snapshot[3]["content"] == {"ok": True}  # pre-update result
+
+
+def test_running_char_counter_matches_a_full_recount():
+    """Round-4 advisory: the FR-44 estimate is a running counter — it must
+    stay consistent with a full rescan across every mutation path."""
+    ctx = _provider()
+    ctx.append_user("hello there")
+    call = LLMToolCall(name="read_artifact", arguments={"artifact_id": 7}, id="c1")
+    ctx.append_step("checking. ", [call], [{"status": "in_progress"}])
+    ctx.update_tool_result("c1", {"status": "ok", "content": "a much longer body"})
+    ctx.append_assistant("done, it's on screen")
+
+    def recount(messages):
+        chars = 0
+        for m in messages:
+            content = m.get("content")
+            chars += len(content) if isinstance(content, str) else len(str(content))
+            for c in m.get("tool_calls", []):
+                chars += len(c["name"]) + len(str(c["arguments"]))
+        return chars
+
+    assert ctx._approx_tokens() == recount(ctx.build()) // 4

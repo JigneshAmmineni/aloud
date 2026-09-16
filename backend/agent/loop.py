@@ -26,6 +26,7 @@ import itertools
 import json
 import time
 from collections import deque
+from contextlib import aclosing
 
 from loguru import logger
 from pipecat.frames.frames import (
@@ -163,6 +164,9 @@ class AgentLoopProcessor(FrameProcessor):
         # FR-46 late-write bookkeeping (all event-loop-serialized):
         self._placeholder_calls: set[str] = set()  # appended as placeholder
         self._late_results: dict[str, dict] = {}  # completed, not yet landed
+        # Abandoned reads still running (session-level): cleanup() cancels
+        # them so a wedged read never becomes destroyed-task noise.
+        self._live_reads: set[asyncio.Task] = set()
         self._filler_cycle = itertools.cycle(FILLER_LINES)
         self._fallback_cycle = itertools.cycle(FALLBACK_LINES)
         self._greeting_fallback_cycle = itertools.cycle(FALLBACK_GREETING_LINES)
@@ -285,6 +289,15 @@ class AgentLoopProcessor(FrameProcessor):
             log.bind(event="agent.turn_failed", step=state.step).error(
                 f"loop error, degrading to spoken fallback: {type(e).__name__}"
             )
+            if state.calls:
+                # Round 4: a raising tool must not discard the round —
+                # gather doesn't cancel siblings, so a concurrent write's
+                # result may already be committed AND announced; a context
+                # that records nothing makes the next turn re-create it.
+                self._dispose_tool_round(
+                    state, state.step_filler + state.step_text, interrupted=False
+                )
+                state.step_text = ""  # recorded; the fallback won't re-append
             await self._speak_fallback(state, reason="error")
         # Any non-cancelled exit is a turn end (FR-47: flush-or-clear).
         self._recorder.turn_ended(state.turn_id)
@@ -331,23 +344,26 @@ class AgentLoopProcessor(FrameProcessor):
 
         await self.push_frame(LLMFullResponseStartFrame())
         try:
-            async for event in self._llm.stream(
-                messages, tools=self._schemas, tool_choice=tool_choice
-            ):
-                elapsed_ms = round((time.monotonic() - state.t0) * 1000)
-                if state.ttfb_ms is None and not isinstance(event, LLMDone):
-                    state.ttfb_ms = elapsed_ms
-                if isinstance(event, LLMTextDelta):
-                    state.step_text += event.text
-                    self._audio_pending = True
-                    await self.push_frame(LLMTextFrame(event.text))
-                elif isinstance(event, LLMToolCall):
-                    if not state.calls:
-                        await self._maybe_filler(state, elapsed_ms)
-                    state.calls.append(event)
-                elif isinstance(event, LLMDone):
-                    finish = event.finish_reason
-                    state.usage = event.usage
+            # aclosing: barge-in cancellation closes the provider stream —
+            # and its HTTP connection — deterministically, not at GC time.
+            async with aclosing(
+                self._llm.stream(messages, tools=self._schemas, tool_choice=tool_choice)
+            ) as stream:
+                async for event in stream:
+                    elapsed_ms = round((time.monotonic() - state.t0) * 1000)
+                    if state.ttfb_ms is None and not isinstance(event, LLMDone):
+                        state.ttfb_ms = elapsed_ms
+                    if isinstance(event, LLMTextDelta):
+                        state.step_text += event.text
+                        self._audio_pending = True
+                        await self.push_frame(LLMTextFrame(event.text))
+                    elif isinstance(event, LLMToolCall):
+                        if not state.calls:
+                            await self._maybe_filler(state, elapsed_ms)
+                        state.calls.append(event)
+                    elif isinstance(event, LLMDone):
+                        finish = event.finish_reason
+                        state.usage = event.usage
         except Exception:
             # FR-49: EVERY call writes a row — a provider drop after 40
             # deltas is precisely the call a trace is for (review round 3).
@@ -491,6 +507,7 @@ class AgentLoopProcessor(FrameProcessor):
                 )
             else:
                 state.read_tasks[call.id] = task
+                self._live_reads.add(task)
                 task.add_done_callback(lambda t, c=call: self._read_done(c, t))
             try:
                 result = await asyncio.wait_for(asyncio.shield(task), TOOL_TIMEOUT_S)
@@ -557,6 +574,7 @@ class AgentLoopProcessor(FrameProcessor):
     def _read_done(self, call: LLMToolCall, task: asyncio.Task) -> None:
         """Abandoned-read disposal (FR-46): a discarded read that raises is
         swallowed and logged — never an unretrieved-exception traceback."""
+        self._live_reads.discard(task)
         if task.cancelled():
             return
         exc = task.exception()
@@ -572,6 +590,57 @@ class AgentLoopProcessor(FrameProcessor):
             if self._context.update_tool_result(call_id, self._late_results[call_id]):
                 del self._late_results[call_id]
                 self._placeholder_calls.discard(call_id)
+
+    def _dispose_tool_round(
+        self, state: _TurnState, text: str, *, interrupted: bool
+    ) -> None:
+        """EVERY issued call gets a terminal-or-placeholder result and the
+        step is appended NOW — the FR-46 atomic-step rule, shared by
+        barge-in, silent-cancel, teardown, AND the tool-crash error path
+        (round 4: gather doesn't cancel siblings, so a raising read must
+        not discard a concurrent write's already-committed result).
+        `is not None`, never truthiness: a finished read whose result is
+        an empty dict must not be relabeled."""
+        results: list[dict] = []
+        for i, call in enumerate(state.calls):
+            write_task = state.write_tasks.get(call.id)
+            if (
+                state.results
+                and i < len(state.results)
+                and state.results[i] is not None
+            ):
+                results.append(state.results[i])  # finished before the cut
+            elif write_task is not None:
+                if write_task.done() and not write_task.cancelled():
+                    if write_task.exception() is None:
+                        results.append(write_task.result())
+                    else:
+                        # already failed — terminal, never a placeholder
+                        # nothing will ever update
+                        results.append(
+                            {"status": "error", "error": "the write failed"}
+                        )
+                else:
+                    # the write runs to completion; its result updates
+                    # this placeholder in place — never a tail append
+                    results.append({"status": "in_progress"})
+                    self._placeholder_calls.add(call.id)
+            else:
+                read_task = state.read_tasks.get(call.id)
+                if (
+                    read_task is not None
+                    and read_task.done()
+                    and not read_task.cancelled()
+                    and read_task.exception() is not None
+                ):
+                    # the read that raised — a terminal error, not abandoned
+                    results.append({"status": "error", "error": "the tool failed"})
+                else:
+                    # pending/in-flight reads: abandoned, results discarded
+                    results.append({"status": "cancelled"})
+        self._context.append_step(text, state.calls, results, interrupted=interrupted)
+        state.step_filler = ""
+        self._land_late_results()
 
     # ---- failure + instrumentation ---------------------------------------
 
@@ -667,6 +736,10 @@ class AgentLoopProcessor(FrameProcessor):
             self._turn_task = None
             await self.cancel_task(task)
             self._finalize_interrupted_turn()
+        # A wedged abandoned read must not outlive the session as
+        # destroyed-task noise (round 4); _read_done swallows the cancel.
+        for read_task in list(self._live_reads):
+            read_task.cancel()
         await super().cleanup()
 
     def _finalize_interrupted_turn(self) -> None:
@@ -708,40 +781,9 @@ class AgentLoopProcessor(FrameProcessor):
         # own dedupe), marked with the provider-owned sentinel.
         prefix = self._spoken_prefix(state)
         if state.calls:
-            results: list[dict] = []
-            for i, call in enumerate(state.calls):
-                write_task = state.write_tasks.get(call.id)
-                # `is not None`, never truthiness: a finished read whose
-                # result is an empty dict must not be relabeled "cancelled"
-                if (
-                    state.results
-                    and i < len(state.results)
-                    and state.results[i] is not None
-                ):
-                    results.append(state.results[i])  # finished before barge-in
-                elif write_task is not None:
-                    if write_task.done() and not write_task.cancelled():
-                        if write_task.exception() is None:
-                            results.append(write_task.result())
-                        else:
-                            # already failed — terminal, never a placeholder
-                            # nothing will ever update (review finding)
-                            results.append(
-                                {"status": "error", "error": "the write failed"}
-                            )
-                    else:
-                        # the write runs to completion; its result updates
-                        # this placeholder in place — never a tail append
-                        results.append({"status": "in_progress"})
-                        self._placeholder_calls.add(call.id)
-                else:
-                    # pending/in-flight reads: abandoned, results discarded
-                    results.append({"status": "cancelled"})
-            self._context.append_step(
-                state.step_filler + prefix, state.calls, results, interrupted=True
+            self._dispose_tool_round(
+                state, state.step_filler + prefix, interrupted=True
             )
-            state.step_filler = ""
-            self._land_late_results()
             log.bind(event="agent.interrupted", step=state.step).info(
                 f"interrupted mid-tool-round: {len(state.calls)} call(s) disposed"
             )

@@ -116,3 +116,39 @@ def test_drain_sweeps_writes_started_during_the_grace_window(monkeypatch):
         companion._live_tasks.pop("drain-late", None)
         companion._inflight_writes.pop("drain-late", None)
         companion._draining = False
+
+
+def test_drain_abandonment_warning_names_the_session(monkeypatch):
+    """Round-4 finding 3: FR-46 names session_id on the abandonment
+    WARNING — the drain must bind it, not a bare component logger."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    monkeypatch.setattr(companion, "WRITE_GRACE_S", 0.05)
+    records = []
+    sink_id = logger.add(lambda m: records.append(m.record), level="WARNING")
+
+    async def hung_write():
+        await asyncio.sleep(60)
+
+    task = MagicMock()
+    task.queue_frames = AsyncMock()
+    task.cancel = AsyncMock()
+
+    async def run():
+        write = asyncio.create_task(hung_write())
+        companion._live_tasks["drain-warn"] = task
+        companion._inflight_writes["drain-warn"] = {write}
+        await companion.drain_live_sessions()
+        await asyncio.gather(write, return_exceptions=True)
+
+    try:
+        asyncio.run(run())
+    finally:
+        logger.remove(sink_id)
+        companion._live_tasks.pop("drain-warn", None)
+        companion._inflight_writes.pop("drain-warn", None)
+        companion._draining = False
+    warning = next(
+        r for r in records if r["extra"].get("event") == "tool.write_abandoned"
+    )
+    assert warning["extra"]["session_id"] == "drain-warn"

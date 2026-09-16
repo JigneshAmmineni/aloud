@@ -141,7 +141,7 @@ def test_db_failure_drops_batch_and_never_raises(monkeypatch):
     async def run():
         recorder = UsageRecorder("s-1", "uid-a")
         recorder.start()
-        recorder.record_llm_usage(10, 10)
+        recorder.record_llm_usage(10, 10, turn_id=1)
         await recorder.stop()  # must not raise
 
     asyncio.run(run())

@@ -137,6 +137,17 @@ def to_gemini_tools(tools: list[dict]) -> list[genai_types.Tool] | None:
     ]
 
 
+def _is_tool_response_content(content: genai_types.Content) -> bool:
+    """The consecutive-tool-result merge predicate (load-bearing for the
+    C-2 swap): a user-role content already carrying function responses —
+    the shape Gemini's own function-calling loop emits."""
+    return bool(
+        content.role == "user"
+        and content.parts
+        and content.parts[0].function_response is not None
+    )
+
+
 def to_gemini_contents(
     messages: list[dict],
 ) -> tuple[str | None, list[genai_types.Content]]:
@@ -179,7 +190,7 @@ def to_gemini_contents(
             part = genai_types.Part.from_function_response(
                 name=msg["name"], response=result
             )
-            if contents and contents[-1].role == "user" and contents[-1].parts and contents[-1].parts[0].function_response is not None:
+            if contents and _is_tool_response_content(contents[-1]):
                 contents[-1].parts.append(part)
             else:
                 contents.append(genai_types.Content(role="user", parts=[part]))

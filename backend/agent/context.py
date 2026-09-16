@@ -43,6 +43,10 @@ class ContextProvider:
         if documents_block:
             self._messages.append({"role": "system", "content": documents_block})
         self._log = logger.bind(session_id=session_id, component="agent.context")
+        # Running character count for the FR-44 estimate — maintained at
+        # append time so build() never rescans the conversation on the
+        # first-audio path (round-4 review).
+        self._approx_chars = sum(len(m["content"]) for m in self._messages)
 
     def build(self, *, turn_id: int | None = None, step: int = 1) -> list[dict]:
         """The message list for one LLM call. Deterministic, no LLM, no IO.
@@ -66,6 +70,7 @@ class ContextProvider:
 
     def append_user(self, text: str) -> None:
         self._messages.append({"role": "user", "content": text})
+        self._approx_chars += len(text)
 
     def append_step(
         self,
@@ -99,6 +104,9 @@ class ContextProvider:
                 ],
             }
         )
+        self._approx_chars += len(text) + sum(
+            len(c.name) + len(str(c.arguments)) for c in calls
+        )
         for call, result in zip(calls, results):
             self._messages.append(
                 {
@@ -108,6 +116,7 @@ class ContextProvider:
                     "content": result,
                 }
             )
+            self._approx_chars += len(str(result))
 
     def update_tool_result(self, call_id: str, result: dict) -> bool:
         """FR-46's late-write landing path: replace a previously appended
@@ -118,6 +127,7 @@ class ContextProvider:
         returns False."""
         for msg in reversed(self._messages):
             if msg.get("role") == "tool" and msg.get("tool_call_id") == call_id:
+                self._approx_chars += len(str(result)) - len(str(msg["content"]))
                 msg["content"] = result
                 return True
         self._log.bind(event="context.update_miss", call_id=call_id).warning(
@@ -131,16 +141,10 @@ class ContextProvider:
         if interrupted and text:
             text += INTERRUPTED_SUFFIX
         self._messages.append({"role": "assistant", "content": text})
+        self._approx_chars += len(text)
 
     def _approx_tokens(self) -> int:
-        # Runs on every build() (FR-44 mandates the per-build estimate),
-        # so it stays cheap: str() over dict-shaped content instead of a
-        # json.dumps round trip (round-3 review) — the heuristic is
-        # declared approximate, and repr-length tracks JSON-length.
-        chars = 0
-        for msg in self._messages:
-            content = msg.get("content")
-            chars += len(content) if isinstance(content, str) else len(str(content))
-            for call in msg.get("tool_calls", []):
-                chars += len(call["name"]) + len(str(call["arguments"]))
-        return chars // _CHARS_PER_TOKEN
+        # O(1): the running counter is maintained by every append/update
+        # (rounds 3-4 review) — the declared-approximate heuristic never
+        # rescans the conversation on the first-audio path.
+        return self._approx_chars // _CHARS_PER_TOKEN
