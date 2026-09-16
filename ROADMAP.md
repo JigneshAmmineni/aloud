@@ -98,6 +98,12 @@ it.**
 - During a brain dump / train of thought, minimal acknowledgments are the
   right move: "hmm", "that makes sense", "go on" — and it's fine to say
   nothing substantive until the user asks for thoughts.
+- But direct questions and direct address always get a real answer:
+  minimal acknowledgments are only for continuing *the user's* thread,
+  never a substitute for responding when spoken *to*. (Live-test bug:
+  "how are you" got "hm" — the current prompt gives the model a binary
+  "brain dump → say hmm" with no guidance on telling direct address
+  apart from a train of thought.)
 - A pause to think is not an invitation: the agent must not fill the
   user's thinking pauses with questions or suggestions. (The prompt can
   only shape what it says when a turn does fire; if pause tolerance needs
