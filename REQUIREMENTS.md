@@ -1167,7 +1167,7 @@ extends. Four design principles govern every FR below:
    one table, not two.
 2. **The agent is the editor; the UI is a viewer.** The workspace is
    defined as tools of the §4.10 agent — the roadmap's charter for this
-   feature: list/read/create/edit run through the loop's registry. The
+   feature: list/search/read/create/edit run through the loop's registry. The
    browser renders, downloads, and uploads; it never edits content.
    User-side editing and two-way co-editing are explicitly later (own
    spec).
@@ -1193,7 +1193,11 @@ text only — the consequence is named in FR-51); encryption at rest
 (post-MVP, NFR-6). Per-document delete was first drafted as out of scope
 and pulled **into** v1 by review: an undeletable mis-upload, readable by
 the agent in every future session with NFR-7's delete-everything as the
-only escape, is a dead end (FR-52).
+only escape, is a dead end (FR-52). A **model-invoked** delete tool stays excluded,
+deliberately: the memory-tool precedent grants the model delete, but v1
+has no undo or versioning, so destructive verbs stay with the user
+behind FR-52/54's confirmed affordance — revisit trigger: real users
+asking to delete by voice.
 
 - **FR-50** One `documents` table replaces `artifacts`. Metadata
   columns: `id` (**integer PK, one sequence for both sources** — the
@@ -1341,30 +1345,67 @@ only escape, is a dead end (FR-52).
   and never content, the create transaction (row + usage event, one
   commit), the announce-through-emit-callback path, and FR-12's verbal
   contract (confirm briefly, never read content aloud, act only when
-  asked). What changes:
+  asked). The tool contracts below are deliberately modeled on
+  Anthropic's own file tools (the Agent SDK's Read/Edit, the API
+  text-editor and memory tools): exact-match editing, uniqueness with
+  an explicit `replace_all`, line-numbered paged reads, quoted
+  steering errors — a proven interface for LLM editing, adopted
+  rather than invented. What changes:
   - `list_documents` returns both sources (id, source, kind, format,
     timestamps, title 🔒) — the agent now sees past uploads too. This
     widens §6's deliberate cross-session carve-out from artifacts to
     documents; it stays narrow, explicit, and user-asked.
-  - `read_document` gains **pagination** — FR-45's named escape: a
-    1-based `page` over `READ_DOCUMENT_MAX_CHARS`-sized slices; the
-    result carries `page` and `total_pages`, and the truncation marker
-    appears only when further pages exist. No `page` argument = page 1
-    = today's behavior.
+  - `read_document` gains **pagination and line numbers** — FR-45's
+    named escape, in the shape Anthropic's file tools use: each line
+    is prefixed with its absolute 1-based line number, and content is
+    paged over `READ_DOCUMENT_MAX_CHARS`-sized slices whose boundaries
+    **snap to line breaks** (a line number is meaningless if a page
+    can split its line); the result carries `page` and `total_pages`,
+    and the truncation marker appears only when further pages exist.
+    No `page` argument = page 1. Line numbers are what make `insert`
+    addressable and multi-match steering precise (below).
+  - **`search_documents`** — the Grep to `read_document`'s Read;
+    Anthropic's file toolkit ships them as a pair, and the reason
+    transfers: finding one passage by paging a 200k-char document
+    through 8k-char reads is ~25 LLM rounds at roughly a second each,
+    while the database finds it in milliseconds — search collapses
+    find-then-read into one round plus one targeted read. **Lexical
+    only** — substring or Postgres full-text match with stemming, the
+    repo layer's choice — over the user's own documents' title and
+    content; scoped to one document via optional `document_id`, or
+    across the workspace without it. Results: document id, title,
+    line number, and a bounded snippet around each match
+    (`SEARCH_SNIPPET_CHARS`), capped at `SEARCH_RESULTS_CAP` — each
+    result addresses a `read_document` page and line directly.
+    Owner-scoped in the repo layer like every query (RLS backstop;
+    the NFR-8 negative is mandated); no usage event (searches spend
+    nothing, and reads never emit events). **The feature-6 boundary
+    is explicit**: no embeddings, no chunking, no vector index, no
+    similarity ranking — semantic search belongs to the memory layer
+    and its own eval framework; this tool is deliberately as dumb as
+    grep.
   - `edit_document` keeps `replace` and `append` exactly as FR-45
     specced them — the over-cap `replace` refusal and the atomic
     DB-side `append` concatenation transfer verbatim — and adds
     **`str_replace`**, the real-editing mode FR-45's accepted
     consequence promised: `old_str` (non-empty) must occur **exactly
     once** in the stored content and is replaced by `new_str` (possibly
-    empty — deletion). Enforcement is **atomic and DB-side like
+    empty — deletion); **`replace_all: true`** (optional, default
+    false) waives uniqueness and replaces every occurrence in the same
+    single statement — an explicit flag, never an implicit fallback,
+    exactly the Agent SDK Edit contract. Enforcement is **atomic and
+    DB-side like
     `append`**: one UPDATE whose predicate verifies the single
     occurrence and whose SET performs the replacement, `RETURNING
     content` for the announce — never read-modify-write (the same
-    outlived-write race FR-46/FR-45 close for `append`). Zero
-    occurrences → a steering tool result ("no match — read the document
-    and copy the text exactly"); more than one → "ambiguous — include
-    more surrounding text". **The two steering results are producible,
+    outlived-write race FR-46/FR-45 close for `append`). The steering
+    strings are the memory tool's, adopted — quoting the miss back
+    shortens the model's retry loop, and line numbers are meaningful
+    because reads are line-numbered: zero occurrences → "No
+    replacement was performed: old_str `{old_str}` did not appear
+    verbatim."; more than one (without `replace_all`) → "Found {N}
+    occurrences of old_str, at lines {line_numbers}. Provide more
+    surrounding context, or pass replace_all.". **The two steering results are producible,
     not aspirational** — a bare UPDATE's zero rowcount cannot tell
     no-match from ambiguous: either the statement computes the
     occurrence count alongside the update (a CTE returning it), or the
@@ -1377,6 +1418,15 @@ only escape, is a dead end (FR-52).
     exists to guarantee. **FR-45's "effectively append-only past the
     read cap" consequence is hereby retired** — the escape it named has
     landed.
+  - `edit_document` also gains **`insert`** (the text-editor tool's
+    remaining verb): `insert_line` (0 = before the first line, N =
+    after line N, numbered exactly as `read_document` prints them)
+    plus `insert_text`. Same atomicity discipline as the other write
+    modes: one UPDATE that computes the target line's character
+    offset from the stored content inside the same statement — never
+    read-modify-write. An out-of-range `insert_line` steers with the
+    memory tool's shape: "Invalid `insert_line`: {n}. It should be
+    within [0, {n_lines}].".
   - Editability is format-gated, not source-gated: `markdown` and
     `text` documents are editable whichever source they came from
     (cleaning up an uploaded notes file is a first-class ask);
@@ -1401,12 +1451,20 @@ only escape, is a dead end (FR-52).
   Mandated tests: (i) FR-45's transferred tests hold under the new
   names — cap termination, atomic-append concurrency, the 1 `count` /
   N `edits` aggregation, the NFR-8 negatives; (ii) `str_replace`:
-  zero / one / many occurrence outcomes; empty `new_str` deletes; and a
+  zero / one / many occurrence outcomes; empty `new_str` deletes;
+  `replace_all` replaces every occurrence in one statement; and a
   concurrent `append` racing a `str_replace` loses neither edit (both
   are single statements); (iii) the PDF edit refusal; (iv) pagination:
-  page boundaries are exact, `total_pages` is correct, an out-of-range
-  page returns a steering result, and page 1 equals the unpaginated
-  read.
+  page boundaries fall on line breaks, line numbers run continuously
+  across pages, `total_pages` is correct, an out-of-range page returns
+  a steering result, and page 1 of a small document equals the whole
+  document; (v) `insert`: at 0, mid-document, and end; out-of-range
+  steers with the bounds; concurrent with an `append`, neither edit is
+  lost; (vi) `search_documents`: a match deep in a large document
+  returns the line number its `read_document` page confirms; the
+  multi-match `str_replace` steering names those same line numbers;
+  and the NFR-8 negative (user A's search never returns user B's
+  rows).
 - **FR-54** The workspace UI replaces the fixed artifact drawer and the
   bare upload list on the session console: a workspace region with
   **two side-by-side scrollable lists** — **Uploaded**
@@ -1460,7 +1518,8 @@ only escape, is a dead end (FR-52).
 
 **Amendments this feature makes** (recorded here; the amended FRs stay
 authoritative for everything not named): FR-45 — tool and knob renames,
-`str_replace`, read pagination, announce renames and size threshold,
+`str_replace` (with `replace_all`), `insert`, `search_documents`,
+line-numbered paged reads, announce renames and size threshold,
 append-only consequence retired (FR-53). FR-31 / FR-38 — `documents`
 **joins** the user-owned table list, the content-table enumeration, and
 test (d); `artifacts` leaves no protected set until its stated drop
@@ -1483,6 +1542,8 @@ ever reads FR-38 or FR-45 without seeing them.
 | `LIST_DOCUMENTS_CAP` (tool; renamed from `LIST_ARTIFACTS_CAP`) | 20 | `db/` documents repo |
 | `READ_DOCUMENT_MAX_CHARS` (renamed from `READ_ARTIFACT_MAX_CHARS`; also the `read_document` page size) | 8,000 | `agent/tools.py` |
 | `ANNOUNCE_CONTENT_MAX_CHARS` (announce payload cap; above it `content_omitted: true` + client refetch) | 16,000 | `agent/tools.py` |
+| `SEARCH_RESULTS_CAP` (`search_documents` max results) | 10 | `db/` documents repo |
+| `SEARCH_SNIPPET_CHARS` (context around each search match) | 200 | `agent/tools.py` |
 | `MAX_FILE_BYTES` (per uploaded file) | 5 MB | unchanged (upload/extraction module) |
 | `MAX_DOC_CHARS` (per document, post-extraction) | 200,000 | unchanged |
 | `MAX_TOTAL_CHARS` (per-session injected block, FR-21) | 400,000 | unchanged |
@@ -1531,7 +1592,7 @@ The following are explicitly not part of this product:
 
 ### Deferred — planned, but out of scope for the MVP demo
 
-- **Cross-session memory** (formerly FR-15–FR-17). The agent starts every session fresh; *automatic* recall is in-session only. Planned later following the MemGPT framework, possibly integrating RAG with clever indexing and semantic vector search, depending on performance. One deliberate carve-out (§4.10 FR-45, renamed and widened by §4.11 FR-53): the explicit, user-asked document tools (`list_documents`/`read_document`/`edit_document`) do reach the user's own documents — agent-produced and uploaded — from past sessions: narrow, on-request reads and edits, not memory.
+- **Cross-session memory** (formerly FR-15–FR-17). The agent starts every session fresh; *automatic* recall is in-session only. Planned later following the MemGPT framework, possibly integrating RAG with clever indexing and semantic vector search, depending on performance. One deliberate carve-out (§4.10 FR-45, renamed and widened by §4.11 FR-53): the explicit, user-asked document tools (`list_documents`/`search_documents`/`read_document`/`edit_document`) do reach the user's own documents — agent-produced and uploaded — from past sessions: narrow, on-request reads and edits, not memory.
 - **Streaming memory processing.** When cross-session memory lands, it must run in parallel while the user is still speaking — context editing during input, not after the session ends.
 - **Document indexing & retrieval.** Document *storage* landed with the workspace (§4.11): uploads and agent output persist as `documents` rows. What stays deferred to the memory layer is making them *retrievable* — chunking, embedding, semantic search — and the proactive mid-conversation pickup that depends on the context engine (feature 5).
 - **Proactive flagging** (formerly FR-8; demo stretch goal). The agent surfacing gaps, contradictions, or connections unprompted, with a user-configurable on/off setting.
