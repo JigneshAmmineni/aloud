@@ -60,14 +60,15 @@ def live_session_count() -> int:
     return len(_live_tasks)
 
 
-async def _await_writes(writes: set[asyncio.Task], log) -> None:
-    """Await in-flight write tools under the single WRITE_GRACE_S budget;
-    a write the expired budget abandons is cancelled and logged at WARNING
-    (FR-46: its only trace must never be asyncio's destroyed-task noise)."""
+async def _await_writes(writes: set[asyncio.Task], log, timeout: float) -> None:
+    """Await in-flight write tools under (a slice of) the single
+    WRITE_GRACE_S budget; a write the expired budget abandons is cancelled
+    and logged at WARNING (FR-46: its only trace must never be asyncio's
+    destroyed-task noise)."""
     pending = {t for t in writes if not t.done()}
     if not pending:
         return
-    done, still_pending = await asyncio.wait(pending, timeout=WRITE_GRACE_S)
+    done, still_pending = await asyncio.wait(pending, timeout=max(0.0, timeout))
     for task in still_pending:
         task.cancel()
         log.bind(event="tool.write_abandoned").warning(
@@ -94,16 +95,24 @@ async def drain_live_sessions() -> int:
             pass  # a torn connection can't hear the goodbye; cancel anyway
     if tasks:
         await asyncio.sleep(0.5)  # let the message flush over the data channel
+        log = logger.bind(component="agent.companion")
+        # ONE deadline for the whole budget (never composed): the sessions
+        # are still live during this wait, so a write can START inside the
+        # grace window — the post-cancel sweep below catches those on
+        # whatever remains of the same budget (review finding: a snapshot
+        # alone lets a late write die mid-commit at process exit,
+        # unlogged).
+        deadline = time.monotonic() + WRITE_GRACE_S
         all_writes = {t for s in _inflight_writes.values() for t in s}
-        await _await_writes(
-            all_writes, logger.bind(component="agent.companion")
-        )
+        await _await_writes(all_writes, log, deadline - time.monotonic())
         for session_id, task in tasks:
             try:
                 await task.cancel()
             except Exception:
                 pass
-        logger.bind(component="agent.companion", event="session.drained").info(
+        late_writes = {t for s in _inflight_writes.values() for t in s}
+        await _await_writes(late_writes, log, deadline - time.monotonic())
+        log.bind(event="session.drained").info(
             f"drained {len(tasks)} live session(s) for shutdown"
         )
     return len(tasks)
@@ -181,8 +190,10 @@ class CompanionAgent:
         writer = TranscriptWriter(session_id, self._user_id)
         recorder = UsageRecorder(session_id, self._user_id)
         traces = TraceRecorder(session_id, self._user_id)
+        # registered in _inflight_writes just before the pipeline runs —
+        # registering here would leak the entry if session setup raises
+        # before the try/finally that removes it (review nit)
         write_tasks: set[asyncio.Task] = set()
-        _inflight_writes[session_id] = write_tasks
 
         # FR-45/FR-46: the tools' server-message seam. Safe to call from a
         # detached write task after the pipeline closed: a silent no-op,
@@ -285,6 +296,7 @@ class CompanionAgent:
         writer.start()
         recorder.start()
         traces.start()
+        _inflight_writes[session_id] = write_tasks
         _live_tasks[session_id] = task
         log.bind(event="session.started").info("Pipeline starting")
         end_reason = "user"  # tap and connection drop are indistinguishable (resume is descoped)
@@ -307,7 +319,7 @@ class CompanionAgent:
             # write's events must land in live queues, so the wait comes
             # first; the drain path must NOT wait twice.
             if not _draining:
-                await _await_writes(write_tasks, log)
+                await _await_writes(write_tasks, log, WRITE_GRACE_S)
             _inflight_writes.pop(session_id, None)
             # FR-32: STT usage = streamed-time proxy, recorded at session end
             # (crash-orphaned sessions are covered by the boot sweep). A

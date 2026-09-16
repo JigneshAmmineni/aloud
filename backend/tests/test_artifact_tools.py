@@ -269,6 +269,8 @@ def test_another_users_artifact_reads_as_not_found(tmp_path):
 
         got = await _tool("read_artifact").handler({"artifact_id": theirs}, mine)
         assert got["status"] == "not_found"
+        listing = await _tool("list_artifacts").handler({}, mine)
+        assert theirs not in [a["id"] for a in listing["artifacts"]]
         for mode in ("replace", "append"):
             got = await _tool("edit_artifact").handler(
                 {"artifact_id": theirs, "mode": mode, "content": "hijack"}, mine
@@ -332,5 +334,39 @@ def test_unknown_kind_is_coerced_to_summary(tmp_path):
         async with session_factory()() as db:
             row = (await db.execute(select(Artifact))).scalars().one()
         assert row.kind == "summary"
+
+    asyncio.run(run())
+
+
+def test_edit_event_files_under_the_editing_session(tmp_path):
+    """Round-2 blocking 1: the tool's defining case edits a PRIOR-session
+    artifact — the artifact_edited event must carry the EDITING session
+    (whose turn number it holds), or the cost vanishes from the current
+    drill-down and pollutes the old session with a phantom turn."""
+
+    async def run():
+        await _setup_db(tmp_path)
+        await create_session_row("s-a2", "uid-a")  # today's session
+        created_in = _ctx([], session_id="s-a")  # yesterday's
+        artifact_id = await _create(created_in, title="Old plan")
+
+        editing = _ctx([], session_id="s-a2", turn_id=9)
+        result = await _tool("edit_artifact").handler(
+            {"artifact_id": artifact_id, "mode": "append", "content": "new bullet"},
+            editing,
+        )
+        assert result["status"] == "edited"
+
+        async with session_factory()() as db:
+            events = (
+                (
+                    await db.execute(
+                        select(UsageEvent).where(UsageEvent.unit == "edits")
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert [(e.session_id, e.turn_id) for e in events] == [("s-a2", 9)]
 
     asyncio.run(run())

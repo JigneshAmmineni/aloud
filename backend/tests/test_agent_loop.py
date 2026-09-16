@@ -820,3 +820,54 @@ def test_fallback_keeps_model_text_the_user_already_heard():
     asyncio.run(h.loop._run_turn("go"))
     assistants = [m["content"] for m in h.ctx.build() if m["role"] == "assistant"]
     assert assistants == ["Here's the thing."]
+
+
+def test_teardown_cleanup_finalizes_the_cut_turn():
+    """Round-2 blocking 3: End-tap/disconnect is the third interruption
+    path — the pipeline's cleanup() must run the same finalize as a
+    barge-in, so the cut step gets its interrupted trace (FR-49: the
+    cut-off turns are precisely the ones a trace is for)."""
+    h = make_loop([[LLMTextDelta("Halfway th"), 60]])
+
+    async def run():
+        task = asyncio.create_task(h.loop._run_turn("talk"))
+        h.loop._turn_task = task
+        await asyncio.sleep(0.05)
+        h.loop.note_spoken_sentence("Halfway th")
+        await h.loop.cleanup()  # what pipeline teardown calls
+
+    asyncio.run(run())
+    traces = _queued(h.traces, LLMTrace)
+    assert len(traces) == 1
+    assert traces[0].finish_reason == "interrupted"
+
+
+def test_finished_read_with_empty_result_is_not_relabeled_cancelled():
+    """Round-2 nit: results are checked with `is not None`, never
+    truthiness — a finished read returning {} must keep its result."""
+    write = write_tool(delay=60, emit_on_done=False)
+    empty_read = read_tool(name="probe", result={})
+    scripts = [
+        [
+            LLMToolCall(name="probe", arguments={}, id="r1"),
+            LLMToolCall(name="save", arguments={}, id="w1"),
+            _done(),
+        ]
+    ]
+    h = make_loop(scripts, tools=[write, empty_read])
+
+    async def run():
+        task = asyncio.create_task(h.loop._run_turn("go"))
+        h.loop._turn_task = task
+        await asyncio.sleep(0.1)  # read finished (empty dict), write hung
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        h.loop._turn_task = None
+        h.loop._finalize_interrupted_turn()
+
+    asyncio.run(run())
+    results = {
+        m["tool_call_id"]: m["content"] for m in h.ctx.build() if m["role"] == "tool"
+    }
+    assert results["r1"] == {}  # kept, not {"status": "cancelled"}
+    assert results["w1"] == {"status": "in_progress"}

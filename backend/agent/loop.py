@@ -267,8 +267,10 @@ class AgentLoopProcessor(FrameProcessor):
         except asyncio.CancelledError:
             raise  # FR-46: _start_interruption owns the aftermath
         except Exception as e:
+            # exception TYPE only (NFR-9): a propagated handler/DB error
+            # can embed SQL parameters, i.e. artifact content
             log.bind(event="agent.turn_failed", step=state.step).error(
-                f"loop error, degrading to spoken fallback: {e!r}"
+                f"loop error, degrading to spoken fallback: {type(e).__name__}"
             )
             await self._speak_fallback(state, reason="error")
         # Any non-cancelled exit is a turn end (FR-47: flush-or-clear).
@@ -313,23 +315,31 @@ class AgentLoopProcessor(FrameProcessor):
         )
 
         await self.push_frame(LLMFullResponseStartFrame())
-        async for event in self._llm.stream(
-            messages, tools=self._schemas, tool_choice=tool_choice
-        ):
-            elapsed_ms = round((time.monotonic() - state.t0) * 1000)
-            if state.ttfb_ms is None and not isinstance(event, LLMDone):
-                state.ttfb_ms = elapsed_ms
-            if isinstance(event, LLMTextDelta):
-                state.step_text += event.text
-                self._audio_pending = True
-                await self.push_frame(LLMTextFrame(event.text))
-            elif isinstance(event, LLMToolCall):
-                if not state.calls:
-                    await self._maybe_filler(state, elapsed_ms)
-                state.calls.append(event)
-            elif isinstance(event, LLMDone):
-                finish = event.finish_reason
-                state.usage = event.usage
+        try:
+            async for event in self._llm.stream(
+                messages, tools=self._schemas, tool_choice=tool_choice
+            ):
+                elapsed_ms = round((time.monotonic() - state.t0) * 1000)
+                if state.ttfb_ms is None and not isinstance(event, LLMDone):
+                    state.ttfb_ms = elapsed_ms
+                if isinstance(event, LLMTextDelta):
+                    state.step_text += event.text
+                    self._audio_pending = True
+                    await self.push_frame(LLMTextFrame(event.text))
+                elif isinstance(event, LLMToolCall):
+                    if not state.calls:
+                        await self._maybe_filler(state, elapsed_ms)
+                    state.calls.append(event)
+                elif isinstance(event, LLMDone):
+                    finish = event.finish_reason
+                    state.usage = event.usage
+        except Exception:
+            # close the frame pair before degrading — a dangling
+            # LLMFullResponseStartFrame stalls downstream aggregation.
+            # (CancelledError skips this: the barge-in flush resets
+            # downstream itself.)
+            await self.push_frame(LLMFullResponseEndFrame())
+            raise
         await self.push_frame(LLMFullResponseEndFrame())
 
         duration_ms = round((time.monotonic() - state.t0) * 1000)
@@ -463,7 +473,9 @@ class AgentLoopProcessor(FrameProcessor):
         self._recorder.record_step_stage(state.turn_id, key, duration_ms)
         if outcome == "ok" and isinstance(result, dict):
             status = result.get("status", "ok")
-            outcome = "error" if status in ("error", "not_found") else "ok"
+            outcome = (
+                "error" if status in ("error", "not_found", "refused") else "ok"
+            )
         log.bind(
             event="tool.invoked", duration_ms=duration_ms, outcome=outcome
         ).info(f"{call.name}: {outcome} in {duration_ms}ms")
@@ -506,7 +518,7 @@ class AgentLoopProcessor(FrameProcessor):
         exc = task.exception()
         if exc is not None:
             self._log.bind(event="tool.abandoned_read_failed").info(
-                f"abandoned read {call.name} raised: {exc!r}"
+                f"abandoned read {call.name} raised: {type(exc).__name__}"
             )
 
     def _land_late_results(self) -> None:
@@ -598,6 +610,21 @@ class AgentLoopProcessor(FrameProcessor):
             self._finalize_interrupted_turn()
         await super()._start_interruption()
 
+    async def cleanup(self):
+        # End-tap/disconnect teardown is the THIRD interruption path
+        # (review round 2), alongside barge-in and next-turn: the pipeline
+        # cancels the turn task with no interruption broadcast, and the cut
+        # step still owes its interrupted trace and partial usage — FR-49's
+        # "the cut-off turns are precisely the ones a trace is for". This
+        # hook runs inside the runner, before companion stops the
+        # recorders, so the rows land in live queues.
+        task = self._turn_task
+        if task is not None:
+            self._turn_task = None
+            await self.cancel_task(task)
+            self._finalize_interrupted_turn()
+        await super().cleanup()
+
     def _finalize_interrupted_turn(self) -> None:
         state = self._state
         self._state = None
@@ -640,7 +667,13 @@ class AgentLoopProcessor(FrameProcessor):
             results: list[dict] = []
             for i, call in enumerate(state.calls):
                 write_task = state.write_tasks.get(call.id)
-                if state.results and i < len(state.results) and state.results[i]:
+                # `is not None`, never truthiness: a finished read whose
+                # result is an empty dict must not be relabeled "cancelled"
+                if (
+                    state.results
+                    and i < len(state.results)
+                    and state.results[i] is not None
+                ):
                     results.append(state.results[i])  # finished before barge-in
                 elif write_task is not None:
                     if write_task.done() and not write_task.cancelled():

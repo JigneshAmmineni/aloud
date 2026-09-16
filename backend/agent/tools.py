@@ -166,11 +166,21 @@ async def _edit_artifact(args: dict, ctx: ToolContext) -> dict:
                     ),
                 }
             row = await replace_artifact_content(
-                ctx.user_id, artifact_id, content, title, ctx.turn_id
+                ctx.user_id,
+                artifact_id,
+                content,
+                title,
+                ctx.turn_id,
+                session_id=ctx.session_id,
             )
         else:
             row = await append_artifact_content(
-                ctx.user_id, artifact_id, "\n" + content, title, ctx.turn_id
+                ctx.user_id,
+                artifact_id,
+                "\n" + content,
+                title,
+                ctx.turn_id,
+                session_id=ctx.session_id,
             )
     except Exception as e:
         # exception TYPE only — same NFR-9 rule as create

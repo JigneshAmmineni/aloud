@@ -20,10 +20,16 @@ from db.models import Artifact, UsageEvent
 LIST_ARTIFACTS_CAP = 20
 
 
-def _edit_event(row: Artifact, user_id: str, turn_id: int | None) -> UsageEvent:
+def _edit_event(
+    row: Artifact, user_id: str, session_id: str, turn_id: int | None
+) -> UsageEvent:
+    """`session_id` is the EDITING session, never the artifact's
+    originating one (review finding): the tool's defining case edits a
+    prior-session artifact, and turn_id belongs to the current session —
+    FR-36's per-turn cost table joins on exactly that pair."""
     return UsageEvent(
         user_id=user_id,
-        session_id=row.session_id,
+        session_id=session_id,
         turn_id=turn_id,
         ts=datetime.now(timezone.utc),
         stage="artifact",
@@ -106,6 +112,8 @@ async def replace_artifact_content(
     content: str,
     title: str | None,
     turn_id: int | None,
+    *,
+    session_id: str,
 ) -> Artifact | None:
     """Full-content replace + artifact_edited event, one transaction.
     Returns the updated row, or None when the id isn't the caller's
@@ -124,7 +132,7 @@ async def replace_artifact_content(
         ).scalar_one_or_none()
         if row is None:
             return None
-        db.add(_edit_event(row, user_id, turn_id))
+        db.add(_edit_event(row, user_id, session_id, turn_id))
         await db.commit()
     return row
 
@@ -135,6 +143,8 @@ async def append_artifact_content(
     text: str,
     title: str | None,
     turn_id: int | None,
+    *,
+    session_id: str,
 ) -> Artifact | None:
     """ATOMIC DB-side concatenation (content = content || :text, RETURNING
     the post-edit row) — never read-modify-write, which would silently lose
@@ -158,6 +168,6 @@ async def append_artifact_content(
         ).scalar_one_or_none()
         if row is None:
             return None
-        db.add(_edit_event(row, user_id, turn_id))
+        db.add(_edit_event(row, user_id, session_id, turn_id))
         await db.commit()
     return row
