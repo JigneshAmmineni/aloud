@@ -225,7 +225,9 @@ Caddy `basic_auth` gate, which is removed at rollout.
   visual design is not specified; NFR-3 (mobile browsers) applies.
 - **FR-31** Postgres row-level security is enabled on every table holding
   user-owned rows (sessions, transcript events, artifacts, and any table this
-  feature adds), with policies restricting access to rows matching the
+  feature adds — later joined by `llm_traces` (§4.10) and `documents`
+  (§4.11), with `artifacts` staying in the set until §4.11's stated drop
+  release), with policies restricting access to rows matching the
   request's verified `user_id` (communicated to Postgres per request via
   `SET LOCAL app.user_id` in the DB session factory — `SET LOCAL` specifically
   because it is transaction-scoped: it must run inside the same transaction as
@@ -1260,8 +1262,25 @@ asking to delete by voice.
   `updated_at`, plus `legacy_artifact_id` = the source row's id (the
   copy's join key and provenance) — dogfooding rows are real user
   data; loss is not acceptable. **Run-once means a persisted marker,
-  not a data heuristic**: completion is recorded in a dedicated
-  migration-marker row, and later boots skip the migration entirely.
+  not a data heuristic**: completion is recorded in a dedicated,
+  **named** marker table — `schema_migrations`, key
+  `artifacts_to_documents`, completed-at timestamp — and later boots
+  skip the migration entirely. **The migration's database identity is
+  stated, because the default identity fails silently**: the copy is
+  a cross-user `INSERT … SELECT` — the one bulk cross-user write in
+  the system — and on the RLS-bound application role with no
+  `app.user_id` set, the SELECT returns zero rows and the INSERT is
+  refused by `WITH CHECK`: nothing copies, the marker writes, the
+  boots that follow skip, and the drop release then destroys the
+  originals. It therefore runs on the **RLS-exempt
+  `bootstrap_session()`** — the FR-32 boot sweep's slot *and*
+  identity, retired right after boot exactly as today; `documents`
+  joins **both `_RLS_TABLES` and the application role's explicit
+  GRANT list (SELECT/INSERT/UPDATE/DELETE — FR-52 needs the
+  DELETE)**; and the marker is written **only after the copy is
+  verified — copied count equals source count — in the same
+  transaction**, so a short-circuited copy can never mark itself
+  done.
   Insert-where-absent re-run on every boot was considered and
   rejected — it would **resurrect deleted documents**: FR-52's delete
   removes the `documents` row while the retained `artifacts` row
@@ -1283,9 +1302,11 @@ asking to delete by voice.
   runs once — asserted the way the bug would show: **delete a migrated
   document, boot again, and the row stays deleted (no resurrection)**,
   and a boot after an upload has landed in the shared table copies
-  nothing; the NFR-8 negative on `documents` (user A cannot read user
-  B's rows); FR-38 test (d) extended — the admin context reads zero
-  rows from `documents` **and** from the retained `artifacts` table.
+  nothing; a copy that yields fewer rows than the source (simulated
+  short-circuit) writes **no marker**; the NFR-8 negative on
+  `documents` (user A cannot read user B's rows); FR-38 test (d)
+  extended — the admin context reads zero rows from `documents`
+  **and** from the retained `artifacts` table.
 - **FR-51** Uploads persist; the attach flow is behavior-identical.
   `POST /documents` keeps its contract (multipart, one file per
   request, extension-first type detection, extraction rules and error
@@ -1296,16 +1317,28 @@ asking to delete by voice.
   response becomes `{id, title, format, char_count}` — `mime_type`
   disappears with the store, since `format` subsumed it and no column
   backs it. Persistence gets the guardrails ephemerality never needed:
-  `POST /documents` is **rate-limited per caller** through the
-  existing in-memory limiter (`app/ratelimit.py`, the email-check
-  pattern; `DOCUMENTS_RATE_LIMIT`, default 20/min), and a **per-user
+  `POST /documents` is **rate-limited per user** — the endpoint
+  already resolves `user_id`, which keys the limiter (not per-IP; the
+  email-check pattern predates having an identity to key on) —
+  through the existing in-memory limiter (`app/ratelimit.py`;
+  `DOCUMENTS_RATE_LIMIT`, default 20/min), and a **per-user
   document quota** (`MAX_DOCUMENTS_PER_USER`, default 200) is enforced
   in the repo's insert path — so it binds the upload endpoint and
   `create_document` alike (an upload over quota gets a clear 400; the
   tool gets a steering result). Rationale recorded: nothing else caps
   rows per user (`WORKSPACE_LIST_CAP` caps the list, not the table),
   and 20 GB of shared VM disk with a 15-minute disk alert is the only
-  backstop behind it. The
+  backstop behind it. One prefill cost is recorded rather than
+  hidden: the attach block is a system message re-sent on **every
+  step of every turn**, so a full 400k-char set is ~100k input tokens
+  on the first-audio path — and the attach toggle makes such a set a
+  few taps to assemble, where it used to take a 2 MB upload sitting.
+  The client-side budget refusal stops overflow, not slowness. FR-44's
+  `context.built` `approx_tokens` log is the visibility; the revisit
+  trigger is dogfooding showing first-audio latency or spend degrading
+  with large attach sets, and the levers are lowering
+  `MAX_TOTAL_CHARS` or feature 5's retrieval-based demotion of
+  attached documents. The
   response's `id` becomes the integer row id (FR-50). Session attach
   becomes a **user-curated selection, never an automatic one**: the
   client sends the attach set's ids to `/start`, attach resolution
@@ -1348,7 +1381,14 @@ asking to delete by voice.
   preview, download, and FR-53/55's oversized-announce refetch.
   `DELETE /documents/{id}` — pulled into v1 by review (the scope note
   above): hard delete, either source, behind FR-54's confirming
-  affordance. Deliberate delete semantics, stated: usage events are
+  affordance. **Hard delete means the content is actually gone**: for
+  a migrated document the same transaction also deletes the paired
+  legacy `artifacts` row via `legacy_artifact_id` — otherwise the 🔒
+  title/content would survive on disk until the drop release, behind
+  an affordance that told the user they were destroyed. Stated
+  forfeit, accepted as alignment rather than cost: a rollback to
+  pre-§4.11 code cannot restore rows the user destructively deleted —
+  restoring them is exactly the resurrection FR-50 forbids. Deliberate delete semantics, stated: usage events are
   untouched (*spent is recorded* — FR-38's event-sourced counts survive
   the row, deliberately); a deleted id later named by a tool resolves
   not-found (the standard steering result) and in an attach set is
@@ -1367,7 +1407,8 @@ asking to delete by voice.
   as part of this FR. Mandated tests: the NFR-8 negatives on all three
   routes (another user's id never appears in the list, GETs it
   not-found, DELETEs it not-found and deletes nothing); the list
-  response never serializes `content`; delete → the row is gone and a
+  response never serializes `content`; delete → the row is gone — for a migrated document the
+  paired `artifacts` row too, in the same transaction — and a
   subsequent `read_document` of that id steers not-found.
 - **FR-53** The agent's document tools — FR-45 amended: same registry,
   same discipline, renamed and extended. Renames: `create_artifact` →
@@ -1402,7 +1443,14 @@ asking to delete by voice.
     case — is hard-cut at the cap with an explicit `[line continues]`
     marker, and the next page resumes under the **same** line number;
     without this rule the page either blows the cap or comes back
-    empty and the model pages forever into MAX_STEPS. The result
+    empty and the model pages forever into MAX_STEPS. The knob binds
+    **raw content characters per page** — line-number prefixes and
+    markers are decoration on top (bounded, small) and do not count
+    against it. Page-slicing happens in the repo over **one** owned
+    row's content, itself bounded by `MAX_DOC_CHARS` — a single
+    bounded fetch in-process, which is not the many-row shipping the
+    `search_documents` bullet forbids: the caps-in-the-repo rule
+    guards unbounded fan-out, not one document. The result
     carries `page` and `total_pages`,
     and the truncation marker appears only when further pages exist.
     No `page` argument = page 1. Line numbers are what make `insert`
@@ -1411,7 +1459,7 @@ asking to delete by voice.
     Anthropic's file toolkit ships them as a pair, and the reason
     transfers: finding one passage by paging a 200k-char document
     through 8k-char reads is ~25 LLM rounds at roughly a second each,
-    while the database finds it in milliseconds — search collapses
+    while a single-document scan is milliseconds — search collapses
     find-then-read into one round plus one targeted read. **Lexical
     only, and v1 is pinned to substring matching (`ILIKE`)** — not
     left to the repo layer, because the fork is not free: unindexed
@@ -1421,7 +1469,16 @@ asking to delete by voice.
     exactly what NFR-6's encryption-readiness protects. Full-text
     with stemming is recorded as deferred *with that conflict named*;
     it arrives only alongside a design that resolves it (feature 6's
-    territory). Scope: the user's own documents' title and content;
+    territory). The model's query is treated as a **literal
+    substring**: `%`, `_`, and the escape character are escaped before
+    entering the `ILIKE` pattern — a model-supplied wildcard must
+    never widen the scan. **The workspace-wide scan is bounded, not
+    assumed fast**: FR-51's quota permits ~40 MB of text per user, and
+    an unindexed scan over that is not milliseconds mid-turn — a
+    workspace-wide search scans the newest `SEARCH_SCAN_CAP` (default
+    50) documents by activity, the result says so when that cap
+    truncated the scan ("searched your 50 most recent documents"), and
+    FR-47's 1s per-tool WARN is the standing tripwire. Scope: the user's own documents' title and content;
     one document via optional `document_id`, or across the workspace
     without it. Results: document id, title, a `match` discriminator
     (`title` | `content`), and — for content matches — line number
@@ -1432,7 +1489,9 @@ asking to delete by voice.
     line and snippet, never whole `content` columns — FR-45's
     caps-live-in-the-repo rule; a ten-hit search must not ship
     megabytes to produce kilobytes. Each content match addresses a
-    `read_document` page and line directly.
+    `read_document` page and line directly. Like `insert`, the query
+    is dialect-bound (`ILIKE`, in-SQL line arithmetic), so **test
+    (vi) runs in the Postgres-only lane** as well.
     Owner-scoped in the repo layer like every query (RLS backstop;
     the NFR-8 negative is mandated); no usage event (searches spend
     nothing, and reads never emit events). **The feature-6 boundary
@@ -1471,7 +1530,14 @@ asking to delete by voice.
     ambiguity count, `insert`'s line bounds, the format gate's
     message): the atomicity rule binds *writes*, and a failed or
     refused UPDATE wrote nothing, so no read-modify-write window
-    exists. `str_replace` works at **any** content
+    exists. **Decorations are presentation, not content**: the
+    line-number prefixes and `[line continues]` markers exist only in
+    `read_document`'s rendering — `old_str` matches the **stored**
+    content, and the tool description must say so where the model
+    reads it (an `old_str` copied with its number prefix produces the
+    no-match steering, not a mystery); test (ii) gains the case — an
+    `old_str` copied with its decoration, and one spanning a hard-cut
+    page boundary. `str_replace` works at **any** content
     size: an exact match proves the model has seen the text it touches,
     which is precisely the knowledge the over-cap `replace` refusal
     exists to guarantee. **FR-45's "effectively append-only past the
@@ -1618,6 +1684,7 @@ This block remains as the index of what changed.
 | `READ_DOCUMENT_MAX_CHARS` (renamed from `READ_ARTIFACT_MAX_CHARS`; also the `read_document` page size) | 8,000 | `agent/tools.py` |
 | `ANNOUNCE_CONTENT_MAX_CHARS` (announce payload cap; above it `content_omitted: true` + client refetch) | 16,000 | `agent/tools.py` |
 | `SEARCH_RESULTS_CAP` (`search_documents` max results) | 10 | `db/` documents repo |
+| `SEARCH_SCAN_CAP` (workspace-wide search scans this many newest documents) | 50 | `db/` documents repo |
 | `SEARCH_SNIPPET_CHARS` (context around each search match; cut in SQL) | 200 | `db/` documents repo |
 | `MAX_DOCUMENTS_PER_USER` (per-user row quota; binds upload and `create_document`) | 200 | `db/` documents repo |
 | `DOCUMENTS_RATE_LIMIT` (`POST /documents` per-caller limit) | 20/min | `app/ratelimit.py` wiring |
