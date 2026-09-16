@@ -10,13 +10,19 @@ here are aspirational notes and carry no weight in specs or reviews.
 
 ## Vision
 
-Aloud is a voice-first thinking partner for people who process ideas best by
-talking out loud. The finished product: you open it on any device, talk through
-whatever you're working on, and the agent — which remembers your past sessions,
-your documents, and your open threads — asks sharp questions, pressure-tests
-your plans, and turns the mess into organized artifacts you can watch it write.
-Multi-user, private by design: every user's conversations, memories, and
-documents are theirs alone.
+Aloud is a voice-first work assistant for people who think and work by
+talking out loud. The finished product: you open it on any device and your
+work becomes a conversation with an assistant that does the tiny details.
+Reading becomes an audiobook — or listening to an expert who has read what
+you need to read and can summarize, recite, or answer questions about it.
+Writing becomes talking your ideas through, letting your train of thought
+run, and bouncing them off an assistant that puts them down coherently —
+you review the write-up, go over specific lines or phrasing as needed, as
+hands-on or as imprecise as you want. The agent — which remembers your
+past sessions, your documents, and your open threads — structures your
+creativity, and asks sharp questions or pressure-tests your plans when you
+invite it to. Multi-user, private by design: every user's conversations,
+memories, and documents are theirs alone.
 
 ## Feature order
 

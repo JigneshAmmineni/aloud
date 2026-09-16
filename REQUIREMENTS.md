@@ -2,9 +2,9 @@
 
 ## 1. Product Purpose
 
-Aloud is a voice-first thinking partner for people who process ideas best by talking out loud. You speak; it listens, asks sharp questions, and helps you think more clearly — while you're walking, commuting, or anywhere else you don't have your hands free.
+Aloud is a voice-first work assistant for people who think and work by talking out loud. You speak; it listens, handles the tiny details, and gives your words structure — while you're walking, commuting, or anywhere else you don't have your hands free. Writing becomes talking your ideas through and reviewing the coherent write-up it produces; reading becomes listening to an assistant that has read what you need and can summarize, recite, or answer questions. It asks sharp questions and pressure-tests your plans when you invite it to.
 
-It is not a search engine, a task manager, or a note-taking app. It is a conversational agent that makes your thinking better in real time.
+It is not a search engine, a task manager, or a note-taking app. It is a conversational assistant that structures your thinking and creativity in real time.
 
 ---
 

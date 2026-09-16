@@ -2,7 +2,7 @@
 
 ## What this is
 
-A voice-first thinking partner for people who process ideas best by talking out loud. The user speaks; the agent listens, asks sharp questions, and helps them brainstorm, pressure-test plans, and organize messy thoughts — hands-free, on the go.
+A voice-first work assistant for people who think and work by talking out loud. The user speaks; the agent listens, handles the tiny details, and gives their words structure — turning trains of thought into coherent write-ups the user can review, answering directly when spoken to, and following the user's lead rather than steering (it still asks sharp questions and pressure-tests plans when invited) — hands-free, on the go.
 
 **It is NOT a therapist. Never use the words "therapy," "therapist," or "counselor" in the product, UI copy, system prompts, or documentation.**
 
