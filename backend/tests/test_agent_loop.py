@@ -1050,3 +1050,40 @@ def test_cleanup_cancels_wedged_abandoned_reads():
         )
 
     asyncio.run(run())
+
+
+# ---------------- feature 3.1 ride-alongs (round-5 findings) ----------------
+
+
+def test_greeting_refuses_tool_calls_despite_mistranslation():
+    """Round-5 finding 1: the greeting call (tool_choice none, FR-7's
+    guard) refuses to execute tool calls exactly like the wrap-up does —
+    a session must never open by running list_artifacts."""
+    executed = []
+
+    async def spy(args, ctx):
+        executed.append(True)
+        return {"artifacts": []}
+
+    scripts = [
+        [LLMToolCall(name="list_artifacts", arguments={}, id="g1"), _done()]
+    ]
+    h = make_loop(scripts, tools=[read_tool(name="list_artifacts", handler=spy)])
+    asyncio.run(h.loop._run_turn(None))  # the greeting
+
+    assert executed == []  # never ran
+    assert len(h.llm.calls) == 1
+    text = _pushed_text(h)
+    assert any(line in text for line in FALLBACK_GREETING_LINES)  # still greets
+
+
+def test_whitespace_only_generation_is_an_empty_step():
+    """Round-5 finding 2: a "\n"-only response takes the empty-step
+    fallback — never a silent turn, never an effectively-empty assistant
+    message (the shape that 400s the Claude swap)."""
+    h = make_loop([[LLMTextDelta(" \n  "), _done()]])
+    asyncio.run(h.loop._run_turn("go"))
+
+    assert any(line in _pushed_text(h) for line in FALLBACK_LINES)
+    roles = [m["role"] for m in h.ctx.build()]
+    assert roles == ["system", "user"]  # nothing appended for the turn

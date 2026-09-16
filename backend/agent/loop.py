@@ -186,9 +186,13 @@ class AgentLoopProcessor(FrameProcessor):
             # FR-44: a final that straggled in after the turn was consumed
             # and before new user speech — the consumed turn's leftover,
             # never a second fragment-only turn. Dropped and logged.
+            # WARNING, not INFO (round-5 review): this branch deliberately
+            # discards user speech — if the speech-start discriminator ever
+            # stopped firing, every turn after the greeting would land here
+            # and the agent would go mute; that must be loud in prod logs.
             self._log.bind(
                 event="turn.straggler_dropped", chars=len(user_text)
-            ).info("late final after consumed turn dropped")
+            ).warning("late final after consumed turn dropped")
             return
         if user_text is None:
             if self._greeted:
@@ -401,29 +405,38 @@ class AgentLoopProcessor(FrameProcessor):
             f"{[(c.name, c.arguments) for c in state.calls]}",
         )
 
-        if not state.step_text and not state.calls:
+        if not state.step_text.strip() and not state.calls:
             # FR-42: an empty step is a failure, not an ending — blocked or
-            # truncated generations return, they don't raise.
+            # truncated generations return, they don't raise. .strip():
+            # a whitespace-only generation is the same silent turn, and an
+            # effectively-empty assistant message 400s the Claude swap
+            # (round-5 review).
             log.bind(event="agent.empty_step", finish_reason=finish).warning(
                 "model returned neither text nor tool calls"
             )
             await self._speak_fallback(state, reason=finish or "empty")
             return True
 
-        if state.calls and wrap_up:
+        if state.calls and tool_choice == "none":
             # tool_choice "none" is a REQUEST — FR-48 names a silent
-            # mistranslation here as what would unguard the loop. The
-            # forced final call NEVER executes tools: speak whatever text
-            # came, or the fallback — never silence (FR-42 test a), never
-            # a tool round past the cap.
-            log.bind(event="agent.wrap_up_tools_refused", calls=len(state.calls)).warning(
-                "forced final call returned tool calls despite tool_choice none"
+            # mistranslation here as what would unguard the loop. BOTH
+            # calls that forbid selection refuse to execute: the wrap-up
+            # (never a round past the cap) AND the greeting (round-5
+            # review: FR-7's guard — a session must not open by running
+            # list_artifacts and speaking last week's titles). Speak
+            # whatever text came, or the fallback — never silence.
+            log.bind(
+                event="agent.forbidden_tools_refused",
+                calls=len(state.calls),
+                purpose=purpose,
+            ).warning(
+                "call returned tool calls despite tool_choice none"
             )
             if state.step_text:
                 self._context.append_assistant(state.step_filler + state.step_text)
                 state.step_filler = ""
             else:
-                await self._speak_fallback(state, reason="wrap_up_tool_calls")
+                await self._speak_fallback(state, reason="forbidden_tool_calls")
             return True
 
         if state.calls:
