@@ -1281,11 +1281,21 @@ asking to delete by voice.
   `session_id`, `kind`, `title`, `content`, `created_at`,
   `updated_at`, plus `legacy_artifact_id` = the source row's id (the
   copy's join key and provenance) — dogfooding rows are real user
-  data; loss is not acceptable. **Run-once means a persisted marker,
-  not a data heuristic**: completion is recorded in a dedicated,
-  **named** marker table — `schema_migrations`, key
-  `artifacts_to_documents`, completed-at timestamp — and later boots
-  skip the migration entirely. **The migration's database identity is
+  data; loss is not acceptable. **Run-once means a persisted marker with a watermark, not a data
+  heuristic**: completion is recorded in a dedicated, **named**
+  marker table — `schema_migrations`, key `artifacts_to_documents`,
+  completed-at timestamp, **plus the max migrated `artifacts.id` as
+  a watermark** — and later boots copy only rows **above the
+  watermark**, advancing it (normally none exist; the boot is a
+  no-op). The watermark exists for one real path: deploy → migrate →
+  **roll back** → pre-§4.11 code writes new `artifacts` rows → roll
+  forward — a strictly-once marker would skip those rows forever,
+  they would be unreachable by every FR-53 tool, and the drop
+  release would destroy them, on exactly the rollback path the
+  retained table was designed for. Watermark re-runs are
+  **resurrection-safe by construction**: every deleted document's
+  `legacy_artifact_id` is at or below the watermark, so a re-run can
+  never re-copy it. **The migration's database identity is
   stated, because the default identity fails silently**: the copy is
   a cross-user `INSERT … SELECT` — the one bulk cross-user write in
   the system — and on the RLS-bound application role with no
@@ -1297,10 +1307,10 @@ asking to delete by voice.
   identity, retired right after boot exactly as today; `documents`
   joins **both `_RLS_TABLES` and the application role's explicit
   GRANT list (SELECT/INSERT/UPDATE/DELETE — FR-52 needs the
-  DELETE)**; and the marker is written **only after the copy is
-  verified — copied count equals source count — in the same
-  transaction**, so a short-circuited copy can never mark itself
-  done.
+  DELETE)**; and the marker and watermark are written **only after the copy is
+  verified — copied count equals the count of source rows above the
+  previous watermark — in the same transaction**, so a
+  short-circuited copy can never mark itself done.
   Insert-where-absent re-run on every boot was considered and
   rejected — it would **resurrect deleted documents**: FR-52's delete
   removes the `documents` row while the retained `artifacts` row
@@ -1323,7 +1333,10 @@ asking to delete by voice.
   document, boot again, and the row stays deleted (no resurrection)**,
   and a boot after an upload has landed in the shared table copies
   nothing; a copy that yields fewer rows than the source (simulated
-  short-circuit) writes **no marker**; the NFR-8 negative on
+  short-circuit) writes **no marker and no watermark**; rows written
+  to `artifacts` below a rolled-back release are picked up on
+  roll-forward (the watermark advance) while a deleted migrated
+  document **still stays deleted** across that same re-run; the NFR-8 negative on
   `documents` (user A cannot read user B's rows); FR-38 test (d)
   extended — the admin context reads zero rows from `documents`
   **and** from the retained `artifacts` table.
@@ -1395,7 +1408,12 @@ asking to delete by voice.
   feedback, not silence); the server's existing block truncation
   remains the backstop. The attach toggle changes the attach set
   only — deletion is FR-52's separate, confirmed affordance, never
-  this one. Named consequence of extracted-text-only
+  this one. The attach set's lifetime is stated: **per-page-load
+  client state, never persisted** — a reload clears it, and the
+  marks always render the actual set, so what the user sees is
+  exactly what `/start` will receive (a reload visibly resets to
+  nothing-attached; uploads made after the reload default-attach as
+  always). Named consequence of extracted-text-only
   storage: a PDF's original bytes are gone after extraction — preview,
   agent reads, and download all see the extracted text; download of an
   upload reproduces that text, never the original file. Accepted for
@@ -1419,7 +1437,14 @@ asking to delete by voice.
   quota; a pager is the revisit if the quota ever rises), returning
   metadata plus `title` and a computed `char_count`, **never
   `content`** — and a `total` count, so truncation is visible if the
-  two knobs ever diverge, never silent.
+  two knobs ever diverge, never silent. One population can
+  legitimately exceed both knobs on day one — the quota-exempt
+  migration — so the list gains a **minimal continuation**: an
+  optional `offset`, with the UI showing "show older" whenever
+  `total` exceeds the rendered count. Without it a 250-artifact
+  corpus renders 200 and strands the rest beyond even the deletions
+  that would get the account back under quota, while every upload
+  and `create_document` refuses.
   `GET /documents/{id}` — one owned document with full content, serving
   preview, download, and FR-53/55's oversized-announce refetch.
   `DELETE /documents/{id}` — pulled into v1 by review (the scope note
@@ -1453,7 +1478,10 @@ asking to delete by voice.
   as part of this FR. Mandated tests: the NFR-8 negatives on all three
   routes (another user's id never appears in the list, GETs it
   not-found, DELETEs it not-found and deletes nothing); the list
-  response never serializes `content`; delete → the row is gone — for a migrated document the
+  response never serializes `content`; a title carrying path
+  separators or control characters never reaches a download filename
+  (the sanitization has its test, like FR-54's markdown rule);
+  delete → the row is gone — for a migrated document the
   paired `artifacts` row too, in the same transaction — and a
   subsequent `read_document` of that id steers not-found.
 - **FR-53** The agent's document tools — FR-45 amended: same registry,
@@ -1492,7 +1520,13 @@ asking to delete by voice.
     is prefixed with its absolute 1-based line number, and content is
     paged over `READ_DOCUMENT_MAX_CHARS`-sized slices whose boundaries
     **snap to the last line break inside the window** (a line number
-    is meaningless if a page can silently split its line). **The
+    is meaningless if a page can silently split its line). **"Line"
+    means newline-delimited (`\n`), in both engines**: repo paging
+    splits on newline only — never Python `splitlines()`, which also
+    splits on form feeds and U+2028, both routine in PDF
+    extractions — matching `insert`'s `string_to_array` split;
+    otherwise "line 42" in a read addresses a different line than
+    `insert_line: 42` writes, silently, in a write with no undo. **The
     oversize line is defined, not assumed away**: a single line longer
     than the page size — a normal PDF extraction, not a pathological
     case — is hard-cut at the cap with an explicit `[line continues]`
@@ -1509,7 +1543,10 @@ asking to delete by voice.
     carries `page` and `total_pages`,
     and the truncation marker appears only when further pages exist.
     No `page` argument = page 1. Line numbers are what make `insert`
-    addressable and multi-match steering precise (below).
+    addressable and multi-match steering precise (below). Page and
+    line drift under the agent's own concurrent edits carries
+    `list_documents`' acceptance: a shifted read steers fine; v1
+    accepts it.
   - **`search_documents`** — the Grep to `read_document`'s Read;
     Anthropic's file toolkit ships them as a pair, and the reason
     transfers: finding one passage by paging a 200k-char document
@@ -1527,7 +1564,13 @@ asking to delete by voice.
     territory). The model's query is treated as a **literal
     substring**: `%`, `_`, and the escape character are escaped before
     entering the `ILIKE` pattern — a model-supplied wildcard must
-    never widen the scan. **The workspace-wide scan is bounded, not
+    never widen the scan. Derived values name their primitives too:
+    counts, line numbers, and snippets are computed with **non-regex
+    string primitives** (`strpos`/`replace`-family) over `lower()`ed
+    pairs — `exact_matches` over the unlowered pair — and regex
+    functions are forbidden on the model's query, whose parens or
+    stars would otherwise error mid-turn or widen the scan under a
+    different metacharacter set. **The workspace-wide scan is bounded, not
     assumed fast**: FR-51's quota permits ~40 MB of text per user, and
     an unindexed scan over that is not milliseconds mid-turn — a
     workspace-wide search scans the newest `SEARCH_SCAN_CAP` (default
@@ -1542,17 +1585,25 @@ asking to delete by voice.
     without it. **Result granularity is defined, not guessable, and
     differs by scope.** Workspace-wide: **one result per document** —
     id, title, a `match` discriminator (`title` | `content`), the
-    first content match's line and bounded snippet (null for title
-    matches — the shape promises a location only where one exists),
+    first content match's page, line, and bounded snippet (null for
+    title matches — the shape promises a location only where one
+    exists),
     and that document's exact `match_count` — capped at
     `SEARCH_RESULTS_CAP` documents, so one 30-hit document cannot eat
     the budget and hide the other scanned documents. Single-document
-    (`document_id` given): **one result per match** (line + snippet,
-    up to `SEARCH_RESULTS_CAP`) plus an exact, uncapped
-    `total_matches` — one SQL aggregate, and **the designed source
-    for `replace_all`'s `expected_occurrences`**: search once,
-    replace once, the predicate stays the verifier — no workflow is
-    priced at a deliberate refusal round out of MAX_STEPS' five. **Snippets
+    (`document_id` given): **one result per match** (page + line +
+    snippet, up to `SEARCH_RESULTS_CAP`) plus **two** exact, uncapped
+    counts — `total_matches` (case-insensitive, the search's own
+    semantics) and **`exact_matches` (verbatim, the replace's
+    semantics)** — because the two engines disagree on any
+    mixed-case document (`## Plan` plus three body "plan"s: 4
+    insensitive, 3 verbatim), and feeding the insensitive count into
+    the verbatim predicate manufactures precisely the refusal round
+    this clause exists to avoid. **`exact_matches` is the designed
+    source for `replace_all`'s `expected_occurrences`**: search
+    once, replace once, the predicate stays the verifier — no
+    workflow is priced at a deliberate refusal round out of
+    MAX_STEPS' five. **Snippets
     are cut in SQL, in the repo layer** (`SEARCH_SNIPPET_CHARS`,
     capped at `SEARCH_RESULTS_CAP` results): the query returns match
     line and snippet, never whole `content` columns — FR-45's
@@ -1649,12 +1700,21 @@ asking to delete by voice.
     path checks length — forty individually-legal 5k appends would
     mint a 250k-char row that `read_document` fetches whole on every
     page and `search_documents` scans unbounded, breaking the two
-    bounds this FR leans on. Every write mode's predicate also
-    refuses when the post-edit content would exceed the ceiling (the
-    resulting length is computable in the same statement), steering
-    with FR-51's typed pattern: "this document is at its size limit —
-    create a new one." Mandated test: an append that would cross the
-    ceiling refuses, steers, and writes nothing.
+    bounds this FR leans on. Every write mode's predicate gates on
+    **growth, not absolute size** — `new_length <= GREATEST(ceiling,
+    current_length)`, computable in the same statement — because rows
+    above the ceiling exist by construction (`extract_text` persists
+    200,000 chars **plus its truncation marker**, and pre-§4.11
+    `create_artifact` capped nothing): an absolute check would make
+    exactly those rows permanently uneditable, every mode refusing
+    "create a new one" on the flagship clean-up-my-notes case —
+    advice that cannot shrink anything. A shrinking or size-neutral
+    edit on an over-ceiling row is legal; growth past the ceiling
+    refuses, steering with FR-51's typed pattern: "this document is
+    at its size limit — create a new one." Mandated tests: an
+    `append`, a `str_replace`, **and** an `insert` that would cross
+    the ceiling each refuse, steer, and write nothing — and a
+    shrinking `str_replace` on an over-ceiling row succeeds.
   - Editability is format-gated, not source-gated: `markdown` and
     `text` documents are editable whichever source they came from
     (cleaning up an uploaded notes file is a first-class ask);
@@ -1713,10 +1773,13 @@ asking to delete by voice.
   document; (v) `insert`: at 0, mid-document, and end; out-of-range
   steers with the bounds; concurrent with an `append`, neither edit is
   lost; (vi) `search_documents`: a match deep in a large document
-  returns the line number its `read_document` page confirms; a
+  returns the page and line its `read_document` page confirms; a
   title-only match carries `match: "title"` with null line and
-  snippet; the multi-match `str_replace` steering names those same
-  line numbers; and the NFR-8 negative (user A's search never returns
+  snippet; **on a mixed-case document, `exact_matches` — not
+  `total_matches` — feeds a succeeding `replace_all`**, and the
+  multi-match steering's line numbers are the verbatim ones; a query
+  containing `%`, `_`, parens, and `*` is treated literally
+  end-to-end; and the NFR-8 negative (user A's search never returns
   user B's rows).
 - **FR-54** The workspace UI replaces the fixed artifact drawer and the
   bare upload list on the session console: a workspace region with
