@@ -109,8 +109,15 @@ money, docs, and environments too. When swapping ANY of STT / LLM / TTS
     revisited, and `FLUX_EOT_THRESHOLD` becomes dead config.
   - **TTS**: the sanitizer text filters sit in front of it;
     `CARTESIA_SPEED` / `CARTESIA_VOICE_ID` are Cartesia-only.
-  - **LLM**: the thinking-off-for-latency decision (ADR #4) and prompt
-    phrasing were tuned against Flash — re-evaluate both.
+  - **LLM**: the swap is a second loop-client class in
+    `agent/providers.py` (`make_loop_llm` branch) speaking the neutral
+    event contract — message/tool translation and the `tool_choice: none`
+    mapping live inside it, zero loop changes (C-2). The
+    thinking-off-for-latency decision (ADR #4) and prompt phrasing were
+    tuned against Flash — re-evaluate both. Claude specifics the spec
+    already names: orphan tool_results and empty assistant messages are
+    rejected (the loop never produces either), and the forced final step
+    must keep tools DECLARED with selection forbidden.
 - [ ] `app/costs.py` — only if the new provider bills in different UNITS
   (the current math assumes STT $/minute, LLM $/1M tokens in+out, TTS
   $/1M characters). Same units, different prices = env change only.
@@ -145,18 +152,33 @@ backend/
               router), ratelimit.py (in-memory per-caller limiter),
               config.py, documents.py (upload-time doc store)
   agent/      companion.py (CompanionAgent: builds/runs one session's pipeline)
-              providers.py (THE provider seam: all SDK construction)
-              prompts.py, tools.py (create_artifact), sanitizer.py
+              loop.py (§4.10 AgentLoopProcessor: the agent loop IN the
+              pipeline's LLM slot — steps, tools, filler backstop, barge-in
+              disposal, self-instrumentation; + AgentLoopObserver, its eyes
+              downstream), context.py (FR-44 ContextProvider: the loop's
+              only message source — feature 5 re-implements behind it),
+              providers.py (THE provider seam: SDK construction for
+              STT/TTS + the FR-48 loop LLM streaming client),
+              prompts.py (system prompt, FILLER/FALLBACK lines, wrap-up),
+              tools.py (FR-45 registry: create/list/read/edit_artifact),
+              sanitizer.py
   db/         engine.py (two engines + RLS bootstrap + user_scoped_session),
               models.py (users, sessions, transcript_events, artifacts,
-              usage_events, turn_metrics), users_repo.py, sessions_repo.py
-              (incl. the FR-32 boot sweep), transcript_log.py,
+              usage_events, turn_metrics, llm_traces), users_repo.py,
+              sessions_repo.py (incl. the FR-32 boot sweep),
+              artifacts_repo.py (FR-45 queries: caps, ordering, atomic
+              append), transcript_log.py,
               batch_writer.py (shared NFR-10 background writer),
               admin_repo.py (FR-38 admin_scoped_session + cross-user reads)
   obs/        logging.py (JSON structured logs), latency.py (per-turn budget
-              instrumentation: WARN >1s/stage, ERROR >3s end-to-end),
-              usage.py (FR-32/33 usage + turn-metric capture)
-  scripts/    grant_admin.py (mint/revoke the admin claim, local-only)
+              instrumentation: WARN >1s/stage, ERROR >3s end-to-end; hands
+              its measurement into the recorder's per-turn buffer),
+              usage.py (FR-32/33 usage capture + the FR-47 per-turn metrics
+              buffer the loop flushes), trace.py (FR-49 per-call LLM traces)
+  scripts/    grant_admin.py (mint/revoke the admin claim, local-only),
+              show_trace.py (FR-49 developer trace pretty-printer; superuser
+              bypass via DATABASE_URL, guarded), spike_gemini_stream.py
+              (the FR-48 spike, kept as reference)
   tests/      SQLite-backed suite + Postgres-only RLS tests (test_rls.py)
 frontend/     Next.js app: / (session console), /login, /admin (overview),
               /admin/users (+ /[uid]), /admin/sessions/[id];
@@ -186,24 +208,44 @@ Two architectural seams everything hangs on:
 ## 4. Runtime view (one voice session)
 
 1. Browser `POST /start` → session row created, `CompanionAgent` builds a
-   dedicated pipeline (its own `LLMContext`, observers, transcript writer).
+   dedicated pipeline: transport → Flux STT → user aggregator (turn
+   assembly ONLY — its context is empty scratch, reset each consumed turn)
+   → **AgentLoopProcessor** (the §4.10 agent loop, in the old LLM service's
+   slot) → TTS → transport. The loop owns the conversation through the
+   `ContextProvider` and the tool registry; observers + writers ride along.
 2. SDP offer/answer via `POST/PATCH /sessions/{id}/api/offer` (Caddy →
    backend; session-owned — the sessionless variant was removed), then WebRTC
    audio flows browser ↔ backend directly over UDP (bypasses Caddy).
-3. Turn loop: Flux detects end-of-turn → transcript frame → LLM streams tokens
-   → sentence-level TTS → audio streams out. Barge-in interrupts mid-response.
-4. Observers off the hot path: latency breakdown per turn (structured logs +
-   a `turn_metrics` row, FR-33), transcript rows batch-written to Postgres
-   (ops log only — never injected into context, never user-facing), and
-   usage capture (FR-32: LLM tokens + TTS characters from the pipeline's own
-   metrics frames, stamped with the tracker's turn number). All three ride
-   the same `BackgroundBatchWriter`: hot path enqueues, batches flush ~1s,
-   failures log and drop (NFR-10).
-5. Session ends (tap End / disconnect) → row closed, transcripts + usage
-   flushed, STT seconds recorded as the session's audio duration (the
-   streamed-time proxy). Sessions orphaned by a process death are closed as
-   `interrupted` by the boot-time sweep, which also emits their inferred STT
-   usage (FR-32).
+3. Turn loop (FR-42): Flux detects end-of-turn → the aggregator emits the
+   assembled user message → the loop appends it to the context and steps:
+   one streaming Gemini call per step (thinking pinned off), text deltas
+   forwarded to TTS as they arrive; tool calls execute concurrently
+   (10s timeout = a tool result; reads abandoned on barge-in, writes run
+   in tasks outside pipeline cancellation and always finish); tool steps
+   append atomically and loop (MAX 5 steps + one forced tool-free wrap-up
+   call); a silent tool round gets a spoken FILLER line at call arrival
+   (FR-43); any loop error degrades to a spoken canned fallback. The
+   greeting is one tool-forbidden step with no user turn. Barge-in cancels
+   the turn task via Pipecat's interruption hook: the spoken prefix
+   (sentence-level, sentinel-marked) is what the context keeps, a running
+   write's placeholder is updated in place when it lands (FR-46).
+4. Observers/instrumentation off the hot path: the LOOP records per-step
+   TTFBs, per-tool durations, LLM usage (explicit turn number), and one
+   `llm_traces` row per call (FR-49, inputs serialized at enqueue); the
+   latency observer measures end-of-speech → first audio and hands the
+   measurement into the recorder's per-turn buffer, which the loop flushes
+   as the single `turn_metrics` row per measured turn (FR-47, step-indexed
+   stage keys); transcripts (ops log only) and TTS usage come from
+   observers as before. All writers ride the same `BackgroundBatchWriter`:
+   hot path enqueues, batches flush ~1s, failures log and drop (NFR-10).
+5. Session ends (tap End / disconnect) → in-flight write tools awaited
+   under the single 5s grace (SIGTERM: the drain awaits ALL sessions'
+   writes BEFORE cancelling; prod `stop_grace_period: 30s` covers the
+   worst-case teardown arithmetic) → recorders/writers stop concurrently →
+   row closed (bounded 2s), STT seconds recorded as the session's audio
+   duration (the streamed-time proxy). Sessions orphaned by a process
+   death are closed as `interrupted` by the boot-time sweep, which also
+   emits their inferred STT usage (FR-32).
 6. Unexpected-death UX: while active, the client polls
    `GET /sessions/{id}/alive` every 5s (DB-backed truth — correct across
    restarts, crashes, media-timeout closes, and any future multi-VM setup);
@@ -376,6 +418,7 @@ Full original rationale: `git show a84df1b:SDD.md` (§0).
 | 8 | Single VM, host networking, Caddy | Cheapest thing that runs real WebRTC (bridge networking can't forward ephemeral UDP); Caddy for zero-config TLS |
 | 9 | Git: `main` = workbench, `prod` = deploy pointer; PR + CI + Claude review gate on `main` | Two-branch model matching a solo dev with a live demo |
 | 10 | Everything in Docker; commit-at-checkpoints, push/PR only on confirmation | CLAUDE.md workflow rules |
+| 11 | Hand-rolled agent loop in the pipeline's LLM slot (§4.10) | One hot-path LLM call per turn (a "decider" call is serial latency for nothing — Flash selects tools and speaks in the same call); Pipecat stays the audio chassis, the loop is plain Python behind our seams (context provider, tool registry, provider client) so features 4–6 extend seams, not control flow, and a Pipecat retirement would strand nothing. Both mandated spikes ran first: stage swap + barge-in (the interruption hook is `_start_interruption`, not a frame), and live Gemini streaming (function calls arrive ATOMICALLY → filler fires at call arrival; raw API defaults thinking ON — pinned off per call) |
 
 ## 9. Scaling notes (when the time comes)
 

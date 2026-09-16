@@ -58,20 +58,21 @@ class FluxAwareLatencyObserver(UserBotLatencyObserver):
 
 
 def make_latency_observer(session_id: str, recorder=None) -> UserBotLatencyObserver:
-    """`recorder` (obs.usage.UsageRecorder, optional) additionally persists a
-    turn_metrics row per breakdown (FR-33) — enqueue-only, off the hot path."""
+    """`recorder` (obs.usage.UsageRecorder, optional): FR-47's handoff —
+    the observer's role is MEASURING; at first audio it hands the e2e
+    milliseconds into the recorder's per-turn buffer (which captures the
+    turn number with the measurement), and the LOOP flushes the one
+    turn_metrics row at turn end. A turn with no end-of-user-speech (the
+    greeting) measures nothing and therefore writes nothing."""
     observer = FluxAwareLatencyObserver()
     log = logger.bind(session_id=session_id, component="obs.latency")
-    # Closure cell pairing the measured event with its breakdown. None means
-    # "no fresh measurement" — a breakdown without one (e.g. the greeting
-    # turn, which has no end-of-user-speech) must NOT persist a stale or
-    # fake-zero latency into turn_metrics (FR-33/FR-37 trustworthiness).
-    last_measured_ms: list[int | None] = [None]
 
     @observer.event_handler("on_latency_measured")
     async def on_latency_measured(_obs, latency: float):
-        last_measured_ms[0] = round(latency * 1000)
-        line = log.bind(event="turn.latency", duration_ms=round(latency * 1000))
+        ms = round(latency * 1000)
+        if recorder is not None:
+            recorder.record_measurement(ms)
+        line = log.bind(event="turn.latency", duration_ms=ms)
         if latency > E2E_ERROR_S:
             line.error(
                 f"end-of-speech -> first bot audio {latency:.3f}s "
@@ -105,9 +106,9 @@ def make_latency_observer(session_id: str, recorder=None) -> UserBotLatencyObser
             line.warning(f"stage(s) over {STAGE_WARN_S:.0f}s (C-1): {slow}")
         else:
             line.info("turn breakdown")
-        if recorder is not None and last_measured_ms[0] is not None:
-            recorder.record_turn_metric(last_measured_ms[0], stages_ms)
-        last_measured_ms[0] = None  # consumed: the next breakdown needs its own
+        # Logs only: the turn_metrics row is the loop's to write (FR-47 —
+        # its stages are step-indexed; these TTS-side numbers stay in the
+        # breakdown line for debugging).
 
     @observer.event_handler("on_first_bot_speech_latency")
     async def on_first_bot_speech(_obs, latency: float):

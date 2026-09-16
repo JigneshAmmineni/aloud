@@ -19,7 +19,14 @@ from sqlalchemy import delete, select, update
 
 from app.auth import AuthedUser
 from db.engine import init_db, session_factory, user_scoped_session
-from db.models import Artifact, Session, TranscriptEvent, TurnMetric, UsageEvent
+from db.models import (
+    Artifact,
+    LLMTrace,
+    Session,
+    TranscriptEvent,
+    TurnMetric,
+    UsageEvent,
+)
 from db.sessions_repo import create_session_row
 from db.users_repo import provision_user
 
@@ -171,6 +178,15 @@ async def _seed_two_users():
                     title="private title", content="private content",
                 )
             )
+            db.add(
+                LLMTrace(
+                    user_id=uid, session_id=sess, turn_id=1, step=1, ts=_NOW,
+                    model="m", purpose="turn", finish_reason="stop",
+                    prompt_tokens=None, completion_tokens=None,
+                    ttfb_ms=None, duration_ms=None,
+                    input_messages="[]", output="private trace",
+                )
+            )
             await db.commit()
     return uid_a, uid_b, sess_a, sess_b
 
@@ -184,15 +200,23 @@ def test_admin_context_reads_scoped_tables_never_content_tables():
     async def run():
         uid_a, uid_b, *_ = await _seed_two_users()
 
-        # (a) user scoping holds on the new tables, no WHERE needed
+        # (a) user scoping holds on the new tables, no WHERE needed —
+        # llm_traces included (FR-49 / NFR-8: A cannot read B's traces)
         async with user_scoped_session(uid_a) as db:
-            for model in (UsageEvent, TurnMetric):
+            for model in (UsageEvent, TurnMetric, LLMTrace):
                 rows = (await db.execute(select(model))).scalars().all()
                 assert {r.user_id for r in rows} == {uid_a}
 
         # (b) neither setting: zero rows everywhere
         async with session_factory()() as db:
-            for model in (Session, UsageEvent, TurnMetric, TranscriptEvent, Artifact):
+            for model in (
+                Session,
+                UsageEvent,
+                TurnMetric,
+                TranscriptEvent,
+                Artifact,
+                LLMTrace,
+            ):
                 assert (await db.execute(select(model))).scalars().all() == []
 
         # (c) admin context reads across users on the three scoped tables
@@ -204,8 +228,9 @@ def test_admin_context_reads_scoped_tables_never_content_tables():
                 }
                 assert {uid_a, uid_b} <= users
 
-            # (d) ...and ZERO rows from the content tables, even here
-            for model in (TranscriptEvent, Artifact):
+            # (d) ...and ZERO rows from the content tables, even here —
+            # llm_traces is content (FR-49: no admin surface renders a trace)
+            for model in (TranscriptEvent, Artifact, LLMTrace):
                 assert (await db.execute(select(model))).scalars().all() == []
 
     asyncio.run(run())
@@ -284,14 +309,14 @@ def test_admin_context_cannot_write():
     asyncio.run(run())
 
 
-def test_create_artifact_handler_succeeds_under_real_rls():
-    """Regression: the handler once refreshed its row AFTER commit — the
-    transaction-local RLS context had evaporated, the refresh SELECT matched
-    zero rows, and every artifact save failed on Postgres while sqlite tests
-    stayed green. The handler must run cleanly under real policies."""
-    from unittest.mock import AsyncMock, MagicMock
-
-    from agent.tools import make_create_artifact_handler
+def test_artifact_tools_succeed_under_real_rls():
+    """Regression shape this guards (FR-45 registry handlers): the old
+    handler once refreshed its row AFTER commit — the transaction-local RLS
+    context had evaporated, the refresh SELECT matched zero rows, and every
+    artifact save failed on Postgres while sqlite tests stayed green. The
+    create AND edit paths must run cleanly under real policies (edit's
+    UPDATE ... RETURNING must see its row through RLS)."""
+    from agent.tools import ToolContext, build_registry
     from db.models import Artifact as ArtifactModel
 
     async def run():
@@ -301,13 +326,32 @@ def test_create_artifact_handler_succeeds_under_real_rls():
         await provision_user(uid, None)
         await create_session_row(sess, uid)
 
-        params = MagicMock()
-        params.arguments = {"title": "T", "kind": "summary", "content": "body"}
-        params.llm.push_frame = AsyncMock()
-        params.result_callback = AsyncMock()
-        await make_create_artifact_handler(sess, uid)(params)
+        emitted: list = []
 
-        assert params.result_callback.call_args.args[0]["status"] == "created"
+        async def emit(data):
+            emitted.append(data)
+
+        ctx = ToolContext(session_id=sess, user_id=uid, turn_id=1, emit=emit)
+        tools = {t.name: t for t in build_registry()}
+
+        created = await tools["create_artifact"].handler(
+            {"title": "T", "kind": "summary", "content": "body"}, ctx
+        )
+        assert created["status"] == "created"
+        edited = await tools["edit_artifact"].handler(
+            {
+                "artifact_id": created["artifact_id"],
+                "mode": "append",
+                "content": "more",
+            },
+            ctx,
+        )
+        assert edited["status"] == "edited"
+        assert [e["type"] for e in emitted] == [
+            "artifact.created",
+            "artifact.updated",
+        ]
+
         async with user_scoped_session(uid) as db:
             rows = (
                 (
@@ -319,7 +363,9 @@ def test_create_artifact_handler_succeeds_under_real_rls():
                 .all()
             )
             assert len(rows) == 1
-        # the in-transaction artifact.count event landed too (FR-32/FR-38)
+            assert rows[0].content == "body\nmore"
+        # the in-transaction usage events landed too (FR-32/FR-38): one
+        # artifact count + one edit
         async with user_scoped_session(uid) as db:
             events = (
                 (
@@ -333,7 +379,7 @@ def test_create_artifact_handler_succeeds_under_real_rls():
                 .scalars()
                 .all()
             )
-            assert len(events) == 1
+            assert sorted(e.unit for e in events) == ["count", "edits"]
 
     asyncio.run(run())
 
