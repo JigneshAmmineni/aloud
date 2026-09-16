@@ -49,7 +49,11 @@ jobs:
     runs-on: ubuntu-latest
     # A hung tunnel/build must not hold the concurrency group hostage —
     # rollback uses this same button and has to stay available.
-    timeout-minutes: 30
+    # 60: a cold-cache docker rebuild on the e2-small (pip layer invalidated)
+    # took ~28 min and tripped the old 30 — the run died mid-health-check
+    # with the VM already rebuilt. prod stays safe either way (pointer
+    # moves only after verification), but the run should survive a slow build.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
