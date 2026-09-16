@@ -430,9 +430,10 @@ In rough order of when they'd pay off:
    backend → Postgres query is a loopback call on the same VM
    (sub-millisecond round trip), and the system is priced on that
    assumption: each user-scoped transaction is at least two round trips
-   (`SET LOCAL app.user_id` + the query), the agent loop's document
-   tools (read/search/edit) each hit the DB mid-turn inside NFR-1's 3s
-   budget, and the background writers flush batches every ~1s. A hosted
+   (`SET LOCAL app.user_id` + the query), the agent loop's DB-backed
+   tools (artifact list/read/edit today; §4.11's document tools next)
+   each hit the DB mid-turn inside NFR-1's 3s budget, and the
+   background writers flush batches every ~1s. A hosted
    DB adds network RTT to *every one* of those (~1–5 ms same-zone,
    more across zones — and it multiplies by round trips per
    transaction, not per request). At today's per-query volume that is
