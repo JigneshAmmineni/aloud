@@ -13,8 +13,6 @@ Message format is the neutral one agent/providers.py translates
 translation, this seam owns assembly and bookkeeping.
 """
 
-import json
-
 from loguru import logger
 
 from agent.providers import LLMToolCall
@@ -135,15 +133,14 @@ class ContextProvider:
         self._messages.append({"role": "assistant", "content": text})
 
     def _approx_tokens(self) -> int:
+        # Runs on every build() (FR-44 mandates the per-build estimate),
+        # so it stays cheap: str() over dict-shaped content instead of a
+        # json.dumps round trip (round-3 review) — the heuristic is
+        # declared approximate, and repr-length tracks JSON-length.
         chars = 0
         for msg in self._messages:
             content = msg.get("content")
-            if isinstance(content, str):
-                chars += len(content)
-            else:
-                chars += len(json.dumps(content, default=str))
+            chars += len(content) if isinstance(content, str) else len(str(content))
             for call in msg.get("tool_calls", []):
-                chars += len(call["name"]) + len(
-                    json.dumps(call["arguments"], default=str)
-                )
+                chars += len(call["name"]) + len(str(call["arguments"]))
         return chars // _CHARS_PER_TOKEN

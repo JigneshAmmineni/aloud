@@ -148,23 +148,27 @@ async def _edit_artifact(args: dict, ctx: ToolContext) -> dict:
         return {"status": "error", "error": "content is required"}
     title = str(args.get("title", "")).strip() or None
 
+    refusal = {
+        "status": "refused",
+        "error": (
+            "this artifact is longer than the readable window; replace "
+            "would delete content you have not seen — use mode 'append' "
+            "instead"
+        ),
+    }
     try:
         if mode == "replace":
+            # The model would be replacing a tail it provably never saw
+            # (the read truncates); no versioning/undo in v1, so unseen
+            # content must be undeletable. Steer, don't except. The
+            # pre-read gives the FAST refusal; the cap is ENFORCED inside
+            # the UPDATE's predicate (a detached FR-46 write can grow the
+            # row past the cap between this read and the statement).
             current = await get_artifact_row(ctx.user_id, artifact_id)
             if current is None:
                 return {"status": "not_found", "artifact_id": artifact_id}
             if len(current.content) > READ_ARTIFACT_MAX_CHARS:
-                # The model would be replacing a tail it provably never saw
-                # (the read truncates); no versioning/undo in v1, so unseen
-                # content must be undeletable. Steer, don't except.
-                return {
-                    "status": "refused",
-                    "error": (
-                        "this artifact is longer than the readable window; "
-                        "replace would delete content you have not seen — "
-                        "use mode 'append' instead"
-                    ),
-                }
+                return refusal
             row = await replace_artifact_content(
                 ctx.user_id,
                 artifact_id,
@@ -172,7 +176,15 @@ async def _edit_artifact(args: dict, ctx: ToolContext) -> dict:
                 title,
                 ctx.turn_id,
                 session_id=ctx.session_id,
+                max_replaceable_chars=READ_ARTIFACT_MAX_CHARS,
             )
+            if row is None:
+                # gone, or grown past the cap since the read — recheck to
+                # tell the two apart
+                current = await get_artifact_row(ctx.user_id, artifact_id)
+                if current is not None:
+                    return refusal
+                return {"status": "not_found", "artifact_id": artifact_id}
         else:
             row = await append_artifact_content(
                 ctx.user_id,

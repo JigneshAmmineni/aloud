@@ -1,6 +1,12 @@
 """FR-48 spike: prove the provider-agnostic client's contract against the
 live Gemini API before the loop is built on it, and answer FR-43's design
-question. Run inside the backend container:
+question. Kept as a reference artifact after the client shipped.
+
+STATED EXEMPTION from the provider-seam constraint (CLAUDE.md): this is a
+local-only diagnostic in scripts/, never imported by runtime code — the
+only SDK usage outside agent/providers.py, by design.
+
+Run inside the backend container:
 
     docker compose run --rm backend python scripts/spike_gemini_stream.py
 

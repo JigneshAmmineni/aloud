@@ -56,6 +56,8 @@ class FakeLLM:
         for event in script:
             if isinstance(event, (int, float)):
                 await asyncio.sleep(event)
+            elif isinstance(event, BaseException):
+                raise event  # a provider drop mid-stream
             else:
                 yield event
 
@@ -132,6 +134,12 @@ def make_loop(scripts, tools=(), current_turn=2):
         await asyncio.gather(task, return_exceptions=True)
 
     loop.cancel_task = cancel_task
+    broadcasts: list = []
+
+    async def broadcast_interruption():
+        broadcasts.append(True)
+
+    loop.broadcast_interruption = broadcast_interruption
     return SimpleNamespace(
         loop=loop,
         llm=loop._llm,
@@ -140,6 +148,7 @@ def make_loop(scripts, tools=(), current_turn=2):
         traces=traces,
         emitted=emitted,
         pushed=pushed,
+        broadcasts=broadcasts,
     )
 
 
@@ -719,6 +728,10 @@ def test_new_turn_mid_tool_round_disposes_like_a_barge_in():
     assert tool_results["w1"] == {"status": "in_progress"}
     assert len(h.llm.calls) == 2  # turn 1's single call + turn 2's — no extra step
     assert "Second turn answer." in _pushed_text(h)
+    # round-3: this branch exists BECAUSE no interruption broadcast fired —
+    # the loop must fire one itself, or the abandoned step's queued filler
+    # plays over the new turn's answer
+    assert h.broadcasts == [True]
 
 
 def test_raised_write_lands_terminal_error_in_its_placeholder():
@@ -871,3 +884,107 @@ def test_finished_read_with_empty_result_is_not_relabeled_cancelled():
     }
     assert results["r1"] == {}  # kept, not {"status": "cancelled"}
     assert results["w1"] == {"status": "in_progress"}
+
+
+# ---------------- review round 3 ----------------
+
+
+def test_provider_error_mid_stream_still_writes_a_trace_row():
+    """Round-3 blocking 1: a call that RAISES mid-stream (provider drop
+    after deltas) writes its trace row before the loop degrades — FR-49's
+    'every call writes one', and this is the call a trace is most for."""
+    scripts = [
+        [LLMTextDelta("I was sayi"), RuntimeError("connection dropped")],
+        [LLMTextDelta("Recovered."), _done()],
+    ]
+    h = make_loop(scripts)
+
+    async def run():
+        await h.loop._run_turn("first")
+        await h.loop._run_turn("second")
+
+    asyncio.run(run())
+    traces = _queued(h.traces, LLMTrace)
+    assert [t.finish_reason for t in traces] == ["error", "stop"]
+    assert "I was sayi" in traces[0].output
+    assert any(line in _pushed_text(h) for line in FALLBACK_LINES)
+    assert "Recovered." in _pushed_text(h)
+
+
+def test_wrap_up_call_returning_tools_never_executes_them():
+    """Round-3 should-fix 4: tool_choice none is a request — a wrap-up
+    that comes back with tool calls must not run them or end silently."""
+    executed = []
+
+    async def spy(args, ctx):
+        executed.append(True)
+        return {}
+
+    scripts = [
+        [LLMToolCall(name="echo", arguments={}, id=f"c{i}"), _done()]
+        for i in range(loop_mod.MAX_STEPS)
+    ]
+    # the forced final call misbehaves: tool call, no text
+    scripts.append([LLMToolCall(name="echo", arguments={}, id="cx"), _done()])
+    h = make_loop(scripts, tools=[read_tool(handler=spy)])
+
+    asyncio.run(h.loop._run_turn("go"))
+
+    assert len(executed) == loop_mod.MAX_STEPS  # the cap held; not one more
+    assert len(h.llm.calls) == loop_mod.MAX_STEPS + 1
+    assert any(line in _pushed_text(h) for line in FALLBACK_LINES)  # never silence
+
+
+def test_audio_pending_does_not_latch_across_turns():
+    """Round-3 should-fix 3: a barge-in after text was forwarded but
+    before playback started leaves no BotStoppedSpeakingFrame — the next
+    turn's silent tool round must still get its filler."""
+    scripts = [
+        [LLMTextDelta("Queued but never played. "), 60],
+        [LLMToolCall(name="echo", arguments={}, id="c1"), _done()],
+        [LLMTextDelta("Done."), _done()],
+    ]
+    h = make_loop(scripts, tools=[read_tool()])
+
+    async def run():
+        task = asyncio.create_task(h.loop._run_turn("first"))
+        h.loop._turn_task = task
+        await asyncio.sleep(0.05)  # text forwarded, no BotStarted/Stopped
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        h.loop._turn_task = None
+        h.loop._finalize_interrupted_turn()
+        await h.loop._run_turn("second")  # silent tool round
+
+    asyncio.run(run())
+    assert any(f in _pushed_text(h) for f in FILLER_LINES)
+
+
+def test_short_spoken_sentence_survives_the_earlier_step_filter():
+    """Round-3 nit 8: a genuinely-spoken short 'Okay.' must not be eaten
+    by containment against an earlier step's text that happens to include
+    the same word."""
+    scripts = [
+        [
+            LLMTextDelta("Okay. Let me check that for you. "),
+            LLMToolCall(name="echo", arguments={}, id="c1"),
+            _done(),
+        ],
+        [LLMTextDelta("Okay. "), 60],
+    ]
+    h = make_loop(scripts, tools=[read_tool()])
+
+    async def run():
+        task = asyncio.create_task(h.loop._run_turn("go"))
+        h.loop._turn_task = task
+        await asyncio.sleep(0.1)  # step 2 streaming its own "Okay. "
+        h.loop.note_spoken_sentence("Okay.")  # step 2's audio, genuinely new
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        h.loop._turn_task = None
+        h.loop._finalize_interrupted_turn()
+
+    asyncio.run(run())
+    last = h.ctx.build()[-1]
+    assert last["role"] == "assistant"
+    assert last["content"].startswith("Okay.")  # kept, sentinel-marked

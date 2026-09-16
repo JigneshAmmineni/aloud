@@ -25,6 +25,7 @@ import asyncio
 import itertools
 import json
 import time
+from collections import deque
 
 from loguru import logger
 from pipecat.frames.frames import (
@@ -105,6 +106,9 @@ class _TurnState:
         # keep a late-arriving step-N sentence out of step N+1's prefix —
         # _spoken_prefix filters against this too.
         self.appended_texts: list[str] = []
+        # Sentences actually captured for earlier steps (exact strings) —
+        # the precise half of the filter above.
+        self.prior_sentences: set[str] = set()
 
 
 class AgentLoopProcessor(FrameProcessor):
@@ -195,11 +199,15 @@ class AgentLoopProcessor(FrameProcessor):
             # silent tool round draws no interruption broadcast): cancel
             # AND dispose exactly like a barge-in — running writes need
             # their placeholder, the trace its interrupted row, the
-            # metrics buffer its turn end (review finding).
+            # metrics buffer its turn end (review finding). Then broadcast
+            # the interruption barge-in would have: this branch exists
+            # BECAUSE none fired, and the abandoned step's queued filler
+            # must not play over the new turn's answer (round 3).
             task = self._turn_task
             self._turn_task = None
             await self.cancel_task(task)
             self._finalize_interrupted_turn()
+            await self.broadcast_interruption()
         self._turn_task = self.create_task(self._run_turn(user_text))
 
     def _consume_scratch(self, frame) -> str | None:
@@ -245,6 +253,11 @@ class AgentLoopProcessor(FrameProcessor):
         purpose = "greeting" if user_text is None else "turn"
         state = self._state = _TurnState(self._recorder.current_turn, purpose)
         log = self._log.bind(turn_id=state.turn_id)
+        # _audio_pending must not LATCH across turns (round 3): a barge-in
+        # after text was forwarded but before playback started sees no
+        # BotStoppedSpeakingFrame, and a stale True would starve the next
+        # silent tool round of its filler. _bot_speaking stays frame-fed.
+        self._audio_pending = False
         try:
             if user_text is not None:
                 self._context.append_user(user_text)
@@ -302,7 +315,9 @@ class AgentLoopProcessor(FrameProcessor):
         state.call_closed = False
         # Per-STEP spoken capture: the previous step's sentences are already
         # in the context via its own append — carrying them across steps
-        # would duplicate them into an interrupted step's entry.
+        # would duplicate them into an interrupted step's entry. Remember
+        # them exactly, for _spoken_prefix's precise filter.
+        state.prior_sentences.update(s.strip() for s in state.spoken if s.strip())
         state.spoken = []
         state.t0 = time.monotonic()
         finish = None
@@ -334,10 +349,23 @@ class AgentLoopProcessor(FrameProcessor):
                     finish = event.finish_reason
                     state.usage = event.usage
         except Exception:
+            # FR-49: EVERY call writes a row — a provider drop after 40
+            # deltas is precisely the call a trace is for (review round 3).
+            # No finish reason ever arrived, so "error" is the loop-level
+            # spelling for a call that raised (FR-48's vocabulary describes
+            # streams that returned); Gemini reports usage only on the
+            # final chunk, so a dropped stream genuinely has none.
+            self._instrument_call(
+                state,
+                "error",
+                round((time.monotonic() - state.t0) * 1000),
+                purpose,
+            )
             # close the frame pair before degrading — a dangling
             # LLMFullResponseStartFrame stalls downstream aggregation.
-            # (CancelledError skips this: the barge-in flush resets
-            # downstream itself.)
+            # (CancelledError skips this: every cancel path broadcasts an
+            # interruption — barge-in's own, or the one _on_context_frame
+            # fires for silent cancels — which resets downstream itself.)
             await self.push_frame(LLMFullResponseEndFrame())
             raise
         await self.push_frame(LLMFullResponseEndFrame())
@@ -364,6 +392,22 @@ class AgentLoopProcessor(FrameProcessor):
                 "model returned neither text nor tool calls"
             )
             await self._speak_fallback(state, reason=finish or "empty")
+            return True
+
+        if state.calls and wrap_up:
+            # tool_choice "none" is a REQUEST — FR-48 names a silent
+            # mistranslation here as what would unguard the loop. The
+            # forced final call NEVER executes tools: speak whatever text
+            # came, or the fallback — never silence (FR-42 test a), never
+            # a tool round past the cap.
+            log.bind(event="agent.wrap_up_tools_refused", calls=len(state.calls)).warning(
+                "forced final call returned tool calls despite tool_choice none"
+            )
+            if state.step_text:
+                self._context.append_assistant(state.step_filler + state.step_text)
+                state.step_filler = ""
+            else:
+                await self._speak_fallback(state, reason="wrap_up_tool_calls")
             return True
 
         if state.calls:
@@ -716,6 +760,7 @@ class AgentLoopProcessor(FrameProcessor):
         # 3. Turn end for the metrics buffer (FR-47): a measurement that
         # already exists flushes the row; a pre-audio interruption clears.
         self._recorder.turn_ended(state.turn_id)
+        self._audio_pending = False  # the interruption discards queued audio
 
     def _spoken_prefix(self, state: _TurnState) -> str:
         """What was SENT FOR SYNTHESIS for the interrupted STEP (the
@@ -739,8 +784,20 @@ class AgentLoopProcessor(FrameProcessor):
             stripped = sentence.strip()
             if not stripped:
                 continue
-            if any(stripped in appended for appended in state.appended_texts):
-                continue  # an earlier step's late-captured sentence
+            if stripped in state.prior_sentences:
+                continue  # captured for an earlier step — exact match
+            # Late-arriving earlier-step sentences that were never captured
+            # before the reset: match against the appended text, but only
+            # exactly or for long strings — bare containment would eat a
+            # genuinely-spoken short "Okay." that happens to appear inside
+            # an earlier step's text (round-3 nit). Over-approximation is
+            # the accepted direction.
+            if any(
+                stripped == appended.strip()
+                or (len(stripped) >= 15 and stripped in appended)
+                for appended in state.appended_texts
+            ):
+                continue
             kept.append(stripped)
         return " ".join(kept)
 
@@ -753,31 +810,44 @@ class AgentLoopObserver(BaseObserver):
     (FR-46's spoken-prefix capture — the same AggregatedTextFrame stream
     FR-20 logs), and user-speech-start (FR-44's straggler boundary)."""
 
+    # Dedup window: frames are re-observed once per pipeline hop (a handful
+    # of times), never later — a small bound suffices and keeps the set from
+    # growing for the whole session (this observer taps the highest-volume
+    # frame types: one id per synthesized sentence).
+    _SEEN_MAX = 2048
+
     def __init__(self, loop: AgentLoopProcessor, **kwargs):
         super().__init__(**kwargs)
         self._loop = loop
         self._seen: set = set()
+        self._seen_order: deque = deque()
+
+    def _already_seen(self, frame_id) -> bool:
+        if frame_id in self._seen:
+            return True
+        self._seen.add(frame_id)
+        self._seen_order.append(frame_id)
+        if len(self._seen_order) > self._SEEN_MAX:
+            self._seen.discard(self._seen_order.popleft())
+        return False
 
     async def on_push_frame(self, data: FramePushed):
         frame = data.frame
         if isinstance(frame, UserStartedSpeakingFrame):
             if data.direction != FrameDirection.DOWNSTREAM:
                 return
-            if frame.id in self._seen:
+            if self._already_seen(frame.id):
                 return
-            self._seen.add(frame.id)
             self._loop.note_user_speech_start()
         elif isinstance(frame, (BotStartedSpeakingFrame, BotStoppedSpeakingFrame)):
-            if frame.id in self._seen:
+            if self._already_seen(frame.id):
                 return
-            self._seen.add(frame.id)
             self._loop.note_bot_speaking(isinstance(frame, BotStartedSpeakingFrame))
         elif isinstance(frame, AggregatedTextFrame) and not isinstance(
             frame, TTSTextFrame
         ):
             if data.direction != FrameDirection.DOWNSTREAM:
                 return
-            if frame.id in self._seen:
+            if self._already_seen(frame.id):
                 return
-            self._seen.add(frame.id)
             self._loop.note_spoken_sentence(frame.text)

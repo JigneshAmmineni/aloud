@@ -1,4 +1,7 @@
 pipecat-ai[webrtc,deepgram,google,cartesia]~=1.3.0
+# Direct dependency of the FR-48 loop client (agent/providers.py) — do not
+# rely on pipecat's google extra pulling it in transitively.
+google-genai~=1.75
 fastapi
 python-multipart
 firebase-admin

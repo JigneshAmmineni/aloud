@@ -114,22 +114,29 @@ async def replace_artifact_content(
     turn_id: int | None,
     *,
     session_id: str,
+    max_replaceable_chars: int | None = None,
 ) -> Artifact | None:
     """Full-content replace + artifact_edited event, one transaction.
-    Returns the updated row, or None when the id isn't the caller's
-    (the cap-refusal rule is the tool's — it owns READ_ARTIFACT_MAX_CHARS)."""
+    Returns the updated row, or None when the id isn't the caller's — or
+    when `max_replaceable_chars` is given and the STORED content exceeds
+    it: the cap-refusal must hold inside the UPDATE's own predicate
+    (review round 3), because a detached FR-46 write can append past the
+    cap between the tool's read and this statement, and a replace that
+    lands then would delete content the model provably never saw. The
+    tool owns the cap's VALUE; the repo owns its atomicity."""
     values: dict = {"content": content, "updated_at": datetime.now(timezone.utc)}
     if title:
         values["title"] = title
+    stmt = (
+        update(Artifact)
+        .where(Artifact.id == artifact_id, Artifact.user_id == user_id)
+        .values(**values)
+        .returning(Artifact)
+    )
+    if max_replaceable_chars is not None:
+        stmt = stmt.where(func.length(Artifact.content) <= max_replaceable_chars)
     async with user_scoped_session(user_id) as db:
-        row = (
-            await db.execute(
-                update(Artifact)
-                .where(Artifact.id == artifact_id, Artifact.user_id == user_id)
-                .values(**values)
-                .returning(Artifact)
-            )
-        ).scalar_one_or_none()
+        row = (await db.execute(stmt)).scalar_one_or_none()
         if row is None:
             return None
         db.add(_edit_event(row, user_id, session_id, turn_id))

@@ -370,3 +370,68 @@ def test_edit_event_files_under_the_editing_session(tmp_path):
         assert [(e.session_id, e.turn_id) for e in events] == [("s-a2", 9)]
 
     asyncio.run(run())
+
+
+def test_replace_cap_is_enforced_inside_the_update_statement(tmp_path):
+    """Round-3 blocking 2: the cap-refusal must hold ATOMICALLY — a
+    detached write can grow the row past the cap between the tool's read
+    and the replace, and a replace that lands then deletes content the
+    model never saw. The repo enforces the cap in the UPDATE's predicate."""
+    from db.artifacts_repo import replace_artifact_content
+
+    async def run():
+        await _setup_db(tmp_path)
+        ctx = _ctx([])
+        big = await _create(ctx, content="x" * (READ_ARTIFACT_MAX_CHARS + 1))
+
+        # the repo layer refuses directly, no matter what the caller read
+        row = await replace_artifact_content(
+            "uid-a",
+            big,
+            "tiny",
+            None,
+            3,
+            session_id="s-a",
+            max_replaceable_chars=READ_ARTIFACT_MAX_CHARS,
+        )
+        assert row is None
+        async with session_factory()() as db:
+            content = (await db.execute(select(Artifact.content))).scalar_one()
+        assert content.startswith("xxx") and len(content) > READ_ARTIFACT_MAX_CHARS
+
+    asyncio.run(run())
+
+
+def test_replace_race_where_row_grows_after_the_read_returns_refused(
+    tmp_path, monkeypatch
+):
+    """The handler half of the same race: the pre-read saw a SMALL
+    artifact (stale), the row grew past the cap before the UPDATE — the
+    result must be the refusal steering the model to append, and the
+    content must survive."""
+    from types import SimpleNamespace
+
+    async def run():
+        await _setup_db(tmp_path)
+        ctx = _ctx([])
+        big = await _create(ctx, content="x" * (READ_ARTIFACT_MAX_CHARS + 1))
+
+        real_get = tools.get_artifact_row
+        calls = {"n": 0}
+
+        async def stale_first_read(user_id, artifact_id):
+            calls["n"] += 1
+            if calls["n"] == 1:  # the read that raced the detached write
+                return SimpleNamespace(content="small")
+            return await real_get(user_id, artifact_id)
+
+        monkeypatch.setattr(tools, "get_artifact_row", stale_first_read)
+        result = await _tool("edit_artifact").handler(
+            {"artifact_id": big, "mode": "replace", "content": "tiny"}, ctx
+        )
+        assert result["status"] == "refused"
+        async with session_factory()() as db:
+            content = (await db.execute(select(Artifact.content))).scalar_one()
+        assert "tiny" not in content
+
+    asyncio.run(run())
