@@ -309,14 +309,14 @@ def test_admin_context_cannot_write():
     asyncio.run(run())
 
 
-def test_create_artifact_handler_succeeds_under_real_rls():
-    """Regression: the handler once refreshed its row AFTER commit — the
-    transaction-local RLS context had evaporated, the refresh SELECT matched
-    zero rows, and every artifact save failed on Postgres while sqlite tests
-    stayed green. The handler must run cleanly under real policies."""
-    from unittest.mock import AsyncMock, MagicMock
-
-    from agent.tools import make_create_artifact_handler
+def test_artifact_tools_succeed_under_real_rls():
+    """Regression shape this guards (FR-45 registry handlers): the old
+    handler once refreshed its row AFTER commit — the transaction-local RLS
+    context had evaporated, the refresh SELECT matched zero rows, and every
+    artifact save failed on Postgres while sqlite tests stayed green. The
+    create AND edit paths must run cleanly under real policies (edit's
+    UPDATE ... RETURNING must see its row through RLS)."""
+    from agent.tools import ToolContext, build_registry
     from db.models import Artifact as ArtifactModel
 
     async def run():
@@ -326,13 +326,32 @@ def test_create_artifact_handler_succeeds_under_real_rls():
         await provision_user(uid, None)
         await create_session_row(sess, uid)
 
-        params = MagicMock()
-        params.arguments = {"title": "T", "kind": "summary", "content": "body"}
-        params.llm.push_frame = AsyncMock()
-        params.result_callback = AsyncMock()
-        await make_create_artifact_handler(sess, uid)(params)
+        emitted: list = []
 
-        assert params.result_callback.call_args.args[0]["status"] == "created"
+        async def emit(data):
+            emitted.append(data)
+
+        ctx = ToolContext(session_id=sess, user_id=uid, turn_id=1, emit=emit)
+        tools = {t.name: t for t in build_registry()}
+
+        created = await tools["create_artifact"].handler(
+            {"title": "T", "kind": "summary", "content": "body"}, ctx
+        )
+        assert created["status"] == "created"
+        edited = await tools["edit_artifact"].handler(
+            {
+                "artifact_id": created["artifact_id"],
+                "mode": "append",
+                "content": "more",
+            },
+            ctx,
+        )
+        assert edited["status"] == "edited"
+        assert [e["type"] for e in emitted] == [
+            "artifact.created",
+            "artifact.updated",
+        ]
+
         async with user_scoped_session(uid) as db:
             rows = (
                 (
@@ -344,7 +363,9 @@ def test_create_artifact_handler_succeeds_under_real_rls():
                 .all()
             )
             assert len(rows) == 1
-        # the in-transaction artifact.count event landed too (FR-32/FR-38)
+            assert rows[0].content == "body\nmore"
+        # the in-transaction usage events landed too (FR-32/FR-38): one
+        # artifact count + one edit
         async with user_scoped_session(uid) as db:
             events = (
                 (
@@ -358,7 +379,7 @@ def test_create_artifact_handler_succeeds_under_real_rls():
                 .scalars()
                 .all()
             )
-            assert len(events) == 1
+            assert sorted(e.unit for e in events) == ["count", "edits"]
 
     asyncio.run(run())
 
