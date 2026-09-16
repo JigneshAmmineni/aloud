@@ -320,3 +320,17 @@ def test_db_failure_returns_error_result_without_raising(monkeypatch):
         assert emitted == []  # no announce for a failed write
 
     asyncio.run(run())
+
+
+def test_unknown_kind_is_coerced_to_summary(tmp_path):
+    async def run():
+        await _setup_db(tmp_path)
+        ctx = _ctx([])
+        await _tool("create_artifact").handler(
+            {"title": "T", "kind": "haiku", "content": "body"}, ctx
+        )
+        async with session_factory()() as db:
+            row = (await db.execute(select(Artifact))).scalars().one()
+        assert row.kind == "summary"
+
+    asyncio.run(run())

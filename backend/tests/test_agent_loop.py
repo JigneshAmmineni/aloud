@@ -624,3 +624,199 @@ def test_trace_rows_cover_every_call_with_serialized_inputs():
     step2_inputs = json.loads(traces[1].input_messages)
     assert any(m.get("role") == "tool" for m in step2_inputs)
     assert "[tool_calls]" in traces[0].output
+
+
+# ---------------- review-round fixes (PR #18) ----------------
+
+
+def test_tool_round_barge_in_does_not_double_instrument():
+    """Blocking 1: the step's LLM call was already instrumented when its
+    stream closed; a barge-in during the TOOL ROUND must not re-record
+    usage or write a second trace row (FR-47 iv on interrupted turns)."""
+    scripts = [
+        [
+            LLMToolCall(name="save", arguments={}, id="w1"),
+            _done(usage=LLMUsage(100, 10)),
+        ]
+    ]
+    h = make_loop(scripts, tools=[write_tool(delay=60, emit_on_done=False)])
+
+    async def run():
+        task = asyncio.create_task(h.loop._run_turn("save it"))
+        h.loop._turn_task = task
+        await asyncio.sleep(0.1)  # stream closed + instrumented, round hung
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        h.loop._turn_task = None
+        h.loop._finalize_interrupted_turn()
+
+    asyncio.run(run())
+    traces = _queued(h.traces, LLMTrace)
+    assert len(traces) == 1  # the closed call's row only, no interrupted twin
+    tokens_in = [
+        e for e in _queued(h.recorder, UsageEvent) if e.unit == "tokens_in"
+    ]
+    assert len(tokens_in) == 1
+
+
+def test_interrupted_step_prefix_excludes_earlier_steps_sentences():
+    """Blocking 2: the spoken capture is per STEP — step 1's appended
+    acknowledgment must not be duplicated into interrupted step 2's entry
+    (the common barge-in shape: "say an acknowledgment, then call")."""
+    scripts = [
+        [
+            LLMTextDelta("Let me write that up. "),
+            LLMToolCall(name="echo", arguments={}, id="c1"),
+            _done(),
+        ],
+        [LLMToolCall(name="lookup", arguments={}, id="r1"), 60, _done()],
+    ]
+    h = make_loop(scripts, tools=[read_tool(), read_tool(name="lookup", delay=60)])
+
+    async def run():
+        task = asyncio.create_task(h.loop._run_turn("go"))
+        h.loop._turn_task = task
+        await asyncio.sleep(0.02)
+        h.loop.note_spoken_sentence("Let me write that up.")  # step 1's audio
+        await asyncio.sleep(0.15)  # step 2 issued its call and hung
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        h.loop._turn_task = None
+        h.loop._finalize_interrupted_turn()
+
+    asyncio.run(run())
+    assistants = [
+        m["content"] for m in h.ctx.build() if m["role"] == "assistant"
+    ]
+    joined = " | ".join(assistants)
+    assert joined.count("Let me write that up.") == 1  # once, in step 1's entry
+
+
+def test_new_turn_mid_tool_round_disposes_like_a_barge_in():
+    """Should-fix 5: a new turn while the previous still runs (silent tool
+    round → no interruption broadcast) must get the full FR-46 disposal:
+    placeholder for the running write, no further step for turn 1."""
+    scripts = [
+        [LLMToolCall(name="save", arguments={}, id="w1"), _done()],
+        [LLMTextDelta("Second turn answer."), _done()],
+    ]
+    h = make_loop(scripts, tools=[write_tool(delay=60, emit_on_done=False)])
+
+    async def run():
+        frame1, _ = _context_frame("first turn")
+        await h.loop._on_context_frame(frame1)
+        await asyncio.sleep(0.1)  # turn 1 hung in its write round
+        h.loop.note_user_speech_start()
+        frame2, _ = _context_frame("second turn")
+        await h.loop._on_context_frame(frame2)
+        await asyncio.gather(h.loop._turn_task, return_exceptions=True)
+
+    asyncio.run(run())
+    built = h.ctx.build()
+    tool_results = {
+        m["tool_call_id"]: m["content"] for m in built if m["role"] == "tool"
+    }
+    assert tool_results["w1"] == {"status": "in_progress"}
+    assert len(h.llm.calls) == 2  # turn 1's single call + turn 2's — no extra step
+    assert "Second turn answer." in _pushed_text(h)
+
+
+def test_raised_write_lands_terminal_error_in_its_placeholder():
+    """Should-fix 7: a write that finishes by RAISING must not leave an
+    in_progress placeholder forever — a terminal error result lands in
+    place, through the same machinery as a successful late write."""
+
+    async def failing_write(args, ctx):
+        await asyncio.sleep(0.15)
+        raise RuntimeError("db exploded")
+
+    tool = Tool(
+        name="save",
+        description="",
+        parameters={"type": "object", "properties": {}},
+        handler=failing_write,
+        is_write=True,
+    )
+    h = make_loop(
+        [[LLMToolCall(name="save", arguments={}, id="w1"), _done()]], tools=[tool]
+    )
+
+    async def run():
+        task = asyncio.create_task(h.loop._run_turn("save it"))
+        h.loop._turn_task = task
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        h.loop._turn_task = None
+        h.loop._finalize_interrupted_turn()
+        results = {
+            m["tool_call_id"]: m["content"]
+            for m in h.ctx.build()
+            if m["role"] == "tool"
+        }
+        assert results["w1"] == {"status": "in_progress"}
+        await asyncio.sleep(0.2)  # the write fails after the barge-in
+
+    asyncio.run(run())
+    results = {
+        m["tool_call_id"]: m["content"] for m in h.ctx.build() if m["role"] == "tool"
+    }
+    assert results["w1"]["status"] == "error"
+
+
+def test_no_text_frame_after_greeting_never_regreets():
+    """Should-fix 4: the greeting happens once; a later no-text context
+    frame (whitespace-only aggregation, stray LLMRunFrame) is a logged
+    drop, never a mid-session re-greet with tool_choice none."""
+    h = make_loop([[LLMTextDelta("Hello!"), _done()]])
+
+    async def run():
+        frame1, _ = _context_frame()  # the greeting
+        await h.loop._on_context_frame(frame1)
+        await asyncio.gather(h.loop._turn_task, return_exceptions=True)
+        frame2, _ = _context_frame()  # stray empty frame mid-session
+        await h.loop._on_context_frame(frame2)
+
+    asyncio.run(run())
+    assert len(h.llm.calls) == 1
+
+
+def test_same_tool_twice_in_one_step_keeps_both_stage_entries():
+    """Should-fix 6: duplicate tool names in one step must not overwrite
+    each other's durations in the stage dict."""
+    scripts = [
+        [
+            LLMToolCall(name="echo", arguments={"n": 1}, id="c1"),
+            LLMToolCall(name="echo", arguments={"n": 2}, id="c2"),
+            _done(),
+        ],
+        [LLMTextDelta("Done."), _done()],
+    ]
+    h = make_loop(scripts, tools=[read_tool()])
+
+    async def run():
+        turn = asyncio.create_task(h.loop._run_turn("go"))
+        await asyncio.sleep(0.05)
+        h.recorder.record_measurement(800)
+        await turn
+
+    asyncio.run(run())
+    rows = _queued(h.recorder, TurnMetric)
+    keys = set(rows[0].stages_ms)
+    assert {"step.1.tool.echo.1", "step.1.tool.echo.2"} <= keys
+
+
+def test_fallback_keeps_model_text_the_user_already_heard():
+    """Nit (FR-43's own principle): a handler crash AFTER step text
+    streamed must not vanish the heard sentence from the context."""
+    scripts = [
+        [
+            LLMTextDelta("Here's the thing. "),
+            LLMToolCall(name="echo", arguments={}, id="c1"),
+            _done(),
+        ]
+    ]
+    h = make_loop(scripts, tools=[read_tool(raises=RuntimeError("boom"))])
+    asyncio.run(h.loop._run_turn("go"))
+    assistants = [m["content"] for m in h.ctx.build() if m["role"] == "assistant"]
+    assert assistants == ["Here's the thing."]

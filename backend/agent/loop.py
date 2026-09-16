@@ -90,7 +90,21 @@ class _TurnState:
         self.t0: float | None = None  # current call's start
         self.ttfb_ms: int | None = None
         self.usage = None  # LLMUsage when the provider reported it
-        self.spoken: list[str] = []  # AggregatedTextFrame texts this turn
+        # True once _instrument_call closed the current step's LLM call —
+        # an interruption after that (mid-tool-round) must not re-record
+        # usage or write a second trace row (review: FR-47 iv held on
+        # interrupted turns too).
+        self.call_closed = False
+        self.spoken: list[str] = []  # AggregatedTextFrame texts THIS STEP
+        # (reset each step: earlier steps' sentences are already appended
+        # to the context — carrying them would duplicate them into the
+        # interrupted step's entry)
+        # Text earlier steps already appended this turn: sentence
+        # aggregation LAGS the loop (a fast tool round starts step N+1
+        # before step N's sentence is captured), so the reset alone can't
+        # keep a late-arriving step-N sentence out of step N+1's prefix —
+        # _spoken_prefix filters against this too.
+        self.appended_texts: list[str] = []
 
 
 class AgentLoopProcessor(FrameProcessor):
@@ -137,6 +151,11 @@ class AgentLoopProcessor(FrameProcessor):
         # FR-44 straggler discriminator: a context frame arriving before
         # Flux's next user-speech-start is the consumed turn's leftover.
         self._await_user_speech = False
+        # The greeting is signalled by position, not inferred repeatedly: a
+        # LATER no-text frame (whitespace-only aggregation, a stray
+        # LLMRunFrame) must never re-greet mid-session with tool_choice
+        # none — it is dropped and logged (review finding).
+        self._greeted = False
         # FR-46 late-write bookkeeping (all event-loop-serialized):
         self._placeholder_calls: set[str] = set()  # appended as placeholder
         self._late_results: dict[str, dict] = {}  # completed, not yet landed
@@ -163,9 +182,24 @@ class AgentLoopProcessor(FrameProcessor):
                 event="turn.straggler_dropped", chars=len(user_text)
             ).info("late final after consumed turn dropped")
             return
+        if user_text is None:
+            if self._greeted:
+                self._log.bind(event="turn.empty_dropped").info(
+                    "no-text context frame after the greeting dropped"
+                )
+                return
+            self._greeted = True
         self._await_user_speech = True
         if self._turn_task is not None:
-            await self.cancel_task(self._turn_task)
+            # A new turn landing while the previous one still runs (a
+            # silent tool round draws no interruption broadcast): cancel
+            # AND dispose exactly like a barge-in — running writes need
+            # their placeholder, the trace its interrupted row, the
+            # metrics buffer its turn end (review finding).
+            task = self._turn_task
+            self._turn_task = None
+            await self.cancel_task(task)
+            self._finalize_interrupted_turn()
         self._turn_task = self.create_task(self._run_turn(user_text))
 
     def _consume_scratch(self, frame) -> str | None:
@@ -263,6 +297,11 @@ class AgentLoopProcessor(FrameProcessor):
         state.results = []
         state.usage = None
         state.ttfb_ms = None
+        state.call_closed = False
+        # Per-STEP spoken capture: the previous step's sentences are already
+        # in the context via its own append — carrying them across steps
+        # would duplicate them into an interrupted step's entry.
+        state.spoken = []
         state.t0 = time.monotonic()
         finish = None
         log = self._log.bind(turn_id=state.turn_id, step=state.step)
@@ -319,9 +358,9 @@ class AgentLoopProcessor(FrameProcessor):
 
         if state.calls:
             await self._run_tools(state)
-            self._context.append_step(
-                state.step_filler + state.step_text, state.calls, state.results
-            )
+            appended = state.step_filler + state.step_text
+            self._context.append_step(appended, state.calls, state.results)
+            state.appended_texts.append(appended)
             state.step_filler = ""
             self._land_late_results()
             return False  # next step sees the results
@@ -415,9 +454,13 @@ class AgentLoopProcessor(FrameProcessor):
             # a raising handler propagates: FR-42's primary error path
             # (spoken fallback, clean end of turn) — never a dead session.
         duration_ms = round((time.monotonic() - t0) * 1000)
-        self._recorder.record_step_stage(
-            state.turn_id, f"step.{state.step}.tool.{call.name}", duration_ms
-        )
+        key = f"step.{state.step}.tool.{call.name}"
+        if sum(1 for c in state.calls if c.name == call.name) > 1:
+            # two same-named calls in ONE step would silently overwrite
+            # each other in the stage dict (review: FR-47's anti-overwrite
+            # rule must hold within a step too)
+            key += f".{index + 1}"
+        self._recorder.record_step_stage(state.turn_id, key, duration_ms)
         if outcome == "ok" and isinstance(result, dict):
             status = result.get("status", "ok")
             outcome = "error" if status in ("error", "not_found") else "ok"
@@ -429,7 +472,9 @@ class AgentLoopProcessor(FrameProcessor):
     def _write_done(self, call: LLMToolCall, task: asyncio.Task) -> None:
         """Done-callback for every write task — the FR-46 landing path for
         a write that outlived its await (barge-in or timeout). Never
-        raises; runs after the pipeline may be gone."""
+        raises; runs after the pipeline may be gone. A write that finished
+        by RAISING lands a terminal error result the same way — a
+        placeholder must never stay in_progress forever (review finding)."""
         self._write_registry.discard(task)
         if task.cancelled():
             # only the expired teardown grace cancels writes; the canceller
@@ -437,11 +482,14 @@ class AgentLoopProcessor(FrameProcessor):
             return
         exc = task.exception()
         if exc is not None:
+            # exception TYPE only: provider/DB exceptions can embed SQL
+            # parameters, i.e. artifact content (NFR-9)
             self._log.bind(event="tool.write_failed").error(
-                f"detached write failed: {exc!r}"
+                f"detached write failed: {type(exc).__name__}"
             )
-            return
-        result = task.result()
+            result = {"status": "error", "error": "the write failed"}
+        else:
+            result = task.result()
         if call.id in self._placeholder_calls:
             if self._context.update_tool_result(call.id, result):
                 self._placeholder_calls.discard(call.id)
@@ -473,8 +521,10 @@ class AgentLoopProcessor(FrameProcessor):
 
     async def _speak_fallback(self, state: _TurnState, reason: str) -> None:
         """FR-42's degrade path: a brief spoken canned line and a clean end
-        of turn. Nothing FROM THE MODEL is appended; a filler the user
-        already heard is appended alone (FR-43: heard words never vanish).
+        of turn. Nothing from a FAILED/EMPTY generation is appended, but
+        words the user already heard — the filler AND any model text that
+        streamed before the failure (a handler crash after step text) —
+        never vanish from the context (FR-43's principle; review finding).
         A failed GREETING falls back to a canned greeting — "where were we"
         at session open would read as a resumed-session assumption."""
         if state.purpose == "greeting":
@@ -490,14 +540,16 @@ class AgentLoopProcessor(FrameProcessor):
             await self.push_frame(LLMFullResponseEndFrame())
         except Exception:
             pass  # a torn pipeline can't speak; the turn still ends cleanly
-        if state.step_filler:
-            self._context.append_assistant(state.step_filler.strip())
+        heard = state.step_filler + state.step_text
+        if heard.strip():
+            self._context.append_assistant(heard.strip())
             state.step_filler = ""
 
     def _instrument_call(
         self, state: _TurnState, finish: str | None, duration_ms: int, purpose: str
     ) -> None:
         """FR-47 + FR-49 for one completed (non-interrupted) LLM call."""
+        state.call_closed = True  # a later barge-in must not re-record it
         if state.ttfb_ms is not None:
             self._recorder.record_step_stage(
                 state.turn_id, f"step.{state.step}.ttfb.llm", state.ttfb_ms
@@ -553,8 +605,11 @@ class AgentLoopProcessor(FrameProcessor):
             return
         log = self._log.bind(turn_id=state.turn_id)
         # 1. The interrupted trace + partial usage (FR-49/FR-46: spent is
-        # recorded, from state already held).
-        if state.t0 is not None and state.messages:
+        # recorded, from state already held) — ONLY for a call cut mid-
+        # stream. A barge-in during the tool ROUND arrives after
+        # _instrument_call already closed this step's call; re-recording
+        # would double the usage and duplicate the trace row (FR-47 iv).
+        if not state.call_closed and state.t0 is not None and state.messages:
             duration_ms = round((time.monotonic() - state.t0) * 1000)
             if state.usage is not None:
                 self._recorder.record_llm_usage(
@@ -588,12 +643,15 @@ class AgentLoopProcessor(FrameProcessor):
                 if state.results and i < len(state.results) and state.results[i]:
                     results.append(state.results[i])  # finished before barge-in
                 elif write_task is not None:
-                    if (
-                        write_task.done()
-                        and not write_task.cancelled()
-                        and write_task.exception() is None
-                    ):
-                        results.append(write_task.result())
+                    if write_task.done() and not write_task.cancelled():
+                        if write_task.exception() is None:
+                            results.append(write_task.result())
+                        else:
+                            # already failed — terminal, never a placeholder
+                            # nothing will ever update (review finding)
+                            results.append(
+                                {"status": "error", "error": "the write failed"}
+                            )
                     else:
                         # the write runs to completion; its result updates
                         # this placeholder in place — never a tail append
@@ -627,10 +685,15 @@ class AgentLoopProcessor(FrameProcessor):
         self._recorder.turn_ended(state.turn_id)
 
     def _spoken_prefix(self, state: _TurnState) -> str:
-        """What was SENT FOR SYNTHESIS this turn (the accepted sentence-level
-        over-approximation), with the filler subtracted — the loop emitted
-        it and knows its exact text, so its context entry stays owned by
-        FR-43's prefix rule alone (recorded once, never twice)."""
+        """What was SENT FOR SYNTHESIS for the interrupted STEP (the
+        accepted sentence-level over-approximation), with two exclusions
+        the loop owns because it knows the exact texts: the filler (its
+        context entry belongs to FR-43's prefix rule — recorded once,
+        never twice) and sentences belonging to EARLIER steps' already-
+        appended text — sentence aggregation lags the loop, so a fast tool
+        round starts step N+1 before step N's sentence is captured, and
+        without this filter it would be duplicated into the interrupted
+        step's entry."""
         sentences = list(state.spoken)
         for filler in state.filler_spoken:
             for i, sentence in enumerate(sentences):
@@ -638,7 +701,15 @@ class AgentLoopProcessor(FrameProcessor):
                 if stripped == filler or stripped == filler.strip():
                     del sentences[i]
                     break
-        return " ".join(s.strip() for s in sentences if s.strip())
+        kept = []
+        for sentence in sentences:
+            stripped = sentence.strip()
+            if not stripped:
+                continue
+            if any(stripped in appended for appended in state.appended_texts):
+                continue  # an earlier step's late-captured sentence
+            kept.append(stripped)
+        return " ".join(kept)
 
 
 class AgentLoopObserver(BaseObserver):

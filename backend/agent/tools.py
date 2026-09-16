@@ -76,8 +76,10 @@ async def _create_artifact(args: dict, ctx: ToolContext) -> dict:
             ctx.user_id, ctx.session_id, kind, title, content, ctx.turn_id
         )
     except Exception as e:
+        # exception TYPE only: SQLAlchemy errors render the SQL parameters —
+        # artifact title and content — and ERROR ships to Cloud Logging (NFR-9)
         log.bind(event="tool.create_artifact_failed").error(
-            f"artifact save failed: {e}"
+            f"artifact save failed: {type(e).__name__}"
         )
         return {"status": "error", "error": "the artifact could not be saved"}
     await ctx.emit({"type": "artifact.created", "artifact": _panel_artifact(row)})
@@ -171,8 +173,9 @@ async def _edit_artifact(args: dict, ctx: ToolContext) -> dict:
                 ctx.user_id, artifact_id, "\n" + content, title, ctx.turn_id
             )
     except Exception as e:
+        # exception TYPE only — same NFR-9 rule as create
         log.bind(event="tool.edit_artifact_failed").error(
-            f"artifact edit failed: {e}"
+            f"artifact edit failed: {type(e).__name__}"
         )
         return {"status": "error", "error": "the edit could not be saved"}
     if row is None:
