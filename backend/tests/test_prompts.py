@@ -42,3 +42,26 @@ def test_prompt_keeps_artifact_instructions():
         assert tool in prompt
     assert "never read an artifact" in prompt
     assert "acknowledgment" in prompt
+
+
+def test_prompt_pins_the_assistant_not_leader_character():
+    """Feature 3.1: the agent is a partner, never the conversation's
+    leader — pressure-testing is invited, not the default posture."""
+    prompt = build_system_prompt().lower()
+    assert "never its leader" in prompt
+    assert "when invited" in prompt
+    assert "default posture is listening" in prompt
+
+
+def test_prompt_pins_the_direct_address_rule():
+    """Feature 3.1 (the 'how are you' → 'hm' bug): minimal acknowledgments
+    continue the user's thread; being spoken TO always gets a real answer."""
+    prompt = build_system_prompt().lower()
+    assert "never a substitute" in prompt
+    assert "answer directly and completely" in prompt
+
+
+def test_prompt_pins_the_pause_rule():
+    """Feature 3.1: a thinking pause is not an invitation to jump in."""
+    prompt = build_system_prompt().lower()
+    assert "a pause is not an invitation" in prompt
