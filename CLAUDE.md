@@ -61,7 +61,7 @@ Server-side encryption (key held by us) is added post-MVP. To make this painless
 ## Hard constraints
 
 - Never describe the app as therapy or the agent as a therapist — in code, copy, system prompts, or documentation.
-- All provider SDK usage lives in `agent/providers.py` (factories) behind `CompanionAgent`. No direct SDK calls in route handlers or anywhere else.
+- All provider SDK usage lives in `agent/providers.py` (factories) behind `CompanionAgent`. No direct SDK calls in route handlers or anywhere else. (One stated exemption: `backend/scripts/spike_gemini_stream.py`, the FR-48 spike kept as a local-only diagnostic — never imported by runtime code.)
 - A `user_id` reaching any repo function or query is only ever the output of server-side credential verification (`get_current_user_id`) — never read from a request body, query param, or client-set header. Repo signatures take `user_id: str` with no default value.
 - DB schema: sensitive content columns must be separable from metadata. Design for encryption even if you don't implement it yet.
 - Every pipeline stage is instrumented: structured logs with `session_id`/`turn_id`, per-stage latency, WARN over 1s per stage, ERROR over 3s end-of-speech → first audio.

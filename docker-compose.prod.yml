@@ -30,6 +30,11 @@ services:
     build: ./backend
     network_mode: host           # REQUIRED: WebRTC UDP media on the host interface
     restart: unless-stopped
+    # FR-46 teardown arithmetic: 0.5s goodbye + 5s write grace + ~11s of
+    # concurrent bounded writer flushes + 2s bounded row closes ≈ 19s worst
+    # case; 30s includes margin. Docker's 10s default is what SIGKILL —
+    # the outcome this exists to prevent — was measured against.
+    stop_grace_period: 30s
     env_file: .env
     environment:
       - DATABASE_URL=postgresql+asyncpg://aloud:${POSTGRES_PASSWORD}@127.0.0.1:5432/aloud

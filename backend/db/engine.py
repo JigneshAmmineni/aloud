@@ -44,6 +44,7 @@ _RLS_TABLES = (
     "artifacts",
     "usage_events",
     "turn_metrics",
+    "llm_traces",
 )
 
 # FR-38: ONLY these tables' FOR SELECT policies carry the admin escape.
@@ -126,8 +127,8 @@ async def _bootstrap_rls(engine: AsyncEngine, app_password: str) -> None:
         """,
         f"GRANT USAGE ON SCHEMA public TO {APP_ROLE};",
         f"GRANT SELECT, INSERT, UPDATE, DELETE ON users, sessions,"
-        f" transcript_events, artifacts, usage_events, turn_metrics"
-        f" TO {APP_ROLE};",
+        f" transcript_events, artifacts, usage_events, turn_metrics,"
+        f" llm_traces TO {APP_ROLE};",
         f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {APP_ROLE};",
         # Pre-auth databases: add columns create_all won't retrofit.
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_name VARCHAR(80);",
@@ -141,6 +142,10 @@ async def _bootstrap_rls(engine: AsyncEngine, app_password: str) -> None:
         "CREATE INDEX IF NOT EXISTS ix_usage_events_ts ON usage_events (ts);",
         "CREATE INDEX IF NOT EXISTS ix_turn_metrics_ts ON turn_metrics (ts);",
         "CREATE INDEX IF NOT EXISTS ix_sessions_user_id ON sessions (user_id);",
+        # FR-45: edit_artifact adds updated_at; list_artifacts filters by
+        # user_id alone (pre-§4.10 databases predate both).
+        "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;",
+        "CREATE INDEX IF NOT EXISTS ix_artifacts_user_id ON artifacts (user_id);",
         """
         UPDATE transcript_events te SET user_id = s.user_id
         FROM sessions s WHERE te.session_id = s.id AND te.user_id IS NULL;
