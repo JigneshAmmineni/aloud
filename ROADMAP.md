@@ -227,6 +227,40 @@ counts, latency, purpose (voice turn / memory loop / compression), linked to
 - A minimal version may be pulled forward if debugging features 3–6 demands
   it.
 
+### 8. Noisy-environment robustness — turn detection under real-world audio
+
+Found live during 3.1 testing (2026-09-17): continuous background noise (a
+treadmill) kept Flux convinced the turn was still open — end-of-turn never
+fired, the agent never responded. Real-world usage means gyms, streets,
+cafés; the harder variant is background *speech* between other people, not
+addressed to the agent. Pinned for later; the layered plan from the
+brainstorm, cheapest first:
+
+1. **Diagnose the signature** per incident: turn open with ZERO transcribed
+   words (pure detection stall) vs. garbage words (context pollution too) —
+   `transcript_events` + logs already hold the evidence.
+2. **Client mic constraints**: explicit `noiseSuppression`/
+   `echoCancellation`, and experiment with `autoGainControl: false` — AGC
+   amplifying the noise floor while the user is quiet is a prime suspect
+   for keeping the turn open. (Today the client passes bare
+   `enableMic: true`.)
+3. **Flux knobs**: `min_confidence` (keep garbage words out of the
+   context), `eot_timeout_ms` tuning — bounds borderline turns but cannot
+   end a turn Flux still classifies as speech.
+4. **Our own turn watchdog** (likely the durable fix, provider-agnostic):
+   a turn open N seconds with zero (or no NEW) transcribed words is
+   declared noise — reset it, or force the end-of-turn with what exists;
+   plus a hard max-turn-duration ceiling against any pathological stall.
+5. **Parallel Silero VAD cross-check**: Silero is speech-specific
+   (treadmill = non-speech); "Flux says speaking, Silero says silence for
+   X s" overrides. CPU cost on the e2-small is the constraint.
+6. **Voice isolation** — the only real answer to background *speech*:
+   Krisp-class primary-speaker isolation (client SDK offloads CPU) or,
+   later, speaker enrollment/diarization.
+7. **Product escape hatches**: push-to-talk / hold-to-talk mode for noisy
+   environments; a visible "still listening…" state so a stalled turn is
+   legible instead of feeling dead.
+
 ## Process infrastructure
 
 Per-PR CI (ruff + pytest, frontend build) and the tailored Claude review are
