@@ -35,7 +35,7 @@ jobs:
             Review PR #${{ github.event.pull_request.number }} in ${{ github.repository }}.
             Use `gh pr view` / `gh pr diff` to read the PR description and diff.
 
-            You are reviewing a PR for Aloud, a voice-first thinking partner
+            You are reviewing a PR for Aloud, a voice-first work assistant
             (cascaded Pipecat pipeline: turn detection -> STT -> LLM -> TTS).
 
             ## Before reviewing
