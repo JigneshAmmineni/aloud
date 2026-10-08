@@ -48,7 +48,6 @@ from agent.prompts import (
     FALLBACK_GREETING_LINES,
     FALLBACK_LINES,
     FILLER_LINES,
-    GREETING_TRIGGER,
     WRAP_UP_INSTRUCTION,
 )
 from agent.providers import (
@@ -128,7 +127,7 @@ class AgentLoopProcessor(FrameProcessor):
         traces,
         emit,
         write_registry: set,
-        greeting_trigger: str = GREETING_TRIGGER,
+        greeting_trigger: str,  # required: dropping it must not pass a green suite
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -443,7 +442,9 @@ class AgentLoopProcessor(FrameProcessor):
             # whitespace-only generation alongside the forbidden call must
             # take the fallback, not open mute with an empty append
             if state.step_text.strip():
-                self._context.append_assistant(state.step_filler + state.step_text)
+                self._context.append_assistant(
+                    (state.step_filler + state.step_text).strip()
+                )
                 state.step_filler = ""
             else:
                 await self._speak_fallback(state, reason="forbidden_tool_calls")

@@ -59,12 +59,11 @@ def test_name_is_trimmed_and_length_capped(tmp_path):
 
 
 def test_get_preferred_name_unknown_uid_is_none(tmp_path):
-    _run(tmp_path, lambda: get_preferred_name("never-provisioned"))
+    # explicit assert IN the test (round-2 review: the previous version
+    # shadowed the module's _run helper and hid its contract inside it)
+    async def scenario():
+        await provision_user("u6", "Ada")
+        assert await get_preferred_name("never-provisioned") is None
+        assert await get_preferred_name("u6") == "Ada"  # and not a mix-up
 
-
-def _run(tmp_path, coro_factory):
-    async def run():
-        await init_db(f"sqlite+aiosqlite:///{tmp_path}/repo_test2.db")
-        assert await coro_factory() is None
-
-    asyncio.run(run())
+    _run(tmp_path, scenario)

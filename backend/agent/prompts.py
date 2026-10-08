@@ -1,5 +1,7 @@
 """System prompt builder (SDD §2.5). Step 1: hardcoded identity + spoken style."""
 
+import re
+
 # C-3: these words must never appear in any prompt block (see tests/test_prompts.py).
 BANNED_WORDS = ("therapy", "therapist", "counselor")
 
@@ -92,12 +94,17 @@ def build_greeting_trigger(preferred_name: str | None) -> str:
     """The greeting trigger, carrying the FR-24 preferred name when one
     exists — what makes "Hey {name}" possible (feature 3.1). The name is
     the user's own verified-profile data entering their own session's
-    prompt; it is never appended to the context."""
+    prompt and never the context — but it is the first user-controlled
+    string inside a model-visible INSTRUCTION, so it is sanitized to
+    name-shaped characters (round-2 review: a crafted displayName must
+    not be able to close the parenthesis and extend the instruction)."""
     if preferred_name:
-        return (
-            f"(The user, whose name is {preferred_name}, just connected. "
-            "Greet them as your instructions describe.)"
-        )
+        name = re.sub(r"[^\w \-'.]", "", preferred_name).strip()[:40]
+        if name:
+            return (
+                f"(The user, whose name is {name}, just connected. "
+                "Greet them as your instructions describe.)"
+            )
     return GREETING_TRIGGER
 
 # FR-43: the speak-first backstop before silent tool work. Generic and

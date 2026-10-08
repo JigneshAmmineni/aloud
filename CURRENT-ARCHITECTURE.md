@@ -226,7 +226,10 @@ Two architectural seams everything hangs on:
    append atomically and loop (MAX 5 steps + one forced tool-free wrap-up
    call); a silent tool round gets a spoken FILLER line at call arrival
    (FR-43); any loop error degrades to a spoken canned fallback. The
-   greeting is one tool-forbidden step with no user turn. Barge-in cancels
+   greeting is one tool-forbidden step with no user turn, carrying the
+   FR-24 preferred name on its ephemeral trigger — one bounded (1s)
+   `users` read at session setup, degrading to a nameless greeting on
+   failure. Barge-in cancels
    the turn task via Pipecat's interruption hook: the spoken prefix
    (sentence-level, sentinel-marked) is what the context keeps, a running
    write's placeholder is updated in place when it lands (FR-46).

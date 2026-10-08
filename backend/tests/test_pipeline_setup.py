@@ -175,3 +175,26 @@ def test_greeting_trigger_wiring_and_failure_fallback(monkeypatch):
     monkeypatch.setattr(companion, "get_preferred_name", broken)
     trigger = asyncio.run(companion._greeting_trigger_for("uid-x", logger))
     assert trigger == GREETING_TRIGGER  # nameless fallback, no raise
+
+
+def test_greeting_name_lookup_is_time_bounded(monkeypatch):
+    """Round-2 review: the 1s bound itself — a hung pool degrades to the
+    nameless greeting instead of delaying the session."""
+    import asyncio
+    import time
+
+    from loguru import logger
+
+    import agent.companion as companion
+    from agent.prompts import GREETING_TRIGGER
+
+    async def hung(user_id):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(companion, "get_preferred_name", hung)
+    t0 = time.monotonic()
+    trigger = asyncio.run(companion._greeting_trigger_for("uid-x", logger))
+    assert trigger == GREETING_TRIGGER
+    assert time.monotonic() - t0 < 5  # the wait_for bound, not the hang
+
+    asyncio.run(asyncio.sleep(0))  # nothing pending leaks

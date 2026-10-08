@@ -268,3 +268,8 @@ blocker; the comparative A/B (iteration 2 on v2, then arm A runs, then
 the filled judging sheet) resumes from this document when picked back up.
 The scenario scripts above stay valid, including the deliberately
 unchanged "poke holes" wording that exercises the STT-garble path.
+One thing to listen for when resumed (PR #19 review's observation): v2
+pushes hard toward the minimum reply, and the model's minimum is
+sometimes an empty generation — which speaks the "I hit a snag" fallback
+mid-brain-dump. If that happens in practice, the quiet-turn loop
+mechanism parked above moves from optional to needed.

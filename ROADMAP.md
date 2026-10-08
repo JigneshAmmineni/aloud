@@ -267,6 +267,23 @@ brainstorm, cheapest first:
    environments; a visible "still listening…" state so a stalled turn is
    legible instead of feeling dead.
 
+### 9. Prompt injection & PII protection layer
+
+Placeholder by decision (2026-10-08): this layer needs to exist; its
+exact requirements and implementation will be researched and specced
+when picked up. The named concerns it must cover:
+
+- **Prompt injection**: untrusted text reaching the model's context —
+  uploaded documents, artifact content read back by tools, and any
+  future retrieved memory — carrying adversarial instructions. Today's
+  only mitigations are behavioral (the loop refuses tool calls on
+  forbidden-selection calls; tool results are structured JSON).
+- **PII protection**: what leaves the system and what is retained —
+  provider egress (Deepgram/Google/Cartesia already disclosed per
+  NFR-5), logs and traces (NFR-9 and the 🔒-column discipline exist;
+  this layer decides detection/redaction on top), and any future
+  third-party surface.
+
 ## Process infrastructure
 
 Per-PR CI (ruff + pytest, frontend build) and the tailored Claude review are

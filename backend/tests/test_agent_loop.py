@@ -120,6 +120,7 @@ def make_loop(scripts, tools=(), current_turn=2):
         traces=traces,
         emit=emit,
         write_registry=set(),
+        greeting_trigger=GREETING_TRIGGER,
     )
     pushed: list = []
 
