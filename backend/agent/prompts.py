@@ -72,10 +72,11 @@ FALLBACK_LINES = (
 
 # A FAILED GREETING call must still sound like a greeting: "where were we"
 # at session open reads as a bot assuming a resumed conversation. Canned,
-# like FALLBACK_LINES.
+# like FALLBACK_LINES — and as terse as the prompt's greeting rule
+# (review: no invitations here either).
 FALLBACK_GREETING_LINES = (
-    "Hey. What's on your mind?",
-    "Hi there. Where do you want to start today?",
+    "Hey.",
+    "Hey, what's up?",
 )
 
 # The greeting's ephemeral trigger (FR-42): Gemini rejects a call whose
@@ -132,11 +133,12 @@ def build_document_context_block(documents) -> str:
     from app.documents import _TRUNCATION_MARKER, MAX_TOTAL_CHARS
 
     parts = [
-        "The user has attached the following document(s) to think through with "
-        "you. Read them, and when you greet the user, acknowledge in one short "
-        "sentence that you've read them. Refer to a document by its name when it "
-        "comes up. Do not read a document aloud verbatim or summarize it unasked; "
-        "discuss it as the conversation calls for it."
+        "The user has attached the following document(s) to work through with "
+        "you. Read them, and fold a few words into your greeting so they know "
+        'you have them — "Hey. Got your doc." — still a few words, never a '
+        "sentence of commentary. Refer to a document by its name when it "
+        "comes up. Do not read a document aloud verbatim or summarize it "
+        "unasked; discuss it as the conversation calls for it."
     ]
     for doc in documents:
         parts.append(f"--- DOCUMENT: {doc.filename} ---\n{doc.content}\n--- END ---")

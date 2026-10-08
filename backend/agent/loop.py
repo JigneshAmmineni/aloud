@@ -366,7 +366,10 @@ class AgentLoopProcessor(FrameProcessor):
                         self._audio_pending = True
                         await self.push_frame(LLMTextFrame(event.text))
                     elif isinstance(event, LLMToolCall):
-                        if not state.calls:
+                        # no filler when selection is forbidden (review):
+                        # these calls get refused, never executed — a
+                        # mistranslated greeting must not open "One moment."
+                        if not state.calls and tool_choice != "none":
                             await self._maybe_filler(state, elapsed_ms)
                         state.calls.append(event)
                     elif isinstance(event, LLMDone):
@@ -436,7 +439,10 @@ class AgentLoopProcessor(FrameProcessor):
             ).warning(
                 "call returned tool calls despite tool_choice none"
             )
-            if state.step_text:
+            # .strip(), matching the empty-step check above (review): a
+            # whitespace-only generation alongside the forbidden call must
+            # take the fallback, not open mute with an empty append
+            if state.step_text.strip():
                 self._context.append_assistant(state.step_filler + state.step_text)
                 state.step_filler = ""
             else:

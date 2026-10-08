@@ -10,7 +10,8 @@ with an ADR-style decision log and SRE-style runbook pointers.
 an operational process updates this file in the same PR. When this document and
 the code disagree, the code is right and this file has a bug.
 
-Related docs: [deployment.md](deployment.md) (step-by-step VM runbook),
+Related docs: [docs/evals/](docs/evals/) (dated behavioral test plans and
+results), [deployment.md](deployment.md) (step-by-step VM runbook),
 [REQUIREMENTS.md](REQUIREMENTS.md) (the contract), [ROADMAP.md](ROADMAP.md)
 (direction). The original design docs live in git history at commit `a84df1b`.
 

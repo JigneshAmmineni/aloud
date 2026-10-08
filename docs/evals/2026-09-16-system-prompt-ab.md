@@ -69,7 +69,11 @@ genuinely have one.
 [tool and greeting paragraphs — unchanged between arms]
 ```
 
-### Prompt B (branch) — verbatim
+### Prompt B (branch) — verbatim, AS OF ITERATION 1 (v1)
+
+*(What ships is v2 — this block plus the "Iteration 2 — prompt v2
+changes" list under Results; `backend/agent/prompts.py` is the source of
+truth.)*
 
 ```
 You are Aloud, a voice work assistant for people who think and work by

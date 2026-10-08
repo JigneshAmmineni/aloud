@@ -130,6 +130,21 @@ async def _await_all_sessions_writes(deadline: float) -> None:
         )
 
 
+async def _greeting_trigger_for(user_id: str, log) -> str:
+    """3.1: "Hey {name}" — the FR-24 preferred name rides the greeting
+    trigger. BOUNDED and logged (review): a slow or failing lookup
+    degrades to the nameless greeting instead of delaying the session or
+    silently disabling the feature forever."""
+    try:
+        name = await asyncio.wait_for(get_preferred_name(user_id), timeout=1.0)
+    except Exception as e:
+        log.bind(event="greeting.name_lookup_failed").warning(
+            f"preferred-name lookup failed: {type(e).__name__}"
+        )
+        name = None
+    return build_greeting_trigger(name)
+
+
 def build_pipeline_parts(settings: Settings, documents=None, *, session_id=""):
     """Per-session services, the context provider, and the turn-assembly
     aggregator — separated from the transport so the assembly contracts are
@@ -221,14 +236,6 @@ class CompanionAgent:
             except Exception:
                 pass
 
-        # 3.1: "Hey {name}" — the FR-24 preferred name rides the greeting
-        # trigger. A lookup failure must never cost the session: fall back
-        # to the nameless greeting.
-        try:
-            preferred_name = await get_preferred_name(self._user_id)
-        except Exception:
-            preferred_name = None
-
         loop_stage = AgentLoopProcessor(
             context=context_provider,
             llm=make_loop_llm(self._settings),
@@ -240,7 +247,7 @@ class CompanionAgent:
             traces=traces,
             emit=emit,
             write_registry=write_tasks,
-            greeting_trigger=build_greeting_trigger(preferred_name),
+            greeting_trigger=await _greeting_trigger_for(self._user_id, log),
         )
 
         pipeline = Pipeline(

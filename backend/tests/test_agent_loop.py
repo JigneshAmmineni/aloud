@@ -1087,3 +1087,33 @@ def test_whitespace_only_generation_is_an_empty_step():
     assert any(line in _pushed_text(h) for line in FALLBACK_LINES)
     roles = [m["role"] for m in h.ctx.build()]
     assert roles == ["system", "user"]  # nothing appended for the turn
+
+
+# ---------------- PR #19 review round 1 ----------------
+
+
+def test_whitespace_text_with_forbidden_tool_call_takes_the_fallback():
+    """Review blocking 3: the refusal branch strips too — whitespace text
+    plus a forbidden call must not open mute with an empty append."""
+    h = make_loop(
+        [[LLMTextDelta(" \n"), LLMToolCall(name="echo", arguments={}, id="g1"), _done()]],
+        tools=[read_tool()],
+    )
+    asyncio.run(h.loop._run_turn(None))  # the greeting
+    assert any(line in _pushed_text(h) for line in FALLBACK_GREETING_LINES)
+    roles = [m["role"] for m in h.ctx.build()]
+    assert "assistant" not in roles  # nothing empty appended
+
+
+def test_no_filler_on_tool_choice_none_calls():
+    """Review: a refused call never runs a tool round, so the FR-43
+    backstop must not speak "One moment." for it — a mistranslated
+    greeting opens with the greeting fallback alone."""
+    h = make_loop(
+        [[LLMToolCall(name="echo", arguments={}, id="g1"), _done()]],
+        tools=[read_tool()],
+    )
+    asyncio.run(h.loop._run_turn(None))
+    text = _pushed_text(h)
+    assert not any(f in text for f in FILLER_LINES)
+    assert any(line in text for line in FALLBACK_GREETING_LINES)

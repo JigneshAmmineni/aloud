@@ -2,9 +2,8 @@
 
 import asyncio
 
-from db.engine import init_db, session_factory
-from db.models import User
-from db.users_repo import provision_user
+from db.engine import init_db
+from db.users_repo import get_preferred_name, provision_user
 
 
 def _run(tmp_path, coro_fn):
@@ -16,9 +15,8 @@ def _run(tmp_path, coro_fn):
 
 
 async def _name_of(uid: str):
-    async with session_factory()() as db:
-        row = await db.get(User, uid)
-        return row.preferred_name if row else None
+    # the repo's own getter (review: the test file previously duplicated it)
+    return await get_preferred_name(uid)
 
 
 def test_named_signup_then_nameless_provision_keeps_name(tmp_path):
@@ -58,3 +56,15 @@ def test_name_is_trimmed_and_length_capped(tmp_path):
         assert await _name_of("u5") is None  # whitespace-only -> no name
 
     _run(tmp_path, scenario)
+
+
+def test_get_preferred_name_unknown_uid_is_none(tmp_path):
+    _run(tmp_path, lambda: get_preferred_name("never-provisioned"))
+
+
+def _run(tmp_path, coro_factory):
+    async def run():
+        await init_db(f"sqlite+aiosqlite:///{tmp_path}/repo_test2.db")
+        assert await coro_factory() is None
+
+    asyncio.run(run())
