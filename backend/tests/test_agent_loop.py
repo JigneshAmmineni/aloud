@@ -120,6 +120,7 @@ def make_loop(scripts, tools=(), current_turn=2):
         traces=traces,
         emit=emit,
         write_registry=set(),
+        greeting_trigger=GREETING_TRIGGER,
     )
     pushed: list = []
 
@@ -1050,3 +1051,70 @@ def test_cleanup_cancels_wedged_abandoned_reads():
         )
 
     asyncio.run(run())
+
+
+# ---------------- feature 3.1 ride-alongs (round-5 findings) ----------------
+
+
+def test_greeting_refuses_tool_calls_despite_mistranslation():
+    """Round-5 finding 1: the greeting call (tool_choice none, FR-7's
+    guard) refuses to execute tool calls exactly like the wrap-up does —
+    a session must never open by running list_artifacts."""
+    executed = []
+
+    async def spy(args, ctx):
+        executed.append(True)
+        return {"artifacts": []}
+
+    scripts = [
+        [LLMToolCall(name="list_artifacts", arguments={}, id="g1"), _done()]
+    ]
+    h = make_loop(scripts, tools=[read_tool(name="list_artifacts", handler=spy)])
+    asyncio.run(h.loop._run_turn(None))  # the greeting
+
+    assert executed == []  # never ran
+    assert len(h.llm.calls) == 1
+    text = _pushed_text(h)
+    assert any(line in text for line in FALLBACK_GREETING_LINES)  # still greets
+
+
+def test_whitespace_only_generation_is_an_empty_step():
+    """Round-5 finding 2: a "\n"-only response takes the empty-step
+    fallback — never a silent turn, never an effectively-empty assistant
+    message (the shape that 400s the Claude swap)."""
+    h = make_loop([[LLMTextDelta(" \n  "), _done()]])
+    asyncio.run(h.loop._run_turn("go"))
+
+    assert any(line in _pushed_text(h) for line in FALLBACK_LINES)
+    roles = [m["role"] for m in h.ctx.build()]
+    assert roles == ["system", "user"]  # nothing appended for the turn
+
+
+# ---------------- PR #19 review round 1 ----------------
+
+
+def test_whitespace_text_with_forbidden_tool_call_takes_the_fallback():
+    """Review blocking 3: the refusal branch strips too — whitespace text
+    plus a forbidden call must not open mute with an empty append."""
+    h = make_loop(
+        [[LLMTextDelta(" \n"), LLMToolCall(name="echo", arguments={}, id="g1"), _done()]],
+        tools=[read_tool()],
+    )
+    asyncio.run(h.loop._run_turn(None))  # the greeting
+    assert any(line in _pushed_text(h) for line in FALLBACK_GREETING_LINES)
+    roles = [m["role"] for m in h.ctx.build()]
+    assert "assistant" not in roles  # nothing empty appended
+
+
+def test_no_filler_on_tool_choice_none_calls():
+    """Review: a refused call never runs a tool round, so the FR-43
+    backstop must not speak "One moment." for it — a mistranslated
+    greeting opens with the greeting fallback alone."""
+    h = make_loop(
+        [[LLMToolCall(name="echo", arguments={}, id="g1"), _done()]],
+        tools=[read_tool()],
+    )
+    asyncio.run(h.loop._run_turn(None))
+    text = _pushed_text(h)
+    assert not any(f in text for f in FILLER_LINES)
+    assert any(line in text for line in FALLBACK_GREETING_LINES)

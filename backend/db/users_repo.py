@@ -36,3 +36,13 @@ async def provision_user(user_id: str, preferred_name: str | None) -> None:
         )
         await db.execute(stmt)
         await db.commit()
+
+
+async def get_preferred_name(user_id: str) -> str | None:
+    """The FR-24 preferred name, for the greeting (feature 3.1: "Hey
+    {name}"). None when the user never had a name claim. Plain session
+    like provision_user: the users table is deliberately outside RLS
+    (see db/engine.py), and user_id arrives verified like every repo arg."""
+    async with session_factory()() as db:
+        row = await db.get(User, user_id)
+        return row.preferred_name if row is not None else None

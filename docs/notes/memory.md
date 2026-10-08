@@ -343,7 +343,7 @@ documents) arrive with it.
   database**. pgvector keeps embeddings in the same transaction as the row they
   describe — one system, no consistency gap, no second service to deploy.
 - A dedicated vector DB (Pinecone, Qdrant, …) earns its keep at a scale (millions
-  of vectors, heavy QPS) that a personal thinking partner won't see for a long
+  of vectors, heavy QPS) that a personal work assistant won't see for a long
   time. The repo pattern (`db/*_repo.py`) keeps the swap localized if that day
   comes.
 - Postgres is already in the stack — the ops transcript log lives there.

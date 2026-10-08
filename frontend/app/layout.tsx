@@ -18,7 +18,7 @@ const plexMono = IBM_Plex_Mono({
 
 export const metadata: Metadata = {
   title: "Aloud",
-  description: "A voice-first thinking partner. Talk it through.",
+  description: "A voice-first work assistant. Talk it through.",
 };
 
 export const viewport: Viewport = {

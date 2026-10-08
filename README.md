@@ -1,10 +1,10 @@
 # Aloud
 
-**A voice-first thinking partner for people who process ideas best by talking out loud.**
+**A voice-first work assistant for people who think and work by talking out loud.**
 
-You tap one button and start talking. Aloud listens, asks sharp questions — one at a time — and helps you brainstorm, pressure-test plans, and untangle messy thoughts. Ask it to *"write that up"* and a structured artifact appears on screen while the conversation keeps moving. Interrupt it mid-sentence and it stops immediately.
+You tap one button and start talking. Your work becomes a conversation with an assistant that handles the tiny details: talk your ideas through — as hands-on or as imprecise as you want — and it puts them down in writing coherently. Say *"write that up"* and the artifact appears on screen while the conversation keeps moving; go back over specific lines or phrasing whenever you want. It listens while you think out loud, answers directly when you ask, and pressure-tests your plans when you invite it to. Interrupt it mid-sentence and it stops immediately.
 
-It is a conversational agent that makes your thinking better in real time.
+It is a conversational assistant that structures your creativity in real time.
 
 ---
 

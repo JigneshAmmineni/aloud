@@ -2,7 +2,7 @@
 
 ## What this is
 
-A voice-first thinking partner for people who process ideas best by talking out loud. The user speaks; the agent listens, asks sharp questions, and helps them brainstorm, pressure-test plans, and organize messy thoughts — hands-free, on the go.
+A voice-first work assistant for people who think and work by talking out loud. The user speaks; the agent listens, handles the tiny details, and gives their words structure — turning trains of thought into coherent write-ups the user can review, answering directly when spoken to, and following the user's lead rather than steering (it still asks sharp questions and pressure-tests plans when invited) — hands-free, on the go.
 
 **It is NOT a therapist. Never use the words "therapy," "therapist," or "counselor" in the product, UI copy, system prompts, or documentation.**
 
@@ -74,4 +74,6 @@ Server-side encryption (key held by us) is added post-MVP. To make this painless
 - [REQUIREMENTS.md](REQUIREMENTS.md) — what the product must do (FR/NFR/constraints)
 - PLAN.md — scrap notes / future directions (deployment options, post-MVP ideas); local-only, gitignored
 - **[CURRENT-ARCHITECTURE.md](CURRENT-ARCHITECTURE.md) is the accurate map of the current product — enforced at merge and deploy.** Everything the "current" product runs on must be reflected there: code structure, deployment, and every piece and service of its infrastructure — database, GCP services, security protocols, alerting and email policies, third-party providers, CI/CD — and anything else a new engineer would need to know exists. The hard requirement sits at the boundaries: any commit merging to `main` or deploying to prod must carry an architecture document accurate as of that commit. On dev branches, update it at Claude's discretion as pieces are *finalized* (a service installed and verified, a design settled — document it then, don't wait for the PR); skip documenting intermediate states while something is still in ideation, development, or testing. When the document and reality disagree, reality is right and the document has a bug.
+- `docs/evals/` — dated behavioral test plans and their results (A/B listening tests, prompt-change evaluations). One file per evaluation, written before the run, results appended after — the record a PR's acceptance bar points to.
+- `docs/notes/` — personal brainstorming/learning notes (agent-loop.md, memory.md, auth.md). Background reading, never specs; excluded from review scope.
 - The original design docs (SDD.md, SDD-v2.md) were removed as stale; the implemented code is the design's source of truth. They remain readable at commit `a84df1b` (`git show a84df1b:SDD.md`, `git show a84df1b:SDD-v2.md`) — e.g., for future blog posts.

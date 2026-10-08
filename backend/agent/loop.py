@@ -48,7 +48,6 @@ from agent.prompts import (
     FALLBACK_GREETING_LINES,
     FALLBACK_LINES,
     FILLER_LINES,
-    GREETING_TRIGGER,
     WRAP_UP_INSTRUCTION,
 )
 from agent.providers import (
@@ -128,6 +127,7 @@ class AgentLoopProcessor(FrameProcessor):
         traces,
         emit,
         write_registry: set,
+        greeting_trigger: str,  # required: dropping it must not pass a green suite
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -144,6 +144,7 @@ class AgentLoopProcessor(FrameProcessor):
         # FR-46: session-level in-flight-write set, owned by companion so
         # teardown and the SIGTERM drain can await it; the loop only adds.
         self._write_registry = write_registry
+        self._greeting_trigger = greeting_trigger
         self._log = logger.bind(session_id=session_id, component="agent.loop")
 
         self._turn_task: asyncio.Task | None = None
@@ -186,9 +187,13 @@ class AgentLoopProcessor(FrameProcessor):
             # FR-44: a final that straggled in after the turn was consumed
             # and before new user speech — the consumed turn's leftover,
             # never a second fragment-only turn. Dropped and logged.
+            # WARNING, not INFO (round-5 review): this branch deliberately
+            # discards user speech — if the speech-start discriminator ever
+            # stopped firing, every turn after the greeting would land here
+            # and the agent would go mute; that must be loud in prod logs.
             self._log.bind(
                 event="turn.straggler_dropped", chars=len(user_text)
-            ).info("late final after consumed turn dropped")
+            ).warning("late final after consumed turn dropped")
             return
         if user_text is None:
             if self._greeted:
@@ -316,7 +321,9 @@ class AgentLoopProcessor(FrameProcessor):
             # Ephemeral trigger, this call only (never appended): the built
             # context is system-prompt-only here, and Gemini rejects a call
             # with an empty contents list.
-            messages = messages + [{"role": "user", "content": GREETING_TRIGGER}]
+            messages = messages + [
+                {"role": "user", "content": self._greeting_trigger}
+            ]
         state.purpose = purpose
         state.messages = messages
         state.step_text = ""
@@ -358,7 +365,10 @@ class AgentLoopProcessor(FrameProcessor):
                         self._audio_pending = True
                         await self.push_frame(LLMTextFrame(event.text))
                     elif isinstance(event, LLMToolCall):
-                        if not state.calls:
+                        # no filler when selection is forbidden (review):
+                        # these calls get refused, never executed — a
+                        # mistranslated greeting must not open "One moment."
+                        if not state.calls and tool_choice != "none":
                             await self._maybe_filler(state, elapsed_ms)
                         state.calls.append(event)
                     elif isinstance(event, LLMDone):
@@ -401,29 +411,43 @@ class AgentLoopProcessor(FrameProcessor):
             f"{[(c.name, c.arguments) for c in state.calls]}",
         )
 
-        if not state.step_text and not state.calls:
+        if not state.step_text.strip() and not state.calls:
             # FR-42: an empty step is a failure, not an ending — blocked or
-            # truncated generations return, they don't raise.
+            # truncated generations return, they don't raise. .strip():
+            # a whitespace-only generation is the same silent turn, and an
+            # effectively-empty assistant message 400s the Claude swap
+            # (round-5 review).
             log.bind(event="agent.empty_step", finish_reason=finish).warning(
                 "model returned neither text nor tool calls"
             )
             await self._speak_fallback(state, reason=finish or "empty")
             return True
 
-        if state.calls and wrap_up:
+        if state.calls and tool_choice == "none":
             # tool_choice "none" is a REQUEST — FR-48 names a silent
-            # mistranslation here as what would unguard the loop. The
-            # forced final call NEVER executes tools: speak whatever text
-            # came, or the fallback — never silence (FR-42 test a), never
-            # a tool round past the cap.
-            log.bind(event="agent.wrap_up_tools_refused", calls=len(state.calls)).warning(
-                "forced final call returned tool calls despite tool_choice none"
+            # mistranslation here as what would unguard the loop. BOTH
+            # calls that forbid selection refuse to execute: the wrap-up
+            # (never a round past the cap) AND the greeting (round-5
+            # review: FR-7's guard — a session must not open by running
+            # list_artifacts and speaking last week's titles). Speak
+            # whatever text came, or the fallback — never silence.
+            log.bind(
+                event="agent.forbidden_tools_refused",
+                calls=len(state.calls),
+                purpose=purpose,
+            ).warning(
+                "call returned tool calls despite tool_choice none"
             )
-            if state.step_text:
-                self._context.append_assistant(state.step_filler + state.step_text)
+            # .strip(), matching the empty-step check above (review): a
+            # whitespace-only generation alongside the forbidden call must
+            # take the fallback, not open mute with an empty append
+            if state.step_text.strip():
+                self._context.append_assistant(
+                    (state.step_filler + state.step_text).strip()
+                )
                 state.step_filler = ""
             else:
-                await self._speak_fallback(state, reason="wrap_up_tool_calls")
+                await self._speak_fallback(state, reason="forbidden_tool_calls")
             return True
 
         if state.calls:

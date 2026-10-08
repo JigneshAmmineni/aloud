@@ -29,13 +29,18 @@ from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
 
 from agent.context import ContextProvider
 from agent.loop import AgentLoopObserver, AgentLoopProcessor
-from agent.prompts import build_document_context_block, build_system_prompt
+from agent.prompts import (
+    build_document_context_block,
+    build_greeting_trigger,
+    build_system_prompt,
+)
 from agent.providers import make_loop_llm, make_stt, make_tts
 from agent.sanitizer import make_text_filters
 from agent.tools import build_registry
 from app.config import Settings
 from db.sessions_repo import create_session_row, end_session_row
 from db.transcript_log import TranscriptWriter
+from db.users_repo import get_preferred_name
 from obs.latency import make_latency_observer
 from obs.trace import TraceRecorder
 from obs.usage import UsageMetricsObserver, UsageRecorder
@@ -123,6 +128,21 @@ async def _await_all_sessions_writes(deadline: float) -> None:
             logger.bind(component="agent.companion", session_id=session_id),
             deadline - time.monotonic(),
         )
+
+
+async def _greeting_trigger_for(user_id: str, log) -> str:
+    """3.1: "Hey {name}" — the FR-24 preferred name rides the greeting
+    trigger. BOUNDED and logged (review): a slow or failing lookup
+    degrades to the nameless greeting instead of delaying the session or
+    silently disabling the feature forever."""
+    try:
+        name = await asyncio.wait_for(get_preferred_name(user_id), timeout=1.0)
+    except Exception as e:
+        log.bind(event="greeting.name_lookup_failed").warning(
+            f"preferred-name lookup failed: {type(e).__name__}"
+        )
+        name = None
+    return build_greeting_trigger(name)
 
 
 def build_pipeline_parts(settings: Settings, documents=None, *, session_id=""):
@@ -227,6 +247,7 @@ class CompanionAgent:
             traces=traces,
             emit=emit,
             write_registry=write_tasks,
+            greeting_trigger=await _greeting_trigger_for(self._user_id, log),
         )
 
         pipeline = Pipeline(

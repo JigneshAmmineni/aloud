@@ -2,9 +2,9 @@
 
 ## 1. Product Purpose
 
-Aloud is a voice-first thinking partner for people who process ideas best by talking out loud. You speak; it listens, asks sharp questions, and helps you think more clearly — while you're walking, commuting, or anywhere else you don't have your hands free.
+Aloud is a voice-first work assistant for people who think and work by talking out loud. You speak; it listens, handles the tiny details, and gives your words structure — while you're walking, commuting, or anywhere else you don't have your hands free. Writing becomes talking your ideas through and reviewing the coherent write-up it produces; reading becomes listening to an assistant that has read what you need and can summarize, recite, or answer questions. It asks sharp questions and pressure-tests your plans when you invite it to.
 
-It is not a search engine, a task manager, or a note-taking app. It is a conversational agent that makes your thinking better in real time.
+It is not a search engine, a task manager, or a note-taking app. It is a conversational assistant that structures your thinking and creativity in real time.
 
 ---
 
@@ -111,8 +111,16 @@ Caddy `basic_auth` gate, which is removed at rollout.
   token's `name` claim — set as the Firebase profile `displayName` by the
   signup form (FR-30; the client refreshes its token after signup so the
   claim appears) or by Google's own profile. The name is never read from a
-  request body — same provenance rule as `user_id`. (Feeding the name into
-  the agent's system prompt is deferred — see §6.)
+  request body — same provenance rule as `user_id`.
+  **Name personalization (shipped with 3.1, deliberately narrow):** the
+  stored preferred name rides the greeting call's EPHEMERAL trigger line
+  only — one call, never appended to the context and never part of the
+  system prompt — so the agent can open with "Hey {name}". The agent
+  does not otherwise know the name mid-session (a canned-fallback
+  greeting skips it entirely); persisting it for the whole session would
+  be a one-line move into `build_system_prompt()` if ever wanted. A
+  lookup failure degrades to the nameless greeting, bounded and logged —
+  never a session cost.
 - **FR-25** Email/password signup sends Firebase's verification link, but
   access is **not** gated on it: unverified accounts are fully functional
   (smooth-UX decision for the demo). Accepted demo-scale consequences:
@@ -1194,7 +1202,6 @@ The following are explicitly not part of this product:
 - **Brainstorm/critique mode inference** (formerly FR-10; demo stretch goal). Distinct generative vs. analytical behavior, inferred from context or set explicitly.
 - **Session resume** (formerly FR-19 / NFR-4). A dropped connection ends the session; the user starts a new one.
 - **Encryption at rest** (deferred from NFR-6). The schema keeps sensitive content in dedicated columns so encryption can be added post-MVP without rework; the encryption itself is not in the MVP.
-- **Name personalization** (deferred from FR-24). The user's stored preferred name is injected into the agent's system prompt at session start so the agent addresses them by name. Small change once auth lands: `/start` already resolves the user, and the system prompt is already built per session.
 - **Second-model delegation** (noted in §4.10). Cheap/fast models for background jobs — summarization, memory extraction, long artifact drafting — where latency doesn't matter and cost does. Arrives with the features that create those jobs (context engine, memory); the speaking call stays on the main model either way.
 
 ---

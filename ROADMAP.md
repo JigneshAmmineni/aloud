@@ -10,13 +10,19 @@ here are aspirational notes and carry no weight in specs or reviews.
 
 ## Vision
 
-Aloud is a voice-first thinking partner for people who process ideas best by
-talking out loud. The finished product: you open it on any device, talk through
-whatever you're working on, and the agent — which remembers your past sessions,
-your documents, and your open threads — asks sharp questions, pressure-tests
-your plans, and turns the mess into organized artifacts you can watch it write.
-Multi-user, private by design: every user's conversations, memories, and
-documents are theirs alone.
+Aloud is a voice-first work assistant for people who think and work by
+talking out loud. The finished product: you open it on any device and your
+work becomes a conversation with an assistant that does the tiny details.
+Reading becomes an audiobook — or listening to an expert who has read what
+you need to read and can summarize, recite, or answer questions about it.
+Writing becomes talking your ideas through, letting your train of thought
+run, and bouncing them off an assistant that puts them down coherently —
+you review the write-up, go over specific lines or phrasing as needed, as
+hands-on or as imprecise as you want. The agent — which remembers your
+past sessions, your documents, and your open threads — structures your
+creativity, and asks sharp questions or pressure-tests your plans when you
+invite it to. Multi-user, private by design: every user's conversations,
+memories, and documents are theirs alone.
 
 ## Feature order
 
@@ -116,7 +122,12 @@ it.**
   documents block, fallback/filler/greeting lines, wrap-up instruction)
   and `agent/tools.py` (tool descriptions — the model reads these too).
   All of them get vetted in this pass, with A/B listening tests against
-  real brain-dump sessions as the acceptance bar.
+  real brain-dump sessions as the acceptance bar — the test plan, scripted
+  scenarios, and results live in
+  [docs/evals/2026-09-16-system-prompt-ab.md](docs/evals/2026-09-16-system-prompt-ab.md).
+  STATUS (2026-10-08): one listening iteration ran; its fixes shipped as
+  prompt v2 with the 3.1/3.2 PR, and the comparative A/B is PAUSED — UX
+  fine-tuning, not a blocker; resume from the eval doc.
 
 ### 3.2 Product repositioning — from "thinking partner" to work assistant
 
@@ -153,8 +164,11 @@ The rules:
   - `ROADMAP.md:13` — the Vision section (rewrite around the brief above)
   - `frontend/app/layout.tsx:21` — the user-facing meta description
   - `.github/workflows/claude-code-review.yml:38` — the reviewer's
-    product context
-  - `memory.md:346` — passing mention in a scaling note
+    product context. Applied DIRECTLY ON MAIN after the 3.1/3.2 PR
+    merges, not in it: the review action refuses to run on a PR that
+    edits its own workflow (tamper guard), so carrying this line in the
+    PR silently skips its entire review.
+  - `docs/notes/memory.md` — passing mention in a scaling note
 - C-3 still binds everywhere: never therapy/therapist/counselor.
 
 ### 4. Documents & artifacts rework
@@ -186,7 +200,7 @@ agent loop (feature 3), which already owns context assembly per turn.
   and the current conversation.
 - Auto-compression of the conversation section under memory pressure
   (recursive summarization: oldest turns compressed into summaries, raw turns
-  evicted) — per memory.md's MemGPT-style sketch.
+  evicted) — per docs/notes/memory.md's MemGPT-style sketch.
 - Full programmatic control of context assembly each turn, with per-section
   token accounting and instrumentation.
 
@@ -218,6 +232,57 @@ counts, latency, purpose (voice turn / memory loop / compression), linked to
   encryption rule.
 - A minimal version may be pulled forward if debugging features 3–6 demands
   it.
+
+### 8. Noisy-environment robustness — turn detection under real-world audio
+
+Found live during 3.1 testing (2026-09-17): continuous background noise (a
+treadmill) kept Flux convinced the turn was still open — end-of-turn never
+fired, the agent never responded. Real-world usage means gyms, streets,
+cafés; the harder variant is background *speech* between other people, not
+addressed to the agent. Pinned for later; the layered plan from the
+brainstorm, cheapest first:
+
+1. **Diagnose the signature** per incident: turn open with ZERO transcribed
+   words (pure detection stall) vs. garbage words (context pollution too) —
+   `transcript_events` + logs already hold the evidence.
+2. **Client mic constraints**: explicit `noiseSuppression`/
+   `echoCancellation`, and experiment with `autoGainControl: false` — AGC
+   amplifying the noise floor while the user is quiet is a prime suspect
+   for keeping the turn open. (Today the client passes bare
+   `enableMic: true`.)
+3. **Flux knobs**: `min_confidence` (keep garbage words out of the
+   context), `eot_timeout_ms` tuning — bounds borderline turns but cannot
+   end a turn Flux still classifies as speech.
+4. **Our own turn watchdog** (likely the durable fix, provider-agnostic):
+   a turn open N seconds with zero (or no NEW) transcribed words is
+   declared noise — reset it, or force the end-of-turn with what exists;
+   plus a hard max-turn-duration ceiling against any pathological stall.
+5. **Parallel Silero VAD cross-check**: Silero is speech-specific
+   (treadmill = non-speech); "Flux says speaking, Silero says silence for
+   X s" overrides. CPU cost on the e2-small is the constraint.
+6. **Voice isolation** — the only real answer to background *speech*:
+   Krisp-class primary-speaker isolation (client SDK offloads CPU) or,
+   later, speaker enrollment/diarization.
+7. **Product escape hatches**: push-to-talk / hold-to-talk mode for noisy
+   environments; a visible "still listening…" state so a stalled turn is
+   legible instead of feeling dead.
+
+### 9. Prompt injection & PII protection layer
+
+Placeholder by decision (2026-10-08): this layer needs to exist; its
+exact requirements and implementation will be researched and specced
+when picked up. The named concerns it must cover:
+
+- **Prompt injection**: untrusted text reaching the model's context —
+  uploaded documents, artifact content read back by tools, and any
+  future retrieved memory — carrying adversarial instructions. Today's
+  only mitigations are behavioral (the loop refuses tool calls on
+  forbidden-selection calls; tool results are structured JSON).
+- **PII protection**: what leaves the system and what is retained —
+  provider egress (Deepgram/Google/Cartesia already disclosed per
+  NFR-5), logs and traces (NFR-9 and the 🔒-column discipline exist;
+  this layer decides detection/redaction on top), and any future
+  third-party surface.
 
 ## Process infrastructure
 
@@ -255,6 +320,7 @@ features land:
 
 ## Working notes
 
-[auth.md](auth.md) and [memory.md](memory.md) are brainstorming/learning notes,
-not specs — useful background when speccing features 1 and 4, but REQUIREMENTS.md
-is what implementation and review are held to.
+[docs/notes/auth.md](docs/notes/auth.md) and
+[docs/notes/memory.md](docs/notes/memory.md) are brainstorming/learning
+notes, not specs — useful background when speccing features 1 and 4, but
+REQUIREMENTS.md is what implementation and review are held to.

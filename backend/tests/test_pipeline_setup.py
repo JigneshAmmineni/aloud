@@ -149,3 +149,52 @@ def test_drain_awaits_inflight_writes_before_cancelling():
         companion._live_tasks.pop("drain-w", None)
         companion._inflight_writes.pop("drain-w", None)
         companion._draining = False
+
+
+def test_greeting_trigger_wiring_and_failure_fallback(monkeypatch):
+    """PR #19 review: the lookup → trigger seam, including the bounded
+    failure path — a broken lookup degrades to the nameless greeting."""
+    import asyncio
+
+    import agent.companion as companion
+    from agent.prompts import GREETING_TRIGGER
+
+    async def found(user_id):
+        assert user_id == "uid-x"
+        return "Jignesh"
+
+    monkeypatch.setattr(companion, "get_preferred_name", found)
+    from loguru import logger
+
+    trigger = asyncio.run(companion._greeting_trigger_for("uid-x", logger))
+    assert "Jignesh" in trigger
+
+    async def broken(user_id):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(companion, "get_preferred_name", broken)
+    trigger = asyncio.run(companion._greeting_trigger_for("uid-x", logger))
+    assert trigger == GREETING_TRIGGER  # nameless fallback, no raise
+
+
+def test_greeting_name_lookup_is_time_bounded(monkeypatch):
+    """Round-2 review: the 1s bound itself — a hung pool degrades to the
+    nameless greeting instead of delaying the session."""
+    import asyncio
+    import time
+
+    from loguru import logger
+
+    import agent.companion as companion
+    from agent.prompts import GREETING_TRIGGER
+
+    async def hung(user_id):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(companion, "get_preferred_name", hung)
+    t0 = time.monotonic()
+    trigger = asyncio.run(companion._greeting_trigger_for("uid-x", logger))
+    assert trigger == GREETING_TRIGGER
+    assert time.monotonic() - t0 < 5  # the wait_for bound, not the hang
+
+    asyncio.run(asyncio.sleep(0))  # nothing pending leaks
