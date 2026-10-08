@@ -252,4 +252,15 @@ turn-detection timing, out of scope by decision.
 
 ### Iteration 2 — listening results
 
-*(to be appended after the rerun)*
+*(not run)*
+
+### Status: PAUSED (2026-10-08) — v2 ships provisionally
+
+Decision by the product owner: the prompt-tuning cycle is paused and
+prompt v2 ships with the 3.1/3.2 PR on iteration 1's evidence — every v2
+change targets a failure observed live (and arm A's prompt demonstrably
+has the same failures, worse). This is UX fine-tuning, not a system
+blocker; the comparative A/B (iteration 2 on v2, then arm A runs, then
+the filled judging sheet) resumes from this document when picked back up.
+The scenario scripts above stay valid, including the deliberately
+unchanged "poke holes" wording that exercises the STT-garble path.

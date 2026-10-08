@@ -125,6 +125,9 @@ it.**
   real brain-dump sessions as the acceptance bar — the test plan, scripted
   scenarios, and results live in
   [docs/evals/2026-09-16-system-prompt-ab.md](docs/evals/2026-09-16-system-prompt-ab.md).
+  STATUS (2026-10-08): one listening iteration ran; its fixes shipped as
+  prompt v2 with the 3.1/3.2 PR, and the comparative A/B is PAUSED — UX
+  fine-tuning, not a blocker; resume from the eval doc.
 
 ### 3.2 Product repositioning — from "thinking partner" to work assistant
 
