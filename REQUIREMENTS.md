@@ -1161,7 +1161,7 @@ on session end: ONE WRITE_GRACE_S budget, spent once — End-tap/disconnect:
 | `MAX_STEPS` per turn | 5 | `agent/loop.py` |
 | `TOOL_TIMEOUT_S` per tool | 10 | `agent/loop.py` |
 | `LIST_ARTIFACTS_CAP` (renamed `LIST_DOCUMENTS_CAP` by §4.11) | 20 | `db/` artifacts repo (FR-45 assigns caps to the repo layer) |
-| `READ_ARTIFACT_MAX_CHARS` (renamed `READ_DOCUMENT_MAX_CHARS` by §4.11) | 8,000 | `agent/tools.py` (result truncation — a tool concern, not a query one) |
+| `READ_ARTIFACT_MAX_CHARS` (renamed `READ_DOCUMENT_MAX_CHARS` by §4.11) | 8,000 | `db/` documents repo (§4.11's paged read slices in the query, so the knob moved with it) |
 | `FALLBACK_LINES` (spoken failure/empty-step lines) | small named set | `agent/prompts.py` |
 | `FILLER_LINES` (speak-first backstop; generic, topic-agnostic by design) | small named set | `agent/prompts.py` |
 | `FILLER_DEADLINE_MS` (speak-by deadline, any silent tool round — state-based per FR-43) | 700 | `agent/loop.py` |
@@ -1286,7 +1286,11 @@ asking to delete by voice.
   (`artifact_created` / `artifact_edited`, FR-32) so §4.9's stage.unit
   aggregation, FR-38's event-sourced counts, and recorded history all
   hold with no data migration — the stage label is a historical wire
-  name; the product noun is "document". Uploads emit **no** usage event
+  name; the product noun is "document". The edited event's `detail`
+  keeps FR-44's rule — the document's `kind` — for agent documents; an
+  uploaded document has no `kind`, so its edits write `detail` = the
+  document's `format`: a defined value, not the NULL that FR-50's
+  mandated test names as a bug symptom. Uploads emit **no** usage event
   (nothing was spent; the existing `document.uploaded` structured log —
   char count, never filename — remains the operational record).
   Migration: implementation ships a **run-once pre-serve migration**
@@ -1343,10 +1347,16 @@ asking to delete by voice.
   identity, retired right after boot exactly as today; `documents`
   joins **both `_RLS_TABLES` and the application role's explicit
   GRANT list (SELECT/INSERT/UPDATE/DELETE — FR-52 needs the
-  DELETE)**; and the marker and watermark are written **only after the copy is
-  verified — copied count equals the count of source rows above the
-  previous watermark — in the same transaction**, so a
-  short-circuited copy can never mark itself done.
+  DELETE)**; and the identity is **asserted as a precondition, not inferred from
+  results** — the migration obtains its session exclusively through
+  `bootstrap_session()`, whose own guard raises when the privileged
+  engine is unavailable, and no count comparison stands in for that
+  check: a copied-equals-source count read under one snapshot and one
+  identity is a tautology on the privileged role and passes as 0 == 0
+  on the RLS-bound one — precisely the silent-identity failure it
+  would claim to catch. The marker and watermark are written in the
+  same transaction as the copy, so a partial copy can never mark
+  itself done.
   Insert-where-absent re-run on every boot was considered and
   rejected — it would **resurrect deleted documents**: FR-52's delete
   removes the `documents` row while the retained `artifacts` row
@@ -1487,7 +1497,11 @@ asking to delete by voice.
 - **FR-52** Workspace HTTP surface, owner-scoped via
   `get_current_user_id` (never an admin path): `GET /documents` — the
   user's documents, both sources, newest-activity-first
-  (`COALESCE(updated_at, created_at)` DESC), capped
+  (`COALESCE(updated_at, created_at)` DESC **with `id` DESC as the
+  tiebreaker** — activity ties are the norm, not the edge: rows
+  seeded in one transaction share `now()`, and untied ordering makes
+  `offset` paging repeat and skip rows; every activity ordering in
+  this section carries the same tiebreaker), capped
   (`WORKSPACE_LIST_CAP`, default 200 — tracking
   `MAX_DOCUMENTS_PER_USER`, so the workspace list is complete below
   quota; a pager is the revisit if the quota ever rises), returning
@@ -1536,7 +1550,11 @@ asking to delete by voice.
   registry alongside the live-task map, keyed by session id and
   carrying the owner's user id**, and the delete route notifies every
   live session belonging to that user — a no-op when none is live,
-  and safe after teardown exactly like the emit callback. Mandated
+  and safe after teardown exactly like the emit callback. **The
+  registry entry is removed in the same `finally` that pops the
+  live-task map** — a provider left registered pins the session's
+  full 🔒 conversation in process memory for the container's life,
+  the leak that `finally` exists to prevent. Mandated
   test, symmetric with the edit one: delete an
   attached document → the next built context carries no section for
   it.
@@ -1544,7 +1562,10 @@ asking to delete by voice.
   endpoint, nothing new to secure — saved under the document's title
   as `.md` (`markdown`) or `.txt` (`text` **and** `pdf`: the stored
   content is extracted text, and a `.pdf` extension on it would be a
-  broken file). The filename derives from an untrusted 🔒 title and
+  broken file). A title that already ends with the target extension
+  (case-insensitive) gets nothing appended — upload titles keep their
+  filename, so `plan.md` downloads as `plan.md`, not `plan.md.md`.
+  The filename derives from an untrusted 🔒 title and
   is sanitized like any rendered content: path separators and
   control characters stripped, length-capped, empty result →
   `document-{id}`. Routing must be explicit in both environments: the
@@ -1628,10 +1649,17 @@ asking to delete by voice.
     carries `page` and `total_pages`,
     and the truncation marker appears only when further pages exist.
     No `page` argument = page 1; alternatively a **`line` argument**
-    returns the page CONTAINING that line — the pager is the single
-    owner of page boundaries, which is what lets `search_documents`
-    report plain line numbers without duplicating the pagination fold
-    (its bullet, below). Line numbers are what make `insert`
+    returns the **first page carrying that line** — the pager is the
+    single owner of page boundaries, which is what lets
+    `search_documents` report plain line numbers without duplicating
+    the pagination fold (its bullet, below). "First page" is the
+    defined semantics because a hard-cut line SPANS pages: for a
+    match deep inside one enormous line (a PDF extraction with no
+    newlines is the real case), the first page shows the line's start
+    and its continuation marker, and the model pages forward —
+    within-line offset addressing is deliberately not built, and the
+    snippet already hands the model the verbatim text it needs for
+    `str_replace` without page-accurate addressing. Line numbers are what make `insert`
     addressable and multi-match steering precise (below). Page and
     line drift under the agent's own concurrent edits carries
     `list_documents`' acceptance: a shifted read steers fine; v1
@@ -1747,7 +1775,12 @@ asking to delete by voice.
     the actual count equals the model's stated expectation, and the
     mismatch steering names the actual count and lines (the
     multi-match steering is where the model typically learned the
-    number). All N then replace in the same single statement — an
+    number); the line enumeration obeys the same **non-regex primitive
+    discipline** as `search_documents`' derived values
+    (`string_to_array`/`strpos`-family over the stored content) —
+    `old_str` is model-controlled text, and a regex-based line lookup
+    on `old_str: "plan (v2)"` either raises mid-turn or quotes the
+    wrong lines. All N then replace in the same single statement — an
     explicit flag with a verified count, never an implicit fallback. Enforcement is **atomic and
     DB-side like
     `append`**: one UPDATE whose predicate verifies the single
@@ -1862,7 +1895,22 @@ asking to delete by voice.
     session's attach set, the loop hands the post-edit content — 
     already in hand via `RETURNING` — to the context provider, which
     re-renders that document's section at the next `build()`: no
-    hot-path DB read, no stale copy. Mandated test: edit an attached
+    hot-path DB read, no stale copy. **Every re-render re-applies
+    `MAX_TOTAL_CHARS`** — the block is mutable now, and the cap's two
+    existing enforcement points (the client's attach-time refusal and
+    the one-time truncation at pipeline construction) both run before
+    any edit exists, so without re-application two appends to an
+    attached document in a near-cap set would ship an over-budget
+    system message on every remaining step; the re-applied truncation
+    uses the same rule and marker as construction, and the named
+    consequence is accepted: an attached document's section can
+    truncate after its own edit. Mandated test: an edit that pushes an
+    attached set past `MAX_TOTAL_CHARS` → the next built block is at
+    or under the cap, marker present. The provider's mutation
+    operations also maintain its running char estimate (the
+    `approx_tokens` figure FR-51's `context.built` log reports) and
+    drop the block's preamble when the last section is removed — an
+    empty block renders as no block, not a header over nothing. Mandated test: edit an attached
     document → the next built context's block carries the post-edit
     text.
   - Announces: `document.created` / `document.updated` replace
@@ -1900,8 +1948,8 @@ asking to delete by voice.
   document; (v) `insert`: at 0, mid-document, and end; out-of-range
   steers with the bounds; concurrent with an `append`, neither edit is
   lost; (vi) `search_documents`: a match deep in a large document
-  returns a line that `read_document`'s `line` argument resolves to a
-  page containing it; a
+  returns a line that `read_document`'s `line` argument resolves to
+  the first page carrying that line; a
   title-only match carries `match: "title"` with null line and
   snippet; **on a mixed-case document, `exact_matches` — not
   `total_matches` — feeds a succeeding `replace_all`**, and the
@@ -1929,7 +1977,12 @@ asking to delete by voice.
   origin holding the Firebase session; the renderer itself is chosen
   in the implementation PR, so the constraint has to live here. The
   mandated sanitization test includes a `[x](javascript:…)` link
-  rendering inert. The upload button lives with the Uploaded
+  rendering inert — **and the lane it runs in is specced, because
+  today none exists**: the frontend gains a minimal test step (vitest,
+  or an equivalent the implementation PR may substitute) wired into
+  CI's existing frontend job, scoped to the renderer-config cases this
+  FR and FR-55 mandate; a security control whose test has no harness
+  is an assumption with extra words. The upload button lives with the Uploaded
   list and stays idle-gated; each item marks its attach state and,
   while idle, exposes FR-51's attach toggle (both lists — an
   agent-written summary is attachable context too), with the visible
@@ -2008,7 +2061,8 @@ This block remains as the index of what changed.
 |---|---|---|
 | `WORKSPACE_LIST_CAP` (`GET /documents`; tracks the quota) | 200 | `db/` documents repo (FR-45's rule: caps live in the repo layer) |
 | `LIST_DOCUMENTS_CAP` (tool; renamed from `LIST_ARTIFACTS_CAP`) | 20 | `db/` documents repo |
-| `READ_DOCUMENT_MAX_CHARS` (renamed from `READ_ARTIFACT_MAX_CHARS`; also the `read_document` page size) | 8,000 | `agent/tools.py` |
+| `READ_DOCUMENT_MAX_CHARS` (renamed from `READ_ARTIFACT_MAX_CHARS`; also the `read_document` page size) | 8,000 | `db/` documents repo (the paged read slices in the query, so the knob lives with it) |
+| `PAGE_MAX_LINES` (`read_document` per-page line cap) | 200 | `db/` documents repo |
 | `ANNOUNCE_CONTENT_MAX_CHARS` (announce payload cap; above it `content_omitted: true` + client refetch) | 16,000 | `agent/tools.py` |
 | `SEARCH_RESULTS_CAP` (`search_documents` max results) | 10 | `db/` documents repo |
 | `SEARCH_SCAN_CAP` (workspace-wide search scans this many newest documents) | 50 | `db/` documents repo |
