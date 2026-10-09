@@ -77,7 +77,7 @@ User explicitly asks for the agent's opinion, alternatives, or next steps. The a
 *FR-19 (resume after connection drop) — moved to §6 Out of Scope. A dropped connection simply ends the session.*
 
 ### 4.7 Documents
-- **FR-21** Before a session, the user may attach one or more documents (plain text, Markdown, or PDF). The agent reads the attached documents and can reference and discuss them during the session. Uploaded documents persist to the user's document workspace (§4.11, FR-51); the attach-and-inject flow itself is unchanged. Mid-conversation upload remains deferred, in two stages (ROADMAP, decided 2026-10-08): on-request reads are feature 4's first follow-up — not context-engine-dependent — and proactive pickup arrives with feature 5.
+- **FR-21** Before a session, the user may attach one or more documents (plain text, Markdown, or PDF). The agent reads the attached documents and can reference and discuss them during the session. Once §4.11 lands, uploaded documents persist to the user's document workspace (FR-51); until then they are held in memory for that session only, and the attach-and-inject flow itself is unchanged either way. Mid-conversation upload remains deferred, in two stages (ROADMAP, decided 2026-10-08): on-request reads are feature 4's first follow-up — not context-engine-dependent — and proactive pickup arrives with feature 5.
 
 ### 4.8 Authentication & Accounts
 
@@ -790,8 +790,9 @@ FR-7 still governs: the agent acts when the user asks.
     a write outlive its turn. Stated consequence, accepted for v1: an
     artifact grown past the read cap becomes effectively append-only —
     the escape is feature 4's real document editing (patch formats,
-    pagination), not a cleverer cap rule here. (Landed: §4.11/FR-53's
-    `str_replace` and paginated reads — this consequence is retired.) Deliberately the second **write** tool: it exercises the FR-46
+    pagination), not a cleverer cap rule here. (§4.11/FR-53's
+    `str_replace` and paginated reads retire this consequence when
+    they land.) Deliberately the second **write** tool: it exercises the FR-46
     in-flight-write machinery beyond creation, completes the read → edit
     chain ("fix the third bullet in yesterday's summary" cannot be
     answered by context alone — it requires reading and editing the real
@@ -1164,7 +1165,7 @@ on session end: ONE WRITE_GRACE_S budget, spent once — End-tap/disconnect:
 | `MAX_STEPS` per turn | 5 | `agent/loop.py` |
 | `TOOL_TIMEOUT_S` per tool | 10 | `agent/loop.py` |
 | `LIST_ARTIFACTS_CAP` (renamed `LIST_DOCUMENTS_CAP` by §4.11) | 20 | `db/` artifacts repo (FR-45 assigns caps to the repo layer) |
-| `READ_ARTIFACT_MAX_CHARS` (renamed `READ_DOCUMENT_MAX_CHARS` by §4.11) | 8,000 | `db/` documents repo (§4.11's pager: the repo fetches the one row and folds pages in-process, so the knob moved with it) |
+| `READ_ARTIFACT_MAX_CHARS` (renamed `READ_DOCUMENT_MAX_CHARS` by §4.11; also the `edit_artifact` replace-refusal threshold, passed into the repo as `max_replaceable_chars`) | 8,000 | `agent/tools.py` (moves to `db/` documents repo with §4.11's pager; FR-45's tool-owns-the-value division is amended there) |
 | `FALLBACK_LINES` (spoken failure/empty-step lines) | small named set | `agent/prompts.py` |
 | `FILLER_LINES` (speak-first backstop; generic, topic-agnostic by design) | small named set | `agent/prompts.py` |
 | `FILLER_DEADLINE_MS` (speak-by deadline, any silent tool round — state-based per FR-43) | 700 | `agent/loop.py` |
@@ -1287,8 +1288,13 @@ asking to delete by voice.
   RECREATE the dropped table, empty); removes `artifacts` from
   `_RLS_TABLES`, from the bootstrap GRANT list, and from every other
   `_bootstrap_rls` statement that names it (policy/index/ALTER
-  statements against a missing table abort boot pre-serve); and
-  reverts FR-38 test (d)'s dual-table assertion to `documents` only.
+  statements against a missing table abort boot pre-serve);
+  reverts FR-38 test (d)'s dual-table assertion to `documents` only;
+  and amends `tests/test_db.py`'s two exact-equality guards —
+  `artifacts` and its `title`/`content` entries leave
+  `EXPECTED_SCHEMA` and `SENSITIVE_COLUMNS` — since a release whose
+  whole point is irreversibility must not ship red CI on the guards
+  its own checklist forgot.
   A DB-only drop would 500 every delete
   of a migrated document while leaving its `documents` row intact.
   Until the drop, FR-38 test (d) asserts zero admin-context rows from
@@ -1408,7 +1414,16 @@ asking to delete by voice.
   document **still stays deleted** across that same re-run; the NFR-8 negative on
   `documents` (user A cannot read user B's rows); FR-38 test (d)
   extended — the admin context reads zero rows from `documents`
-  **and** from the retained `artifacts` table.
+  **and** from the retained `artifacts` table; and
+  `tests/test_db.py`'s two exact-equality guards amended
+  deliberately, not pasted green — `documents` joins
+  `EXPECTED_SCHEMA` with its full column set,
+  `documents.title`/`documents.content` join `SENSITIVE_COLUMNS`,
+  and `schema_migrations` joins `EXPECTED_SCHEMA` with **no**
+  sensitive columns (those two tests are the only mechanical
+  enforcement of design principle 3 / NFR-6, and this feature turns
+  both red — the fastest green is a paste, which is exactly the
+  edit this clause forbids).
 - **FR-51** Uploads persist; the attach flow is behavior-identical.
   `POST /documents` keeps its contract (multipart, one file per
   request, extension-first type detection, extraction rules and error
@@ -1505,8 +1520,12 @@ asking to delete by voice.
   `length(content)`, no content), walks them in attach order
   against the remaining `MAX_TOTAL_CHARS` budget, and fetches
   content only for the documents that fit — the boundary document
-  sliced SQL-side (`left()`) to the remaining budget — so the fetch
-  is bounded by the budget rather than truncated to it;
+  sliced SQL-side with `substr(content, 1, :budget)`, deliberately
+  not Postgres' `left()`: this is the one query on the
+  session-establishment path, the existing attach tests run in the
+  SQLite suite, and `substr` renders identically on both dialects,
+  so the mandated test below stays in the ordinary suite — so the
+  fetch is bounded by the budget rather than truncated to it;
   `build_document_context_block`'s existing 400k cut stays as the
   backstop it was always called, no longer the only bound. Mandated
   test: an attach set whose stored content exceeds
@@ -1517,7 +1536,18 @@ asking to delete by voice.
   UUID strings to integer row ids with this FR, and a tab left open
   across the deploy sends the old shape — a non-integer id is
   silently skipped exactly like an unknown one, never handed to the
-  DB to raise a type error out of session establishment. This visit's
+  DB to raise a type error out of session establishment. The same
+  coercion step **dedupes (first occurrence wins) and caps the list
+  at `MAX_DOCUMENTS_PER_USER`** — the hand-rolled-request reasoning
+  above applies to the list as much as to the budget (nothing above
+  200 distinct ids can ever resolve, and a 50,000-element array has
+  no business reaching the lengths query), and duplicates are worse
+  than slow: they double-count a document against `MAX_TOTAL_CHARS`
+  and collide in FR-52/53's id-keyed per-document sections, so
+  reconciliation would fix one copy and leave the other shipping
+  stale or destroyed 🔒 content for the rest of the session. Stated
+  behavior change: the in-memory store returned a duplicated id
+  twice; the attach set is now a set. This visit's
   uploads enter the set by default — today's behavior, preserved; any
   other workspace document, **either source**, can be toggled into the
   set while idle (FR-54): `/start` already takes ids, and the
@@ -1621,7 +1651,15 @@ asking to delete by voice.
   registry entry is removed in the same `finally` that pops the
   live-task map** — a provider left registered pins the session's
   full 🔒 conversation in process memory for the container's life,
-  the leak that `finally` exists to prevent. Mandated
+  the leak that `finally` exists to prevent. This makes an HTTP
+  handler a second writer into a provider the pipeline task owns, so
+  the safety condition is stated, not implied: **the provider's
+  mutation operations are synchronous methods — no `await` between
+  reading the section map and rewriting it or the char estimate** —
+  the same single-worker property that already makes
+  `update_tool_result` safe from a detached write task; an `async`
+  mutation with an interior `await` could interleave with the loop's
+  `build()` and ship a half-reconciled block. Mandated
   test, symmetric with the edit one: delete an
   attached document → the next built context carries no section for
   it.
@@ -1657,7 +1695,10 @@ asking to delete by voice.
   `create_document`, `list_artifacts` → `list_documents`,
   `read_artifact` → `read_document`, `edit_artifact` →
   `edit_document`; knobs follow (`LIST_DOCUMENTS_CAP`,
-  `READ_DOCUMENT_MAX_CHARS`). Every FR-45 rule not amended here
+  `READ_DOCUMENT_MAX_CHARS` — and one FR-45 division is amended
+  openly, not by bookkeeping: "the tool owns the cap's VALUE" moves
+  with the knob into the repo, where the pager that consumes it now
+  lives). Every FR-45 rule not amended here
   transfers verbatim under the new names: provenance (`user_id` never
   from model arguments; the NFR-8 negative), repo-layer caps and
   ordering, structured-JSON results, logs carrying names/ids/durations
@@ -1755,7 +1796,14 @@ asking to delete by voice.
     territory). The model's query is treated as a **literal
     substring**: `%`, `_`, and the escape character are escaped before
     entering the `ILIKE` pattern — a model-supplied wildcard must
-    never widen the scan. Derived values name their primitives too:
+    never widen the scan. And the query must be **non-empty after
+    stripping**, with its own steering result ("search needs a
+    term") — `old_str`'s rule and `create_document`'s
+    empty-content guard, applied to the third hand-validated string:
+    `query: ""` (or `"  "`, the routine mis-call) would `ILIKE '%%'`
+    every scanned document into a "match" and divide the
+    `replace`-family count primitive by `length(query)` = 0, a
+    mid-turn raise degraded to the generic could-not-search result. Derived values name their primitives too:
     counts, line numbers, and snippets are computed with **non-regex
     string primitives** (`strpos`/`replace`-family); the lowered pair
     is used ONLY to locate match positions (`total_matches` and
@@ -1795,11 +1843,26 @@ asking to delete by voice.
     differs by scope.** Workspace-wide: **one result per document** —
     id, title, a `match` discriminator (`title` | `content`), the
     first content match's line and bounded snippet (null for
-    title matches — the shape promises a location only where one
-    exists),
-    and that document's exact `match_count` — capped at
+    title-only matches — the shape promises a location only where one
+    exists; **when both halves hit, content wins**: `match:
+    "content"` with line and snippet populated, plus a
+    `title_matched` boolean, because a title precedence would return
+    the location-less shape for exactly the documents with the most
+    locations to offer),
+    and that document's `match_count` — **case-insensitive, the
+    search's own engine, and never a source for
+    `expected_occurrences`** (that transfer is reserved for the
+    single-document scope's `exact_matches` below, and the tool
+    description says so where the model reads it) — capped at
     `SEARCH_RESULTS_CAP` documents, so one 30-hit document cannot eat
-    the budget and hide the other scanned documents. `match_count` is
+    the budget and hide the other scanned documents. **That cap does
+    not truncate silently either**: the result carries the count of
+    scanned documents with at least one hit (one aggregate over the
+    predicate the scan already evaluated per row, not an extra pass),
+    and the tool description tells the model to say when it is
+    partial — a confident "it's in these ten" over a 30-document
+    answer, or a false "I don't see it anywhere" from a capped slice,
+    is unverifiable by ear. `match_count` is
     computed **only for the returned documents**, never for the whole
     scan: exact counts across all `SEARCH_SCAN_CAP` scanned documents
     would be several additional full passes over up to megabytes of
@@ -1900,7 +1963,15 @@ asking to delete by voice.
     ambiguity count, `insert`'s line bounds, the format gate's
     message): the atomicity rule binds *writes*, and a failed or
     refused UPDATE wrote nothing, so no read-modify-write window
-    exists. **Decorations are presentation, not content**: the
+    exists. A zero rowcount is ambiguous across the WHERE's four
+    conjuncts, so **the diagnostic's precedence is stated, in the
+    order the model can act on**: not-found/not-owned → format gate →
+    occurrence count → growth ceiling. The message names the
+    *nearest* obstacle, never whichever predicate the implementation
+    happened to re-check first — a `str_replace` that is both
+    ambiguous and over-ceiling steers on ambiguity (actionable now),
+    not "create a new one" for a `new_str` that may shrink the row
+    once narrowed to a single match. **Decorations are presentation, not content**: the
     line-number prefixes and `[line continues]` markers exist only in
     `read_document`'s rendering — `old_str` matches the **stored**
     content, and the tool description must say so where the model
@@ -1936,8 +2007,11 @@ asking to delete by voice.
     mint a 250k-char row that `read_document` fetches whole on every
     page and `search_documents` scans unbounded, breaking the two
     bounds this FR leans on. Every write mode's predicate gates on
-    **growth, not absolute size** — `new_length <= GREATEST(ceiling,
-    current_length)`, computable in the same statement — because rows
+    **growth, not absolute size** — `new_length <=
+    max(ceiling, current_length)`, spelled with a portable `CASE
+    WHEN` rather than Postgres' `GREATEST`, because the ceiling tests
+    below belong in the ordinary (SQLite) suite and `greatest()` does
+    not exist there — computable in the same statement — because rows
     above the ceiling exist by construction (`extract_text` persists
     200,000 chars **plus its truncation marker**, and pre-§4.11
     `create_artifact` capped nothing): an absolute check would make
@@ -2035,7 +2109,11 @@ asking to delete by voice.
   zero / one / many occurrence outcomes; empty `new_str` deletes;
   `replace_all` replaces every occurrence in one statement; and a
   concurrent `append` racing a `str_replace` loses neither edit (both
-  are single statements); (iii) the PDF edit refusal; (iv) pagination:
+  are single statements) — the counting cases are portable
+  (`length`/`replace` exist in SQLite), but the many-occurrence
+  case's **steering line numbers** come from
+  `string_to_array`/`strpos`, so that assertion runs in the
+  Postgres-only lane like tests (v) and (vi); (iii) the PDF edit refusal; (iv) pagination:
   page boundaries fall on line breaks, line numbers run continuously
   across pages, a single line longer than the page size hard-cuts with
   the `[line continues]` marker and keeps its line number on the next
@@ -2220,7 +2298,7 @@ The following are explicitly not part of this product:
 
 - **Cross-session memory** (formerly FR-15–FR-17). The agent starts every session fresh; *automatic* recall is in-session only. Planned later following the MemGPT framework, possibly integrating RAG with clever indexing and semantic vector search, depending on performance. One deliberate carve-out (§4.10 FR-45, renamed and widened by §4.11 FR-53): the explicit, user-asked document tools (`list_documents`/`search_documents`/`read_document`/`edit_document`) do reach the user's own documents — agent-produced and uploaded — from past sessions: narrow, on-request reads and edits, not memory.
 - **Streaming memory processing.** When cross-session memory lands, it must run in parallel while the user is still speaking — context editing during input, not after the session ends.
-- **Document indexing & retrieval.** Document *storage* landed with the workspace (§4.11): uploads and agent output persist as `documents` rows. What stays deferred to the memory layer is making them *retrievable* — chunking, embedding, semantic search — and the proactive mid-conversation pickup that depends on the context engine (feature 5).
+- **Document indexing & retrieval.** §4.11 moves document *storage* out of this deferral when it lands: uploads and agent output persist as `documents` rows. What stays deferred to the memory layer is making them *retrievable* — chunking, embedding, semantic search — and the proactive mid-conversation pickup that depends on the context engine (feature 5).
 - **Proactive flagging** (formerly FR-8; demo stretch goal). The agent surfacing gaps, contradictions, or connections unprompted, with a user-configurable on/off setting.
 - **Brainstorm/critique mode inference** (formerly FR-10; demo stretch goal). Distinct generative vs. analytical behavior, inferred from context or set explicitly.
 - **Session resume** (formerly FR-19 / NFR-4). A dropped connection ends the session; the user starts a new one.
