@@ -66,7 +66,7 @@ export default function Home() {
       </nav>
       <header className="masthead">
         <h1 className="wordmark">Aloud</h1>
-        <p className="tagline">a place to think out loud</p>
+        <p className="tagline">a place to work out loud</p>
       </header>
 
       <ArtifactsPanel artifacts={artifacts} />

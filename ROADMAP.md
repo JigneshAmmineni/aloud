@@ -182,12 +182,20 @@ From single upload-at-start + copy-paste artifacts to a real document workspace.
   preview. Markdown first; other file types as the engineering allows.
 - Later (own spec, after the basics land): multiple adjustable preview windows;
   live co-editing where user edits and agent edits flow both ways.
-- Later (depends on the context engine, feature 5): **mid-conversation
-  uploads** — add a document (including drag-and-drop) while talking, and the
-  agentic loop proactively picks it up, indexes it, and retrieves from it as
-  the conversation calls for it. This replaces today's upload-before-session
-  flow, which injects whole documents into the context window at session
-  start and gets deprecated once this lands.
+- Later, in two stages with different prerequisites (decided 2026-10-08):
+  - **Mid-session uploads with on-request reads** — add a document while
+    talking; the agent reaches it only when asked ("read the file I just
+    uploaded"), through the same registry tools as any document row. NOT
+    predicated on the context engine: once §4.11's documents table and
+    upload persistence land, this needs only an in-session upload
+    affordance (plus optionally a server-message nudge so the agent knows
+    it arrived). First follow-up after feature 4 v1.
+  - **Proactive pickup** (depends on the context engine, feature 5): the
+    agentic loop notices a new document on its own, indexes it, and
+    retrieves from it as the conversation calls for it. This is what
+    replaces today's upload-before-session flow, which injects whole
+    documents into the context window at session start and gets
+    deprecated once this lands.
 
 ### 5. Context engine — structured, owned context window
 
