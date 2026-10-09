@@ -1262,13 +1262,22 @@ asking to delete by voice.
   feature — it is the rollback target's live table (this FR's own
   rollback caveat) — and is **dropped in the following release** once
   the deploy is verified. **That drop release is code + DB, specced
-  here because it is specced nowhere else**: it drops `artifacts`,
-  removes FR-52's paired-delete clause, drops `legacy_artifact_id`,
-  **and removes the migration itself** — the watermark re-run SELECTs
-  from `artifacts` on every boot and the pre-serve slot is unwrapped,
-  so a leftover migration against a dropped table aborts startup,
-  `/healthz` never answers, the deploy health check fails, and a
-  table drop has no rollback. A DB-only drop would 500 every delete
+  here because it is specced nowhere else, and the enumeration is the
+  checklist — every `artifacts` reference in the codebase, because
+  each missed site either aborts startup or silently undoes the
+  drop**: it drops `artifacts`; removes FR-52's paired-delete clause;
+  drops `legacy_artifact_id`; **removes the migration itself** (the
+  watermark re-run SELECTs from `artifacts` on every boot and the
+  pre-serve slot is unwrapped, so a leftover migration against a
+  dropped table aborts startup, `/healthz` never answers, the deploy
+  health check fails, and a table drop has no rollback); **removes
+  the `Artifact` model class** (`create_all` would otherwise silently
+  RECREATE the dropped table, empty); removes `artifacts` from
+  `_RLS_TABLES`, from the bootstrap GRANT list, and from every other
+  `_bootstrap_rls` statement that names it (policy/index/ALTER
+  statements against a missing table abort boot pre-serve); and
+  reverts FR-38 test (d)'s dual-table assertion to `documents` only.
+  A DB-only drop would 500 every delete
   of a migrated document while leaving its `documents` row intact.
   Until the drop, FR-38 test (d) asserts zero admin-context rows from
   **both** tables — a test against the empty leftover alone would ship
@@ -1304,13 +1313,25 @@ asking to delete by voice.
   never re-copy it. **Rollback-window EDITS are refreshed, not just
   new rows**: `edit_artifact` is live in the rollback target, so an
   append to a migrated artifact during the window changes a row at or
-  below the watermark — the re-run therefore also runs an
-  `UPDATE documents … FROM artifacts` refresh keyed on
-  `legacy_artifact_id` where the paired row's `updated_at` is newer,
-  or the drop release destroys the only copy of that appended text.
-  The refresh is resurrection-safe by the same construction: a
-  deleted document's paired `artifacts` row is already gone (FR-52's
-  paired delete), so there is nothing to refresh from. **The migration's database identity is
+  below the watermark — without a refresh, the drop release destroys
+  the only copy of that appended text. The re-run therefore also runs
+  an `UPDATE documents … FROM artifacts` refresh keyed on
+  `legacy_artifact_id`, and **its winner rule is stated, because the
+  two copies can diverge and text cannot be merged**: the newer side
+  wins, compared as `COALESCE(updated_at, created_at)` on BOTH sides
+  — never a bare `updated_at` comparison, which is NULL for exactly
+  the never-edited rows the refresh exists to protect and excludes
+  them. Stated forfeit, accepted: when the same document was edited
+  on both sides of a rollback boundary, the older side's changes are
+  lost — rollbacks are emergencies, the window is brief, and
+  last-writer-wins is the same rule the product applies everywhere
+  else. The refresh is resurrection-safe by the same construction as
+  the copy: a deleted document's paired `artifacts` row is already
+  gone (FR-52's paired delete), so there is nothing to refresh from.
+  Mandated test: an artifact appended during a simulated rollback
+  window has its post-append content in `documents` after the re-run,
+  and a document edited only on the `documents` side is NOT
+  overwritten by its stale pair. **The migration's database identity is
   stated, because the default identity fails silently**: the copy is
   a cross-user `INSERT … SELECT` — the one bulk cross-user write in
   the system — and on the RLS-bound application role with no
@@ -1378,18 +1399,22 @@ asking to delete by voice.
   email-check pattern predates having an identity to key on) —
   through the existing in-memory limiter (`app/ratelimit.py`;
   `DOCUMENTS_RATE_LIMIT`, default 20/min). Two consequences stated
-  (round-7 review): the limiter REUSES the route's own auth
+  : the limiter REUSES the route's own auth
   dependency rather than declaring a second one (FastAPI would
   resolve both and verify the token twice, one of them the
   `check_revoked` network round trip), and sitting behind
   verification it bounds storage abuse, not Firebase-lookup cost —
   the pre-auth flood cost is the same as every other authed route,
-  accepted. and a **per-user
+  accepted. And a **per-user
   document quota** (`MAX_DOCUMENTS_PER_USER`, default 200) is enforced
-  in the repo's insert path **inside the insert statement itself**
-  (an `INSERT … SELECT … WHERE count < quota` shape; a separate
-  count-then-insert lets two concurrent boundary uploads both pass —
-  round-7 review) — so it binds the upload endpoint and
+  in the repo's insert path as one `INSERT … SELECT … WHERE count <
+  quota` statement — **an approximate bound under concurrency, stated
+  rather than asserted away**: at READ COMMITTED two concurrent
+  boundary inserts can each read a passing count, so the quota can
+  overshoot by at most the number of concurrently-committing inserts
+  — cosmetic for a per-user cap, and not worth serialization
+  machinery; the mandated test asserts the single-threaded exact
+  behavior. It binds the upload endpoint and
   `create_document` alike, while the migration's `INSERT … SELECT` is
   exempt (a pre-existing corpus larger than the quota must never
   abort the migration). **The two required outcomes are typed, not
@@ -1422,7 +1447,7 @@ asking to delete by voice.
   resolution reads them owner-scoped from the repo, and
   `build_document_context_block` injects them in full under
   `MAX_TOTAL_CHARS` (400k) exactly as today (FR-21). **Ids are coerced
-  defensively** (round-7 review): the id space changes from client
+  defensively**: the id space changes from client
   UUID strings to integer row ids with this FR, and a tab left open
   across the deploy sends the old shape — a non-integer id is
   silently skipped exactly like an unknown one, never handed to the
@@ -1494,12 +1519,25 @@ asking to delete by voice.
   silently skipped (the existing unknown-id behavior); deleting
   mid-session does not retract content already injected or read into
   the model's context — FR-14 keeps the session's memory (accepted) —
-  **but the attach BLOCK stops carrying it** (round-7 review): the
+  **but the attach BLOCK stops carrying it**: the
   block is re-sent on every step, and a destroyed row's 🔒 content
   must not keep shipping to the provider for the rest of the session,
   so delete gets the same context-provider reconciliation FR-53 gives
   edits — the deleted document's section is dropped at the next
-  `build()`. Mandated test, symmetric with the edit one: delete an
+  `build()`. **The seam is specced, because the edit rule's path does
+  not exist here**: FR-53's reconciliation happens inside the loop,
+  which holds the provider; `DELETE /documents/{id}` is an HTTP
+  handler that holds neither. Two pieces close the gap: (a) the
+  context provider stores the attach block as **per-document
+  sections** keyed by document id — already implied by FR-53's
+  "re-renders that document's section", made explicit here — with
+  remove/re-render operations on its interface; (b) the companion
+  registers each live session's provider in a **module-level
+  registry alongside the live-task map, keyed by session id and
+  carrying the owner's user id**, and the delete route notifies every
+  live session belonging to that user — a no-op when none is live,
+  and safe after teardown exactly like the emit callback. Mandated
+  test, symmetric with the edit one: delete an
   attached document → the next built context carries no section for
   it.
   Download is client-composed from the fetched content — no extra
@@ -1522,7 +1560,7 @@ asking to delete by voice.
   (the sanitization has its test, like FR-54's markdown rule);
   the list continuation — `offset` pages through a corpus larger than
   the cap with a stable `total` and no row repeated or skipped (the
-  one new path whose failure is silent — round-7 review);
+  one new path whose failure is silent);
   delete → the row is gone — for a migrated document the
   paired `artifacts` row too, in the same transaction — and a
   subsequent `read_document` of that id steers not-found.
@@ -1575,9 +1613,14 @@ asking to delete by voice.
     marker, and the next page resumes under the **same** line number;
     without this rule the page either blows the cap or comes back
     empty and the model pages forever into MAX_STEPS. The knob binds
-    **raw content characters per page** — line-number prefixes and
-    markers are decoration on top (bounded, small) and do not count
-    against it. Page-slicing happens in the repo over **one** owned
+    **raw content characters per page**, and a page also binds its
+    **line count** (`PAGE_MAX_LINES`, default 200) — line-number
+    prefixes and markers are decoration on top and do not count
+    against the char knob, and the line cap is what keeps that
+    decoration genuinely bounded: without it, a document of
+    one-character lines carries a prefix per line and the rendered
+    page reaches several times the char knob, re-sent on every
+    remaining step as a tool result. Page-slicing happens in the repo over **one** owned
     row's content, itself bounded by `MAX_DOC_CHARS` — a single
     bounded fetch in-process, which is not the many-row shipping the
     `search_documents` bullet forbids: the caps-in-the-repo rule
@@ -1612,8 +1655,15 @@ asking to delete by voice.
     entering the `ILIKE` pattern — a model-supplied wildcard must
     never widen the scan. Derived values name their primitives too:
     counts, line numbers, and snippets are computed with **non-regex
-    string primitives** (`strpos`/`replace`-family) over `lower()`ed
-    pairs — `exact_matches` over the unlowered pair — and regex
+    string primitives** (`strpos`/`replace`-family); the lowered pair
+    is used ONLY to locate match positions (`total_matches` and
+    offsets), `exact_matches` runs over the unlowered pair, and **the
+    text the model receives — snippets and line content — is always
+    sliced from the STORED content at those offsets, never from the
+    lowered copy**: a lowercased snippet would hand `str_replace` an
+    `old_str` that fails verbatim matching on any document with
+    capitals, breaking the search → replace chain this tool exists to
+    serve. Regex
     functions are forbidden on the model's query, whose parens or
     stars would otherwise error mid-turn or widen the scan under a
     different metacharacter set. **The workspace-wide scan is bounded, not
@@ -1636,7 +1686,11 @@ asking to delete by voice.
     exists),
     and that document's exact `match_count` — capped at
     `SEARCH_RESULTS_CAP` documents, so one 30-hit document cannot eat
-    the budget and hide the other scanned documents. Single-document
+    the budget and hide the other scanned documents. `match_count` is
+    computed **only for the returned documents**, never for the whole
+    scan: exact counts across all `SEARCH_SCAN_CAP` scanned documents
+    would be several additional full passes over up to megabytes of
+    content, mid-turn, for rows the result does not even carry. Single-document
     (`document_id` given): **one result per match** (line +
     snippet, up to `SEARCH_RESULTS_CAP`) plus **two** exact, uncapped
     counts — `total_matches` (case-insensitive, the search's own
@@ -1649,13 +1703,19 @@ asking to delete by voice.
     source for `replace_all`'s `expected_occurrences`**: search
     once, replace once, the predicate stays the verifier — no
     workflow is priced at a deliberate refusal round out of
-    MAX_STEPS' five. **Snippets
+    MAX_STEPS' five. **The transfer's boundary is stated where the
+    model reads it**: the count transfers only when `old_str` is
+    byte-identical to the searched query — and the multi-match
+    steering's own "provide more surrounding context" advice widens
+    `old_str` past that boundary, so the steering text adds: after
+    widening, re-search the widened string (one cheap call) or omit
+    `expected_occurrences` and rely on the predicate's refusal. **Snippets
     are cut in SQL, in the repo layer** (`SEARCH_SNIPPET_CHARS`,
     capped at `SEARCH_RESULTS_CAP` results): the query returns match
     line and snippet, never whole `content` columns — FR-45's
     caps-live-in-the-repo rule; a ten-hit search must not ship
     megabytes to produce kilobytes. **Each content match carries its
-    LINE and never a page** (round-7 review): a line number is genuine
+    LINE and never a page**: a line number is genuine
     in-SQL arithmetic — count newlines before the match — but a page
     boundary is a recursive fold over newline snaps and hard cuts that
     only `read_document`'s in-process pager owns, and two
@@ -1708,10 +1768,16 @@ asking to delete by voice.
     `"the "` against a 200k-char document must not mint a
     4,000-line tool result). **The two steering results are producible,
     not aspirational** — a bare UPDATE's zero rowcount cannot tell
-    no-match from ambiguous: either the statement computes the
-    occurrence count alongside the update (a CTE returning it), or the
-    handler follows the failed UPDATE with a **read-only diagnostic
-    query** to compose the message — explicitly permitted, and
+    no-match from ambiguous — and **the gate and the message have
+    different homes, because only one of them is re-checked under
+    concurrency**: the occurrence predicate lives INSIDE the UPDATE's
+    own WHERE, as an expression over the target row's `content`
+    (Postgres re-evaluates the WHERE against the current row version
+    when a concurrent writer got there first; a separate CTE count is
+    read at the statement snapshot and is NOT re-run, which would
+    reopen the outlived-write race this rule closes). The steering
+    message's count comes from a **read-only diagnostic query after a
+    failed UPDATE** — explicitly permitted, and
     **generalized to every refused or failed write mode** (this
     ambiguity count, `insert`'s line bounds, the format gate's
     message): the atomicity rule binds *writes*, and a failed or
@@ -1763,7 +1829,7 @@ asking to delete by voice.
     edit on an over-ceiling row is legal; growth past the ceiling
     refuses, steering with FR-51's typed pattern: "this document is
     at its size limit — create a new one." **`create_document` gates
-    on the same ceiling** (round-7 review): the upload path already
+    on the same ceiling**: the upload path already
     enforces it in `extract_text`, and a tool-minted 300k-char
     document would break the same two bounds a 300k growth would.
     Mandated tests: an
@@ -1808,7 +1874,7 @@ asking to delete by voice.
     this FR makes 200k-char documents editable — a five-character
     `str_replace` must not ship the whole document mid-session. The
     announce's metadata always carries the post-edit **`char_count`**
-    (`length()` of the `RETURNING` value — free; round-7 review): on
+    (`length()` of the `RETURNING` value — free): on
     an omitted-content announce the client has no other way to refresh
     size, and FR-51's visible budget refusal and FR-54's char display
     must not run on stale numbers. Above
