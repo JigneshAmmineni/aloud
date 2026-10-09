@@ -222,6 +222,14 @@ section; the memory-management loop consumes its summaries and evictions.
   **together** — the structure is judged by the latency and quality of
   retrieval, including how retrieval triggers mid-speech without touching the
   voice hot path.
+- **Documents arrive un-indexed (noted 2026-10-09):** §4.11 stores every
+  document as plain extracted text in the `documents.content` column — no
+  chunking, no embeddings, no vector index (FR-53 states this boundary;
+  search is a literal substring scan). This feature derives chunks and
+  embeddings *from* that text into its own index — a backfill over all
+  existing rows plus indexing on write for new ones — not a migration: the
+  plain-text column stays the source of truth, and any derived index (e.g.
+  pgvector columns/tables) must be rebuildable from it.
 - Strict per-user isolation: every memory row is scoped by `user_id` and
   covered by RLS; one user's agent can never retrieve another user's data.
 - Retrieval quality is measured by evals (golden query→memory datasets), not
