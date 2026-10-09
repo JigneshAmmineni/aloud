@@ -77,7 +77,7 @@ User explicitly asks for the agent's opinion, alternatives, or next steps. The a
 *FR-19 (resume after connection drop) — moved to §6 Out of Scope. A dropped connection simply ends the session.*
 
 ### 4.7 Documents
-- **FR-21** Before a session, the user may attach one or more documents (plain text, Markdown, or PDF). The agent reads the attached documents and can reference and discuss them during the session. Uploaded documents persist to the user's document workspace (§4.11, FR-51); the attach-and-inject flow itself is unchanged, and mid-conversation upload remains deferred (§6 — feature 5 territory).
+- **FR-21** Before a session, the user may attach one or more documents (plain text, Markdown, or PDF). The agent reads the attached documents and can reference and discuss them during the session. Uploaded documents persist to the user's document workspace (§4.11, FR-51); the attach-and-inject flow itself is unchanged. Mid-conversation upload remains deferred, in two stages (ROADMAP, decided 2026-10-08): on-request reads are feature 4's first follow-up — not context-engine-dependent — and proactive pickup arrives with feature 5.
 
 ### 4.8 Authentication & Accounts
 
@@ -1210,9 +1210,11 @@ extends. Four design principles govern every FR below:
    (FR-45's upsert), renamed to the document vocabulary.
 
 Out of scope, deliberately: multiple/adjustable preview panes and live
-co-editing (later, own spec — roadmap); mid-conversation uploads and
-proactive pickup (feature 5, which also deprecates the
-upload-before-session flow); chunking/embedding/retrieval (feature 6);
+co-editing (later, own spec — roadmap); mid-conversation uploads
+(staged on the roadmap: on-request reads are feature 4's first
+follow-up, no context-engine dependency; proactive pickup is feature
+5, which also deprecates the upload-before-session flow);
+chunking/embedding/retrieval (feature 6);
 PDF original-byte storage, preview, or re-download (v1 stores extracted
 text only — the consequence is named in FR-51); encryption at rest
 (post-MVP, NFR-6). Per-document delete was first drafted as out of scope
@@ -1261,9 +1263,13 @@ asking to delete by voice.
   rollback caveat) — and is **dropped in the following release** once
   the deploy is verified. **That drop release is code + DB, specced
   here because it is specced nowhere else**: it drops `artifacts`,
-  removes FR-52's paired-delete clause, and drops
-  `legacy_artifact_id` — a DB-only drop would 500 every delete of a
-  migrated document while leaving its `documents` row intact.
+  removes FR-52's paired-delete clause, drops `legacy_artifact_id`,
+  **and removes the migration itself** — the watermark re-run SELECTs
+  from `artifacts` on every boot and the pre-serve slot is unwrapped,
+  so a leftover migration against a dropped table aborts startup,
+  `/healthz` never answers, the deploy health check fails, and a
+  table drop has no rollback. A DB-only drop would 500 every delete
+  of a migrated document while leaving its `documents` row intact.
   Until the drop, FR-38 test (d) asserts zero admin-context rows from
   **both** tables — a test against the empty leftover alone would ship
   green while proving nothing. Usage-event vocabulary is deliberately
@@ -1295,7 +1301,16 @@ asking to delete by voice.
   retained table was designed for. Watermark re-runs are
   **resurrection-safe by construction**: every deleted document's
   `legacy_artifact_id` is at or below the watermark, so a re-run can
-  never re-copy it. **The migration's database identity is
+  never re-copy it. **Rollback-window EDITS are refreshed, not just
+  new rows**: `edit_artifact` is live in the rollback target, so an
+  append to a migrated artifact during the window changes a row at or
+  below the watermark — the re-run therefore also runs an
+  `UPDATE documents … FROM artifacts` refresh keyed on
+  `legacy_artifact_id` where the paired row's `updated_at` is newer,
+  or the drop release destroys the only copy of that appended text.
+  The refresh is resurrection-safe by the same construction: a
+  deleted document's paired `artifacts` row is already gone (FR-52's
+  paired delete), so there is nothing to refresh from. **The migration's database identity is
   stated, because the default identity fails silently**: the copy is
   a cross-user `INSERT … SELECT` — the one bulk cross-user write in
   the system — and on the RLS-bound application role with no
@@ -1362,9 +1377,19 @@ asking to delete by voice.
   already resolves `user_id`, which keys the limiter (not per-IP; the
   email-check pattern predates having an identity to key on) —
   through the existing in-memory limiter (`app/ratelimit.py`;
-  `DOCUMENTS_RATE_LIMIT`, default 20/min), and a **per-user
+  `DOCUMENTS_RATE_LIMIT`, default 20/min). Two consequences stated
+  (round-7 review): the limiter REUSES the route's own auth
+  dependency rather than declaring a second one (FastAPI would
+  resolve both and verify the token twice, one of them the
+  `check_revoked` network round trip), and sitting behind
+  verification it bounds storage abuse, not Firebase-lookup cost —
+  the pre-auth flood cost is the same as every other authed route,
+  accepted. and a **per-user
   document quota** (`MAX_DOCUMENTS_PER_USER`, default 200) is enforced
-  in the repo's insert path — so it binds the upload endpoint and
+  in the repo's insert path **inside the insert statement itself**
+  (an `INSERT … SELECT … WHERE count < quota` shape; a separate
+  count-then-insert lets two concurrent boundary uploads both pass —
+  round-7 review) — so it binds the upload endpoint and
   `create_document` alike, while the migration's `INSERT … SELECT` is
   exempt (a pre-existing corpus larger than the quota must never
   abort the migration). **The two required outcomes are typed, not
@@ -1392,10 +1417,16 @@ asking to delete by voice.
   attached documents. The
   response's `id` becomes the integer row id (FR-50). Session attach
   becomes a **user-curated selection, never an automatic one**: the
-  client sends the attach set's ids to `/start`, attach resolution
-  reads them owner-scoped from the repo, and
+  client sends the attach set's ids to `/start` (resolved at the
+  session-scoped offer, where attach resolution lives today), attach
+  resolution reads them owner-scoped from the repo, and
   `build_document_context_block` injects them in full under
-  `MAX_TOTAL_CHARS` (400k) exactly as today (FR-21). This visit's
+  `MAX_TOTAL_CHARS` (400k) exactly as today (FR-21). **Ids are coerced
+  defensively** (round-7 review): the id space changes from client
+  UUID strings to integer row ids with this FR, and a tab left open
+  across the deploy sends the old shape — a non-integer id is
+  silently skipped exactly like an unknown one, never handed to the
+  DB to raise a type error out of session establishment. This visit's
   uploads enter the set by default — today's behavior, preserved; any
   other workspace document, **either source**, can be toggled into the
   set while idle (FR-54): `/start` already takes ids, and the
@@ -1462,7 +1493,15 @@ asking to delete by voice.
   not-found (the standard steering result) and in an attach set is
   silently skipped (the existing unknown-id behavior); deleting
   mid-session does not retract content already injected or read into
-  the model's context — FR-14 keeps the session's memory (accepted).
+  the model's context — FR-14 keeps the session's memory (accepted) —
+  **but the attach BLOCK stops carrying it** (round-7 review): the
+  block is re-sent on every step, and a destroyed row's 🔒 content
+  must not keep shipping to the provider for the rest of the session,
+  so delete gets the same context-provider reconciliation FR-53 gives
+  edits — the deleted document's section is dropped at the next
+  `build()`. Mandated test, symmetric with the edit one: delete an
+  attached document → the next built context carries no section for
+  it.
   Download is client-composed from the fetched content — no extra
   endpoint, nothing new to secure — saved under the document's title
   as `.md` (`markdown`) or `.txt` (`text` **and** `pdf`: the stored
@@ -1481,6 +1520,9 @@ asking to delete by voice.
   response never serializes `content`; a title carrying path
   separators or control characters never reaches a download filename
   (the sanitization has its test, like FR-54's markdown rule);
+  the list continuation — `offset` pages through a corpus larger than
+  the cap with a stable `total` and no row repeated or skipped (the
+  one new path whose failure is silent — round-7 review);
   delete → the row is gone — for a migrated document the
   paired `artifacts` row too, in the same transaction — and a
   subsequent `read_document` of that id steers not-found.
@@ -1542,7 +1584,11 @@ asking to delete by voice.
     guards unbounded fan-out, not one document. The result
     carries `page` and `total_pages`,
     and the truncation marker appears only when further pages exist.
-    No `page` argument = page 1. Line numbers are what make `insert`
+    No `page` argument = page 1; alternatively a **`line` argument**
+    returns the page CONTAINING that line — the pager is the single
+    owner of page boundaries, which is what lets `search_documents`
+    report plain line numbers without duplicating the pagination fold
+    (its bullet, below). Line numbers are what make `insert`
     addressable and multi-match steering precise (below). Page and
     line drift under the agent's own concurrent edits carries
     `list_documents`' acceptance: a shifted read steers fine; v1
@@ -1585,13 +1631,13 @@ asking to delete by voice.
     without it. **Result granularity is defined, not guessable, and
     differs by scope.** Workspace-wide: **one result per document** —
     id, title, a `match` discriminator (`title` | `content`), the
-    first content match's page, line, and bounded snippet (null for
+    first content match's line and bounded snippet (null for
     title matches — the shape promises a location only where one
     exists),
     and that document's exact `match_count` — capped at
     `SEARCH_RESULTS_CAP` documents, so one 30-hit document cannot eat
     the budget and hide the other scanned documents. Single-document
-    (`document_id` given): **one result per match** (page + line +
+    (`document_id` given): **one result per match** (line +
     snippet, up to `SEARCH_RESULTS_CAP`) plus **two** exact, uncapped
     counts — `total_matches` (case-insensitive, the search's own
     semantics) and **`exact_matches` (verbatim, the replace's
@@ -1608,10 +1654,15 @@ asking to delete by voice.
     capped at `SEARCH_RESULTS_CAP` results): the query returns match
     line and snippet, never whole `content` columns — FR-45's
     caps-live-in-the-repo rule; a ten-hit search must not ship
-    megabytes to produce kilobytes. Each content match addresses a
-    `read_document` page and line directly. Like `insert`, the query
-    is dialect-bound (`ILIKE`, in-SQL line arithmetic), so **test
-    (vi) runs in the Postgres-only lane** as well.
+    megabytes to produce kilobytes. **Each content match carries its
+    LINE and never a page** (round-7 review): a line number is genuine
+    in-SQL arithmetic — count newlines before the match — but a page
+    boundary is a recursive fold over newline snaps and hard cuts that
+    only `read_document`'s in-process pager owns, and two
+    implementations would have to agree exactly; the match's page is
+    reached through `read_document`'s `line` argument. Like `insert`,
+    the query is dialect-bound (`ILIKE`, in-SQL line counting), so
+    **test (vi) runs in the Postgres-only lane** as well.
     Owner-scoped in the repo layer like every query (RLS backstop;
     the NFR-8 negative is mandated); no usage event (searches spend
     nothing, and reads never emit events). **The feature-6 boundary
@@ -1711,9 +1762,14 @@ asking to delete by voice.
     advice that cannot shrink anything. A shrinking or size-neutral
     edit on an over-ceiling row is legal; growth past the ceiling
     refuses, steering with FR-51's typed pattern: "this document is
-    at its size limit — create a new one." Mandated tests: an
+    at its size limit — create a new one." **`create_document` gates
+    on the same ceiling** (round-7 review): the upload path already
+    enforces it in `extract_text`, and a tool-minted 300k-char
+    document would break the same two bounds a 300k growth would.
+    Mandated tests: an
     `append`, a `str_replace`, **and** an `insert` that would cross
-    the ceiling each refuse, steer, and write nothing — and a
+    the ceiling each refuse, steer, and write nothing; an over-ceiling
+    `create_document` refuses and steers; and a
     shrinking `str_replace` on an over-ceiling row succeeds.
   - Editability is format-gated, not source-gated: `markdown` and
     `text` documents are editable whichever source they came from
@@ -1750,7 +1806,12 @@ asking to delete by voice.
     **only up to `ANNOUNCE_CONTENT_MAX_CHARS` (default 16,000)**: the
     data channel shares the session's transport with live audio, and
     this FR makes 200k-char documents editable — a five-character
-    `str_replace` must not ship the whole document mid-session. Above
+    `str_replace` must not ship the whole document mid-session. The
+    announce's metadata always carries the post-edit **`char_count`**
+    (`length()` of the `RETURNING` value — free; round-7 review): on
+    an omitted-content announce the client has no other way to refresh
+    size, and FR-51's visible budget refusal and FR-54's char display
+    must not run on stale numbers. Above
     the threshold the announce carries `content_omitted: true` and no
     content; the client refetches `GET /documents/{id}` **only for a
     document open in the preview pane** — the list needs nothing but
@@ -1773,7 +1834,8 @@ asking to delete by voice.
   document; (v) `insert`: at 0, mid-document, and end; out-of-range
   steers with the bounds; concurrent with an `append`, neither edit is
   lost; (vi) `search_documents`: a match deep in a large document
-  returns the page and line its `read_document` page confirms; a
+  returns a line that `read_document`'s `line` argument resolves to a
+  page containing it; a
   title-only match carries `match: "title"` with null line and
   snippet; **on a mixed-case document, `exact_matches` — not
   `total_matches` — feeds a succeeding `replace_all`**, and the
@@ -1795,7 +1857,13 @@ asking to delete by voice.
   choice**: document content is model- or user-authored and untrusted
   in the render context — raw HTML must never execute (markdown
   rendered with HTML disabled or escaped; a mandated test or lint
-  guard, not an assumption). The upload button lives with the Uploaded
+  guard, not an assumption), **and link URLs are scheme-allowlisted to
+  `http`/`https`/`mailto`** — `javascript:` and `data:` URLs survive
+  every HTML-disabled renderer, and the preview pane runs on the
+  origin holding the Firebase session; the renderer itself is chosen
+  in the implementation PR, so the constraint has to live here. The
+  mandated sanitization test includes a `[x](javascript:…)` link
+  rendering inert. The upload button lives with the Uploaded
   list and stays idle-gated; each item marks its attach state and,
   while idle, exposes FR-51's attach toggle (both lists — an
   agent-written summary is attachable context too), with the visible
