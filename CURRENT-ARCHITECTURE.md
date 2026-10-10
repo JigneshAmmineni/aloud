@@ -151,7 +151,8 @@ backend/
   app/        FastAPI app: main.py (routes, session wiring), auth.py (THE
               auth seam: token verification, admin ops), admin.py (/api/admin
               router), ratelimit.py (in-memory per-caller limiter),
-              config.py, documents.py (upload-time doc store)
+              config.py, documents.py (upload text extraction — format
+              detection, caps; runs via threadpool + semaphore)
   agent/      companion.py (CompanionAgent: builds/runs one session's pipeline)
               loop.py (§4.10 AgentLoopProcessor: the agent loop IN the
               pipeline's LLM slot — steps, tools, filler backstop, barge-in
@@ -160,15 +161,26 @@ backend/
               only message source — feature 5 re-implements behind it),
               providers.py (THE provider seam: SDK construction for
               STT/TTS + the FR-48 loop LLM streaming client),
-              prompts.py (system prompt, FILLER/FALLBACK lines, wrap-up),
-              tools.py (FR-45 registry: create/list/read/edit_artifact),
+              prompts.py (system prompt, FILLER/FALLBACK lines, wrap-up,
+              the per-document attach-block renderer),
+              tools.py (FR-53 registry: create/list/read/search/
+              edit_document — paged reads, two-scope search, str_replace/
+              insert/append/replace, announce payload cap),
+              registry.py (FR-52/53 session-provider registry: HTTP-side
+              deletes and cross-session edits reach live attach blocks;
+              same-process by stated assumption — one uvicorn worker),
               sanitizer.py
   db/         engine.py (two engines + RLS bootstrap + user_scoped_session),
-              models.py (users, sessions, transcript_events, artifacts,
-              usage_events, turn_metrics, llm_traces), users_repo.py,
-              sessions_repo.py (incl. the FR-32 boot sweep),
-              artifacts_repo.py (FR-45 queries: caps, ordering, atomic
-              append), transcript_log.py,
+              models.py (users, sessions, transcript_events, documents,
+              artifacts [read-only until the §4.11 drop release],
+              schema_migrations, usage_events, turn_metrics, llm_traces),
+              users_repo.py, sessions_repo.py (incl. the FR-32 boot sweep),
+              documents_repo.py (FR-50–53 queries: quota inserts, workspace
+              list, paired delete, bounded attach resolution, the
+              in-process pager, search SQL, atomic edit predicates),
+              migrations.py (FR-50 run-once artifacts→documents copy:
+              schema_migrations marker + watermark, pre-serve,
+              Postgres-only), transcript_log.py,
               batch_writer.py (shared NFR-10 background writer),
               admin_repo.py (FR-38 admin_scoped_session + cross-user reads)
   obs/        logging.py (JSON structured logs), latency.py (per-turn budget
@@ -180,11 +192,17 @@ backend/
               show_trace.py (FR-49 developer trace pretty-printer; superuser
               bypass via DATABASE_URL, guarded), spike_gemini_stream.py
               (the FR-48 spike, kept as reference)
-  tests/      SQLite-backed suite + Postgres-only RLS tests (test_rls.py)
-frontend/     Next.js app: / (session console), /login, /admin (overview),
-              /admin/users (+ /[uid]), /admin/sessions/[id];
-              lib/firebase.ts + lib/auth.tsx (client auth)
-.github/workflows/  ci.yml (ruff+pytest+Postgres service+build),
+  tests/      SQLite-backed suite + Postgres-only lane (test_rls.py,
+              test_migration.py, test_documents_pg.py)
+frontend/     Next.js app: / (session console + document workspace), /login,
+              /admin (overview), /admin/users (+ /[uid]),
+              /admin/sessions/[id]; lib/firebase.ts + lib/auth.tsx (client
+              auth); lib/workspace.ts (FR-55 pure reducer) +
+              lib/useWorkspace.ts; components/Workspace.tsx +
+              MarkdownView.tsx (sanitized preview: HTML never renders,
+              link schemes allowlisted, images never render);
+              tests/ (vitest: the FR-54/55 renderer + reducer lane)
+.github/workflows/  ci.yml (ruff+pytest+Postgres service+vitest+build),
               claude.yml (@claude), claude-code-review.yml (auto-review)
 Caddyfile, docker-compose.yml (dev), docker-compose.prod.yml (prod)
 ```
@@ -208,12 +226,21 @@ Two architectural seams everything hangs on:
 
 ## 4. Runtime view (one voice session)
 
-1. Browser `POST /start` → session row created, `CompanionAgent` builds a
+1. Browser `POST /start` (carrying the workspace's attached document ids)
+   → session row created; attach resolution is bounded in the repo
+   (lengths-first against the 400k budget, boundary row sliced SQL-side);
+   `CompanionAgent` builds a
    dedicated pipeline: transport → Flux STT → user aggregator (turn
    assembly ONLY — its context is empty scratch, reset each consumed turn)
    → **AgentLoopProcessor** (the §4.10 agent loop, in the old LLM service's
    slot) → TTS → transport. The loop owns the conversation through the
-   `ContextProvider` and the tool registry; observers + writers ride along.
+   `ContextProvider` (which holds attached documents as per-document,
+   id-keyed sections — edits and HTTP-side deletes reconcile through
+   `agent/registry.py` into every live session of the owner) and the tool
+   registry; observers + writers ride along. Boot order, pre-serve:
+   `init_db` (create_all + RLS bootstrap) → the FR-50 artifacts→documents
+   migration (watermark re-runs are no-ops; a short-circuited copy fails
+   boot) → the FR-32 orphan sweep → `retire_bootstrap_engine()`.
 2. SDP offer/answer via `POST/PATCH /sessions/{id}/api/offer` (Caddy →
    backend; session-owned — the sessionless variant was removed), then WebRTC
    audio flows browser ↔ backend directly over UDP (bypasses Caddy).
@@ -254,7 +281,8 @@ Two architectural seams everything hangs on:
    `GET /sessions/{id}/alive` every 5s (DB-backed truth — correct across
    restarts, crashes, media-timeout closes, and any future multi-VM setup);
    a dead answer or two missed polls drops the UI to idle with a persistent
-   "connection lost" notice (artifacts kept). On graceful shutdown (SIGTERM
+   "connection lost" notice (the document workspace is server-backed truth
+   and simply persists). On graceful shutdown (SIGTERM
    — deploys/restarts) the backend sends a `session.ending` goodbye over the
    data channel and cancels live pipelines so their rows close as
    `interrupted` before the process exits.
@@ -281,14 +309,14 @@ bridge networking can't forward:
 
 | Container | Image | Role |
 |---|---|---|
-| caddy | caddy:2-alpine | :80/:443 — TLS, path routing (`/api/*,/start,/sessions/*,/healthz` → backend, rest → frontend). The old site-wide `basic_auth` gate is removed — per-user auth lives in the backend |
+| caddy | caddy:2-alpine | :80/:443 — TLS, path routing (`/api/*,/start,/sessions/*,/documents*,/healthz` → backend, rest → frontend). The old site-wide `basic_auth` gate is removed — per-user auth lives in the backend |
 | frontend | built from `frontend/Dockerfile` | compiled Next.js on :3000 (loopback-only in practice — not firewalled open) |
 | backend | built from `backend/Dockerfile` | FastAPI + Pipecat on :7860 + UDP media on host interface |
 | db | postgres:16-alpine | :5432, `listen_addresses=127.0.0.1` (loopback only) |
 
 **Environments:** local dev = `docker-compose.yml` (hot-reload, dev Postgres,
 no Caddy) · prod = the VM above · CI = GitHub Actions ubuntu runners (ruff +
-pytest on PRs and main; frontend build; Claude review on PRs).
+pytest on PRs and main; frontend vitest + build; Claude review on PRs).
 
 **Known infra gaps** (accepted for demo scale — see deployment.md §17): no DB
 backups (pgdata on VM disk only), secrets in a `chmod 600 .env` file (Secret
@@ -297,8 +325,10 @@ VM = single point of failure.
 
 ## 6. Pages & API surface
 
-**Frontend routes:** `/` — the app (Talk button, waveform states, artifact
-panel, document upload; redirects to /login when signed out) · `/login`
+**Frontend routes:** `/` — the app (Talk button, waveform states, and the
+document workspace: Uploaded/Created lists, sanitized preview pane,
+download, delete-with-confirm, idle-gated upload and attach toggles with
+the visible 400k budget; redirects to /login when signed out) · `/login`
 (FR-30: one form for sign-in/sign-up + Google) · admin pages (FR-41, all
 URL-addressable, tab bar + breadcrumbs, admin claim required): `/admin`
 (overview: live sessions, sessions/users today+7d, estimated spend, latency
@@ -311,7 +341,13 @@ drill-down — usage only, never content, NFR-9).
 (unauthenticated infra probe) · `POST /api/auth/email-check` (unauthenticated
 by necessity, rate-limited — the signup availability pre-check, a documented
 FR-26 enumeration exception) ·
-`POST /documents` · `POST /start` (provisions the users row, mints the
+`POST /documents` (persists an upload; provisions, `check_revoked`,
+per-user rate limit, quota; extraction via threadpool + semaphore) ·
+`GET /documents` (workspace list: metadata + title + char_count, never
+content; offset continuation) · `GET /documents/{id}` (full content:
+preview/download/refetch) · `DELETE /documents/{id}` (hard delete, paired
+legacy-row removal, live-session reconciliation) · `POST /start`
+(provisions the users row, mints the
 session, `check_revoked`) ·
 `POST|PATCH /sessions/{id}/api/offer` (WebRTC signaling, `check_revoked`,
 session-ownership enforced; the sessionless `/api/offer` variant was removed
@@ -435,7 +471,7 @@ In rough order of when they'd pay off:
    (sub-millisecond round trip), and the system is priced on that
    assumption: each user-scoped transaction is at least two round trips
    (`SET LOCAL app.user_id` + the query), the agent loop's DB-backed
-   tools (artifact list/read/edit today; §4.11's document tools next)
+   tools (the §4.11 document tools: list/read/search/edit)
    each hit the DB mid-turn inside NFR-1's 3s budget, and the
    background writers flush batches every ~1s. A hosted
    DB adds network RTT to *every one* of those (~1–5 ms same-zone,
