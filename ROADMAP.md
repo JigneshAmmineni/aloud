@@ -222,8 +222,11 @@ From single upload-at-start + copy-paste artifacts to a real document workspace.
        autosave would silently erase the agent's edit — so the save
        carries compare-and-swap on the base `updated_at`; a moved base
        refuses the save, the client merges (case 3) and retries.
-    5. Two of the user's own tabs editing one document → same CAS + merge
-       as case 4.
+    5. Two BROWSER tabs (the app open twice — unpreventable) editing one
+       document → same CAS + merge as case 4. Inside one app instance
+       this case cannot arise: one editor tab per document — opening a
+       document already open focuses its existing tab, never a
+       duplicate.
     6. Truly simultaneous same-region typing (user + agent in the same
        second) → degrades to case 3's banner; the only case real CRDT
        would fix, accepted as out of scope.
