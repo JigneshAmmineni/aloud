@@ -45,12 +45,29 @@ from pipecat.transports.smallwebrtc.request_handler import (
 )
 
 from agent.companion import CompanionAgent, drain_live_sessions
+from agent.registry import notify_document_deleted
 from app import admin, auth
 from app.auth import AuthedUser, get_current_user_checked, get_current_user_id
 from app.config import load_settings
-from app.documents import DocumentError, document_store, extract_text
-from app.ratelimit import rate_limited
+from app.documents import (
+    EXTRACT_SEMAPHORE,
+    MAX_FILE_BYTES,
+    MAX_TOTAL_CHARS,
+    DocumentError,
+    extract_text,
+)
+from app.ratelimit import DOCUMENTS_RATE_LIMIT, rate_limited, user_rate_limited
+from db.documents_repo import (
+    MAX_DOCUMENTS_PER_USER,
+    DocumentQuotaError,
+    delete_document_row,
+    get_document_row,
+    insert_upload_row,
+    list_workspace_rows,
+    resolve_attach_rows,
+)
 from db.engine import init_db, retire_bootstrap_engine
+from db.migrations import migrate_artifacts_to_documents
 from db.sessions_repo import session_is_active, sweep_orphaned_sessions
 from db.users_repo import provision_user
 
@@ -96,6 +113,10 @@ def _install_sigterm_goodbye() -> None:
 async def lifespan(app: FastAPI):
     auth.configure(settings.firebase_service_account_path)
     await init_db(settings.database_url)
+    # FR-50: run-once artifacts→documents copy, pre-serve in the
+    # RLS-bootstrap slot — before the sweep so a failed copy fails boot
+    # before anything else writes.
+    await migrate_artifacts_to_documents()
     # FR-32 boot sweep: close sessions orphaned by the previous process's
     # death and emit their inferred STT usage — before serving traffic.
     await sweep_orphaned_sessions()
@@ -185,35 +206,108 @@ async def email_check(request: Request):
     return {"registered": registered}
 
 
-@app.post("/documents")
+# FR-51: per-USER limiter, declared with the route's own auth callable so
+# FastAPI's per-request dependency cache resolves identity once.
+_documents_limiter = user_rate_limited(
+    DOCUMENTS_RATE_LIMIT, 60.0, get_current_user_checked
+)
+
+
+@app.post("/documents", dependencies=[Depends(_documents_limiter)])
 async def upload_document(
     file: UploadFile = File(...),
-    user_id: str = Depends(get_current_user_id),
+    user: AuthedUser = Depends(get_current_user_checked),
 ):
-    """Accept a .txt/.md/.pdf upload, extract its text, and stash it in the
-    ephemeral store under the requesting user. Returns metadata (id + char
-    count); the chosen ids are later passed in the /start body."""
-    data = await file.read()
+    """Accept a .txt/.md/.pdf upload, extract its text, and persist it as a
+    documents row (FR-51). Uploads precede /start, so this endpoint
+    provisions too (FR-24) — without it, documents.user_id's FK makes a new
+    account's first action a foreign-key 500 — and because it provisions and
+    writes persistent rows it verifies with check_revoked (FR-29)."""
+    await provision_user(user.user_id, user.name)
+    # Bounded read: never materialize more than the cap + 1 byte — an
+    # unbounded read() of an authed 1 GB POST would take a 2 GB VM (and
+    # every live session) with it. One extra byte lets extract_text's
+    # size check fire with its normal message.
+    data = await file.read(MAX_FILE_BYTES + 1)
     filename = file.filename or "document"
     try:
-        text = extract_text(filename, file.content_type, data)
+        # Threadpool: pypdf is synchronous CPU work that must not occupy the
+        # event loop driving live pipelines; the semaphore keeps permitted
+        # uploads from parsing concurrently on 2 shared vCPUs (FR-51).
+        async with EXTRACT_SEMAPHORE:
+            text, format = await run_in_threadpool(
+                extract_text, filename, file.content_type, data
+            )
     except DocumentError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    doc = document_store.add(user_id, filename, file.content_type or "", text)
+    try:
+        doc = await insert_upload_row(user.user_id, filename, format, text)
+    except DocumentQuotaError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     # No filename in the log: it's user-supplied text describing private
     # material, and INFO lines ship to Cloud Logging (FR-39/NFR-9) — the
     # same rule that keeps artifact titles out of agent/tools.py's log.
     logger.bind(
         component="app.documents",
         event="document.uploaded",
-        char_count=doc.char_count,
-    ).info(f"Document uploaded ({doc.char_count} chars)")
+        char_count=len(text),
+    ).info(f"Document uploaded ({len(text)} chars)")
     return {
         "id": doc.id,
-        "filename": doc.filename,
-        "mime_type": doc.mime_type,
-        "char_count": doc.char_count,
+        "title": doc.title,
+        "format": doc.format,
+        "char_count": len(text),
     }
+
+
+@app.get("/documents")
+async def list_documents_route(
+    offset: int = 0,
+    user_id: str = Depends(get_current_user_id),
+):
+    """FR-52: the user's workspace — both sources, newest-activity-first,
+    metadata plus title and char_count, never content, with a total and a
+    minimal offset continuation (the repo clamps offset)."""
+    items, total = await list_workspace_rows(user_id, offset=offset)
+    return {"total": total, "documents": items}
+
+
+@app.get("/documents/{document_id}")
+async def get_document_route(
+    document_id: int,
+    user_id: str = Depends(get_current_user_id),
+):
+    """FR-52: one owned document with full content — preview, download, and
+    FR-55's oversized-announce refetch. Another user's id is not-found."""
+    doc = await get_document_row(user_id, document_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="document not found")
+    return {
+        "id": doc.id,
+        "source": doc.source,
+        "format": doc.format,
+        "kind": doc.kind,
+        "title": doc.title,
+        "content": doc.content,
+        "char_count": len(doc.content),
+        "created_at": doc.created_at,
+        "updated_at": doc.updated_at,
+    }
+
+
+@app.delete("/documents/{document_id}")
+async def delete_document_route(
+    document_id: int,
+    user_id: str = Depends(get_current_user_id),
+):
+    """FR-52: hard delete behind the client's confirming affordance; the
+    repo removes the paired legacy row in the same transaction and logs the
+    structured event. Live sessions of this user reconcile through the
+    registry — the block must stop shipping destroyed 🔒 content."""
+    if not await delete_document_row(user_id, document_id):
+        raise HTTPException(status_code=404, detail="document not found")
+    notify_document_deleted(user_id, document_id)
+    return {"deleted": True}
 
 
 @app.post("/start")
@@ -285,6 +379,31 @@ async def session_alive(
     return {"alive": await session_is_active(session_id, user_id)}
 
 
+def _coerce_attach_ids(raw) -> list[int]:
+    """FR-51's defensive coercion, in one place: the id space is integer row
+    ids now, and a tab left open across the deploy sends the old UUID shape —
+    a non-integer id is silently skipped exactly like an unknown one, never
+    handed to the DB to raise a type error out of session establishment.
+    Deduped (first occurrence wins — duplicates would double-count the
+    budget and collide in the id-keyed per-document sections) and capped
+    (a list-length bound; 50,000 ids have no business reaching the lengths
+    query)."""
+    ids: list[int] = []
+    seen: set[int] = set()
+    for value in raw if isinstance(raw, list) else []:
+        try:
+            doc_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if doc_id in seen:
+            continue
+        seen.add(doc_id)
+        ids.append(doc_id)
+        if len(ids) >= MAX_DOCUMENTS_PER_USER:
+            break
+    return ids
+
+
 @app.post("/sessions/{session_id}/api/offer")
 async def session_offer(
     session_id: str,
@@ -293,8 +412,12 @@ async def session_offer(
     user: AuthedUser = Depends(get_current_user_checked),
 ):
     session = _owned_session(session_id, user.user_id)
-    document_ids = session["body"].get("document_ids") or []
-    documents = document_store.get(user.user_id, document_ids)
+    document_ids = _coerce_attach_ids(session["body"].get("document_ids") or [])
+    # Bounded in the repo (FR-51): lengths-first, budget-walked, boundary
+    # row sliced SQL-side — never fetch-everything-then-cut.
+    documents = await resolve_attach_rows(
+        user.user_id, document_ids, MAX_TOTAL_CHARS
+    )
     return await _handle_offer(
         request, background_tasks, user.user_id, session_id, documents
     )

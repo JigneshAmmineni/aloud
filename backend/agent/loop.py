@@ -64,7 +64,7 @@ MAX_STEPS = 5
 TOOL_TIMEOUT_S = 10.0
 # FR-43's named lever for the atomic-delivery branch, deliberately
 # DISENGAGED: the FR-48 spike measured ~1.0s of pre-call dead air for a
-# typical create_artifact — inside NFR-1's 3s — so no blind deadline runs
+# typical create_document — inside NFR-1's 3s — so no blind deadline runs
 # and a slow PLAIN turn never gets filler (the no-tool-turn mandate). If
 # artifact sizes ever push the gap past budget, this is the knob the spec
 # names, with its false positive accepted knowingly.
@@ -274,7 +274,7 @@ class AgentLoopProcessor(FrameProcessor):
             for step in range(1, MAX_STEPS + 1):
                 state.step = step
                 # Greeting: tool selection forbidden, tools still declared
-                # (FR-42/FR-7 — a session must not open with list_artifacts
+                # (FR-42/FR-7 — a session must not open with list_documents
                 # volunteering last week's titles unprompted).
                 tool_choice = "none" if purpose == "greeting" else "auto"
                 ended = await self._run_step(state, tool_choice, purpose)
@@ -429,7 +429,7 @@ class AgentLoopProcessor(FrameProcessor):
             # calls that forbid selection refuse to execute: the wrap-up
             # (never a round past the cap) AND the greeting (round-5
             # review: FR-7's guard — a session must not open by running
-            # list_artifacts and speaking last week's titles). Speak
+            # list_documents and speaking last week's titles). Speak
             # whatever text came, or the fallback — never silence.
             log.bind(
                 event="agent.forbidden_tools_refused",

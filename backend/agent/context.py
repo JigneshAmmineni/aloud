@@ -15,6 +15,7 @@ translation, this seam owns assembly and bookkeeping.
 
 from loguru import logger
 
+from agent.prompts import render_documents_block
 from agent.providers import LLMToolCall
 
 # FR-46: the interrupted mark's wire form — a sentinel suffix on the
@@ -35,18 +36,59 @@ class ContextProvider:
     def __init__(
         self,
         system_prompt: str,
-        documents_block: str | None = None,
+        documents=None,
         *,
         session_id: str = "",
     ):
         self._messages: list[dict] = [{"role": "system", "content": system_prompt}]
-        if documents_block:
-            self._messages.append({"role": "system", "content": documents_block})
+        # FR-51/53.8: the attach block is PROVIDER-OWNED STATE, held as
+        # per-document sections keyed by id so edits and deletes reconcile
+        # — re-rendered lazily at the next build() after a mutation.
+        self._doc_entries: dict[int, tuple[str, str]] = {
+            d.id: (d.title, d.content) for d in (documents or [])
+        }
+        self._docs_block: str | None = render_documents_block(self._doc_entries)
+        self._docs_dirty = False
         self._log = logger.bind(session_id=session_id, component="agent.context")
         # Running character count for the FR-44 estimate — maintained at
         # append time so build() never rescans the conversation on the
         # first-audio path (round-4 review).
-        self._approx_chars = sum(len(m["content"]) for m in self._messages)
+        self._approx_chars = len(system_prompt) + (
+            len(self._docs_block) if self._docs_block else 0
+        )
+
+    def _refresh_docs_block(self) -> None:
+        if not self._docs_dirty:
+            return
+        old_len = len(self._docs_block) if self._docs_block else 0
+        self._docs_block = render_documents_block(self._doc_entries)
+        self._approx_chars += (
+            len(self._docs_block) if self._docs_block else 0
+        ) - old_len
+        self._docs_dirty = False
+
+    def update_document_section(self, doc_id: int, title: str, content: str) -> bool:
+        """FR-53.8: a successful edit of an attached document re-renders its
+        section at the next build() — otherwise the model holds pre-edit
+        text as authoritative system context and copies a stale old_str
+        into "did not appear verbatim" loops. SYNCHRONOUS by contract: no
+        await between reading the section map and rewriting it (the same
+        single-thread property that makes update_tool_result safe). A no-op
+        for ids this session never attached."""
+        if doc_id not in self._doc_entries:
+            return False
+        self._doc_entries[doc_id] = (title, content)
+        self._docs_dirty = True
+        return True
+
+    def remove_document_section(self, doc_id: int) -> bool:
+        """FR-52: a destroyed row must stop shipping from this session's
+        block. Removing the last section drops the preamble with it.
+        Synchronous, like update_document_section."""
+        if self._doc_entries.pop(doc_id, None) is None:
+            return False
+        self._docs_dirty = True
+        return True
 
     def build(self, *, turn_id: int | None = None, step: int = 1) -> list[dict]:
         """The message list for one LLM call. Deterministic, no LLM, no IO.
@@ -54,12 +96,15 @@ class ContextProvider:
         Returns copies: the caller may hold the list across appends (the
         FR-49 trace serializes it at enqueue) without seeing later
         mutations of the conversation."""
+        self._refresh_docs_block()
         built = []
         for msg in self._messages:
             copy = dict(msg)
             if "tool_calls" in copy:
                 copy["tool_calls"] = [dict(c) for c in copy["tool_calls"]]
             built.append(copy)
+        if self._docs_block is not None:
+            built.insert(1, {"role": "system", "content": self._docs_block})
         self._log.bind(
             event="context.built",
             turn_id=turn_id,

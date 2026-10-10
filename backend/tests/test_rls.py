@@ -21,6 +21,7 @@ from app.auth import AuthedUser
 from db.engine import init_db, session_factory, user_scoped_session
 from db.models import (
     Artifact,
+    Document,
     LLMTrace,
     Session,
     TranscriptEvent,
@@ -146,7 +147,10 @@ _NOW = datetime.now(timezone.utc)
 
 async def _seed_two_users():
     """Two users, each with a session + usage event + turn metric +
-    transcript event + artifact, inserted through their own scoped context."""
+    transcript event + artifact + document, inserted through their own
+    scoped context (test (d)'s documents half must have a row of its OWN
+    to fail on — depending on another test file's leftovers proves
+    nothing in isolation)."""
     uid_a, uid_b = f"adm-a-{uuid.uuid4()}", f"adm-b-{uuid.uuid4()}"
     sess_a, sess_b = f"s-{uuid.uuid4()}", f"s-{uuid.uuid4()}"
     await init_db(PG_URL)
@@ -170,6 +174,13 @@ async def _seed_two_users():
                 TranscriptEvent(
                     session_id=sess, user_id=uid, ts=_NOW, role="user",
                     kind="final_transcript", text="private words",
+                )
+            )
+            db.add(
+                Document(
+                    user_id=uid, session_id=sess, source="agent",
+                    format="markdown", kind="summary",
+                    title="private doc", content="private body",
                 )
             )
             db.add(
@@ -215,6 +226,7 @@ def test_admin_context_reads_scoped_tables_never_content_tables():
                 TurnMetric,
                 TranscriptEvent,
                 Artifact,
+                Document,
                 LLMTrace,
             ):
                 assert (await db.execute(select(model))).scalars().all() == []
@@ -229,8 +241,10 @@ def test_admin_context_reads_scoped_tables_never_content_tables():
                 assert {uid_a, uid_b} <= users
 
             # (d) ...and ZERO rows from the content tables, even here —
-            # llm_traces is content (FR-49: no admin surface renders a trace)
-            for model in (TranscriptEvent, Artifact, LLMTrace):
+            # llm_traces is content (FR-49: no admin surface renders a
+            # trace). §4.11: documents joins; artifacts stays covered until
+            # its drop release (an empty-leftover-only test proves nothing).
+            for model in (TranscriptEvent, Artifact, Document, LLMTrace):
                 assert (await db.execute(select(model))).scalars().all() == []
 
     asyncio.run(run())
@@ -309,15 +323,15 @@ def test_admin_context_cannot_write():
     asyncio.run(run())
 
 
-def test_artifact_tools_succeed_under_real_rls():
-    """Regression shape this guards (FR-45 registry handlers): the old
-    handler once refreshed its row AFTER commit — the transaction-local RLS
-    context had evaporated, the refresh SELECT matched zero rows, and every
-    artifact save failed on Postgres while sqlite tests stayed green. The
-    create AND edit paths must run cleanly under real policies (edit's
-    UPDATE ... RETURNING must see its row through RLS)."""
+def test_document_tools_succeed_under_real_rls():
+    """Regression shape this guards (FR-53 registry handlers): a handler
+    once refreshed its row AFTER commit — the transaction-local RLS context
+    had evaporated, the refresh SELECT matched zero rows, and every save
+    failed on Postgres while sqlite tests stayed green. The create,
+    str_replace, and insert paths must run cleanly under real policies
+    (UPDATE ... RETURNING must see its row through RLS)."""
     from agent.tools import ToolContext, build_registry
-    from db.models import Artifact as ArtifactModel
+    from db.models import Document as DocumentModel
 
     async def run():
         uid = f"art-{uuid.uuid4()}"
@@ -334,38 +348,53 @@ def test_artifact_tools_succeed_under_real_rls():
         ctx = ToolContext(session_id=sess, user_id=uid, turn_id=1, emit=emit)
         tools = {t.name: t for t in build_registry()}
 
-        created = await tools["create_artifact"].handler(
+        created = await tools["create_document"].handler(
             {"title": "T", "kind": "summary", "content": "body"}, ctx
         )
         assert created["status"] == "created"
-        edited = await tools["edit_artifact"].handler(
+        doc_id = created["document_id"]
+        edited = await tools["edit_document"].handler(
             {
-                "artifact_id": created["artifact_id"],
-                "mode": "append",
-                "content": "more",
+                "document_id": doc_id,
+                "mode": "str_replace",
+                "old_str": "body",
+                "new_str": "body v2",
             },
             ctx,
         )
         assert edited["status"] == "edited"
+        inserted = await tools["edit_document"].handler(
+            {
+                "document_id": doc_id,
+                "mode": "insert",
+                "insert_line": 1,
+                "text": "tail line",
+            },
+            ctx,
+        )
+        assert inserted["status"] == "edited"
         assert [e["type"] for e in emitted] == [
-            "artifact.created",
-            "artifact.updated",
+            "document.created",
+            "document.updated",
+            "document.updated",
         ]
 
         async with user_scoped_session(uid) as db:
             rows = (
                 (
                     await db.execute(
-                        select(ArtifactModel).where(ArtifactModel.session_id == sess)
+                        select(DocumentModel).where(
+                            DocumentModel.session_id == sess
+                        )
                     )
                 )
                 .scalars()
                 .all()
             )
             assert len(rows) == 1
-            assert rows[0].content == "body\nmore"
+            assert rows[0].content == "body v2\ntail line"
         # the in-transaction usage events landed too (FR-32/FR-38): one
-        # artifact count + one edit
+        # count + two edits, detail = kind for an agent document
         async with user_scoped_session(uid) as db:
             events = (
                 (
@@ -379,7 +408,8 @@ def test_artifact_tools_succeed_under_real_rls():
                 .scalars()
                 .all()
             )
-            assert sorted(e.unit for e in events) == ["count", "edits"]
+            assert sorted(e.unit for e in events) == ["count", "edits", "edits"]
+            assert {e.detail for e in events} == {"summary"}
 
     asyncio.run(run())
 

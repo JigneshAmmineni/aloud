@@ -44,19 +44,29 @@ def test_tool_step_shape_calls_immediately_before_results():
 
 def test_no_tool_context_matches_todays_llmcontext():
     """Mandated (ii): a no-tool built context matches today's LLMContext
-    message list — the behavior-identical claim, asserted not assumed."""
+    message list — the behavior-identical claim, asserted not assumed.
+    §4.11: the docs block is per-document sections under the provider now,
+    so the expected block is the same renderer's output."""
+    from types import SimpleNamespace
+
     from pipecat.processors.aggregators.llm_context import LLMContext
 
+    from agent.prompts import render_documents_block
+
+    doc = SimpleNamespace(id=42, title="notes.md", content="docs body")
     today = LLMContext(
         messages=[
             {"role": "system", "content": "base prompt"},
-            {"role": "system", "content": "docs block"},
+            {
+                "role": "system",
+                "content": render_documents_block({42: ("notes.md", "docs body")}),
+            },
         ]
     )
     today.add_message({"role": "user", "content": "hello"})
     today.add_message({"role": "assistant", "content": "hi there"})
 
-    ctx = ContextProvider("base prompt", "docs block", session_id="s")
+    ctx = ContextProvider("base prompt", [doc], session_id="s")
     ctx.append_user("hello")
     ctx.append_assistant("hi there")
     assert ctx.build() == today.get_messages()
@@ -144,3 +154,63 @@ def test_running_char_counter_matches_a_full_recount():
         return chars
 
     assert ctx._approx_tokens() == recount(ctx.build()) // 4
+
+
+def test_document_sections_rerender_on_edit_and_delete():
+    """FR-53.8/FR-52: an edit re-renders that document's section at the
+    next build(); a delete removes it — and removing the LAST section drops
+    the preamble with it (no header over nothing). Unknown ids are no-ops
+    (the cross-session notify hits every session of the user)."""
+    from types import SimpleNamespace
+
+    docs = [
+        SimpleNamespace(id=1, title="a.md", content="alpha"),
+        SimpleNamespace(id=2, title="b.md", content="beta"),
+    ]
+    ctx = ContextProvider("base", docs, session_id="s")
+
+    block = ctx.build()[1]["content"]
+    assert "id=1" in block and "alpha" in block and "beta" in block
+
+    assert ctx.update_document_section(1, "a.md", "alpha v2") is True
+    assert ctx.update_document_section(999, "x", "ignored") is False
+    block = ctx.build()[1]["content"]
+    assert "alpha v2" in block and "ignored" not in block
+
+    assert ctx.remove_document_section(1) is True
+    assert ctx.remove_document_section(1) is False
+    block = ctx.build()[1]["content"]
+    assert "alpha" not in block and "beta" in block
+
+    # last section gone: the block (and its preamble) disappears entirely
+    ctx.remove_document_section(2)
+    messages = ctx.build()
+    assert len(messages) == 1
+    assert messages[0]["content"] == "base"
+
+
+def test_document_section_rerender_reapplies_total_cap(monkeypatch):
+    """Mandated (FR-53.8): an edit that pushes an attached set past
+    MAX_TOTAL_CHARS → the next built block is at or under the cap, marker
+    present — and the approx estimate tracks the mutation."""
+    from types import SimpleNamespace
+
+    import app.documents as documents
+
+    monkeypatch.setattr(documents, "MAX_TOTAL_CHARS", 2_000)
+    docs = [
+        SimpleNamespace(id=1, title="a.md", content="x" * 50),
+        SimpleNamespace(id=2, title="b.md", content="y" * 50),
+    ]
+    ctx = ContextProvider("base", docs, session_id="s")
+    before = ctx._approx_chars
+
+    assert len(ctx.build()[1]["content"]) < 2_000  # starts under the cap
+
+    ctx.update_document_section(1, "a.md", "z" * 5_000)  # two appends later…
+    block = ctx.build()[1]["content"]
+    assert len(block) <= 2_000 + len(documents._TRUNCATION_MARKER)
+    assert block.endswith(documents._TRUNCATION_MARKER)
+    # the running estimate moved with the re-render, never rescans
+    assert ctx._approx_chars != before
+    assert ctx._approx_chars == len("base") + len(block)

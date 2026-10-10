@@ -13,24 +13,10 @@ import { PipecatClient, type TransportState } from "@pipecat-ai/client-js";
 import { SmallWebRTCTransport } from "@pipecat-ai/small-webrtc-transport";
 
 import { authedFetch, getToken } from "@/lib/auth";
+import type { AnnouncedDoc } from "@/lib/workspace";
 
 export type SessionState = "idle" | "connecting" | "active" | "ending";
 export type VoiceMode = "listening" | "thinking" | "speaking";
-
-export type Artifact = {
-  id: number;
-  title: string;
-  kind: string;
-  content: string;
-  created_at: string;
-  updated_at?: string | null;
-};
-
-export type AttachedDocument = {
-  id: string;
-  filename: string;
-  char_count: number;
-};
 
 const LOST_MESSAGE =
   "connection lost — that session has ended. tap Talk to start a new one.";
@@ -45,14 +31,19 @@ const RESTART_MESSAGE =
 const ALIVE_POLL_MS = 5_000;
 const ALIVE_MAX_MISSES = 4;
 
-export function useAloudSession() {
+export function useAloudSession({
+  onDocumentAnnounce,
+}: {
+  /** FR-55: document.created / document.updated announces, handed to the
+   * workspace reducer (the panel is server-backed truth, not session
+   * state). */
+  onDocumentAnnounce?: (type: string, doc: AnnouncedDoc) => void;
+} = {}) {
   const [state, setState] = useState<SessionState>("idle");
   const [mode, setMode] = useState<VoiceMode>("listening");
   const [error, setError] = useState<string | null>(null);
   const [localTrack, setLocalTrack] = useState<MediaStreamTrack | null>(null);
   const [botTrack, setBotTrack] = useState<MediaStreamTrack | null>(null);
-  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
-  const [documents, setDocuments] = useState<AttachedDocument[]>([]);
 
   const clientRef = useRef<PipecatClient | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -141,28 +132,7 @@ export function useAloudSession() {
     }, ALIVE_POLL_MS);
   }, [sessionLost]);
 
-  // Upload a file to the backend; on success it's attached to the next
-  // session. Throws with the backend's message so the caller can show it.
-  const uploadDocument = useCallback(async (file: File) => {
-    const form = new FormData();
-    form.append("file", file);
-    const res = await authedFetch("/documents", { method: "POST", body: form });
-    if (!res.ok) {
-      const detail = await res
-        .json()
-        .then((d) => d?.detail)
-        .catch(() => null);
-      throw new Error(detail || "couldn't read that file");
-    }
-    const doc = (await res.json()) as AttachedDocument;
-    setDocuments((prev) => [...prev, doc]);
-  }, []);
-
-  const removeDocument = useCallback((id: string) => {
-    setDocuments((prev) => prev.filter((d) => d.id !== id));
-  }, []);
-
-  const talk = useCallback(async () => {
+  const talk = useCallback(async (documentIds: number[] = []) => {
     if (clientRef.current) return;
     setError(null);
     expectedEndRef.current = false;
@@ -213,23 +183,14 @@ export function useAloudSession() {
               }
             }
           },
-          // FR-12: the create_artifact tool announces new artifacts here.
+          // FR-55: document announces go to the workspace reducer.
           onServerMessage: (data: any) => {
-            if (data?.type === "artifact.created" && data.artifact) {
-              setArtifacts((prev) => [data.artifact as Artifact, ...prev]);
-            }
-            // FR-45: edit_artifact announces the post-edit artifact as an
-            // UPSERT — update if the id is on screen, insert if not: this
-            // panel's list is session-local and starts empty, and the
-            // tool's defining case edits a prior-session artifact the
-            // client has never seen.
-            if (data?.type === "artifact.updated" && data.artifact) {
-              const updated = data.artifact as Artifact;
-              setArtifacts((prev) =>
-                prev.some((a) => a.id === updated.id)
-                  ? prev.map((a) => (a.id === updated.id ? updated : a))
-                  : [updated, ...prev],
-              );
+            if (
+              (data?.type === "document.created" ||
+                data?.type === "document.updated") &&
+              data.document
+            ) {
+              onDocumentAnnounce?.(data.type, data.document as AnnouncedDoc);
             }
             // Graceful-shutdown goodbye: the server says it's going away
             // (deploy/restart) before the connection drops.
@@ -250,7 +211,7 @@ export function useAloudSession() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          body: { document_ids: documents.map((d) => d.id) },
+          body: { document_ids: documentIds },
         }),
       });
       if (!startRes.ok) throw new Error("session start failed");
@@ -282,7 +243,7 @@ export function useAloudSession() {
       // the backend" — retrying is the one action they actually have.
       setError("couldn't connect — try again shortly.");
     }
-  }, [cleanup, documents, sessionLost, startAlivePoll]);
+  }, [cleanup, onDocumentAnnounce, sessionLost, startAlivePoll]);
 
   const end = useCallback(async () => {
     const client = clientRef.current;
@@ -303,10 +264,6 @@ export function useAloudSession() {
     error,
     localTrack,
     botTrack,
-    artifacts,
-    documents,
-    uploadDocument,
-    removeDocument,
     talk,
     end,
   };
