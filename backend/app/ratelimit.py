@@ -22,6 +22,9 @@ from loguru import logger
 
 _SWEEP_THRESHOLD = 1024  # drop stale buckets once the dict grows past this
 
+# §4.11 FR-51: POST /documents per-user limit (requests per minute).
+DOCUMENTS_RATE_LIMIT = 20
+
 
 def _caller_key(request: Request) -> str:
     forwarded = request.headers.get("x-forwarded-for")

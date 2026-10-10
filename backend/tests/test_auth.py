@@ -183,7 +183,13 @@ def test_ice_patch_verifies_with_check_revoked(client, monkeypatch):
     assert calls[-1]["check_revoked"] is True
 
 
-def test_documents_route_uses_cheap_verification(client, monkeypatch):
+def test_documents_route_verifies_with_check_revoked(client, monkeypatch):
+    """FR-29 amended by §4.11/FR-51: POST /documents provisions the users
+    row and writes persistent rows, so it joins the check_revoked set — a
+    just-disabled account must not self-provision and store rows for its
+    residual token hour. Exactly ONE verification: the per-user limiter
+    declares the same auth callable, and FastAPI's dependency cache must
+    resolve it once."""
     calls = _fake_verify(
         monkeypatch,
         claims={"sub": "uid-42", "email_verified": True},
@@ -193,7 +199,8 @@ def test_documents_route_uses_cheap_verification(client, monkeypatch):
         files={"file": ("a.txt", b"hi", "text/plain")},
         headers={"Authorization": "Bearer t"},
     )
-    assert calls[0]["check_revoked"] is False
+    assert len(calls) == 1
+    assert calls[0]["check_revoked"] is True
 
 
 def test_admin_route_403s_without_admin_claim(client, monkeypatch):

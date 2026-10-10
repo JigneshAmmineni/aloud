@@ -177,9 +177,50 @@ def test_upload_document_returns_metadata(client, auth_as):
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["filename"] == "notes.md"
+    assert body["title"] == "notes.md"
+    assert body["format"] == "markdown"  # FR-50's three-way split
     assert body["char_count"] > 0
-    assert "id" in body
+    assert isinstance(body["id"], int)  # FR-51: the integer row id
+    assert "mime_type" not in body  # retired with the store
+
+
+def test_upload_goes_through_the_threadpool(client, auth_as, monkeypatch):
+    """FR-51's structural test (not timing — timing flakes): the route's
+    extraction call site goes through the threadpool wrapper, keeping pypdf
+    parses off the event loop that drives live pipelines."""
+    calls = []
+    real = main.run_in_threadpool
+
+    async def spying(fn, *args, **kwargs):
+        calls.append(fn)
+        return await real(fn, *args, **kwargs)
+
+    monkeypatch.setattr(main, "run_in_threadpool", spying)
+    auth_as()
+    resp = client.post(
+        "/documents", files={"file": ("a.txt", b"hello", "text/plain")}
+    )
+    assert resp.status_code == 200
+    assert main.extract_text in calls
+
+
+def test_upload_quota_maps_to_400_naming_the_limit(client, auth_as, monkeypatch):
+    """FR-51: the typed quota refusal is a clear 400, never a generic 500."""
+    import db.documents_repo as repo
+
+    monkeypatch.setattr(repo, "MAX_DOCUMENTS_PER_USER", 1)
+    auth_as("uid-quota")
+    assert (
+        client.post(
+            "/documents", files={"file": ("a.txt", b"one", "text/plain")}
+        ).status_code
+        == 200
+    )
+    resp = client.post(
+        "/documents", files={"file": ("b.txt", b"two", "text/plain")}
+    )
+    assert resp.status_code == 400
+    assert "limit" in resp.json()["detail"]
 
 
 def test_upload_document_rejects_unsupported_type(client, auth_as):
@@ -273,3 +314,96 @@ def test_documents_reach_the_agent_via_session_start(client, auth_as, monkeypatc
     assert resp.status_code == 200
     assert [d.content for d in captured["documents"]] == ["hello world"]
     assert captured["user_id"] == "uid-a"
+
+
+def test_workspace_routes_crud_and_isolation(client, auth_as):
+    """FR-52: list/get/delete with the NFR-8 negatives on all three routes —
+    another user's id never appears in the list, GETs not-found, DELETEs
+    not-found and deletes nothing; the list never serializes content."""
+    auth_as("uid-a")
+    up = client.post(
+        "/documents", files={"file": ("a.md", b"# alpha", "text/markdown")}
+    ).json()
+
+    listing = client.get("/documents").json()
+    assert listing["total"] >= 1
+    item = next(d for d in listing["documents"] if d["id"] == up["id"])
+    assert item["title"] == "a.md"
+    assert "content" not in item
+    assert item["char_count"] == len("# alpha")
+
+    doc = client.get(f"/documents/{up['id']}").json()
+    assert doc["content"] == "# alpha"
+    assert doc["source"] == "uploaded"
+
+    auth_as("uid-b")
+    assert all(
+        d["id"] != up["id"] for d in client.get("/documents").json()["documents"]
+    )
+    assert client.get(f"/documents/{up['id']}").status_code == 404
+    assert client.delete(f"/documents/{up['id']}").status_code == 404
+
+    auth_as("uid-a")
+    assert client.get(f"/documents/{up['id']}").status_code == 200  # B deleted nothing
+    assert client.delete(f"/documents/{up['id']}").json() == {"deleted": True}
+    assert client.get(f"/documents/{up['id']}").status_code == 404
+
+
+def test_upload_survives_restart_and_still_attaches(tmp_path, auth_as, monkeypatch):
+    """FR-51: upload -> restart -> the document still resolves (the
+    persistence the in-memory store lacked)."""
+    import dataclasses
+
+    monkeypatch.setattr(
+        main,
+        "settings",
+        dataclasses.replace(
+            main.settings, database_url=f"sqlite+aiosqlite:///{tmp_path}/restart.db"
+        ),
+    )
+    with TestClient(main.app) as c:
+        auth_as("uid-a")
+        up = c.post(
+            "/documents", files={"file": ("a.txt", b"persist me", "text/plain")}
+        ).json()
+    with TestClient(main.app) as c:  # a fresh lifespan = process restart
+        auth_as("uid-a")
+        doc = c.get(f"/documents/{up['id']}").json()
+        assert doc["content"] == "persist me"
+
+
+def test_attach_id_coercion_skips_dedupes_and_caps(monkeypatch):
+    """FR-51: non-integer ids (the old UUID shape from a stale tab) are
+    silently skipped, duplicates collapse first-wins, and the list is
+    length-capped before any query."""
+
+    monkeypatch.setattr(main, "MAX_DOCUMENTS_PER_USER", 3)
+    assert main._coerce_attach_ids(["12", 13, 13, "old-uuid", None, 14.9]) == [
+        12,
+        13,
+        14,
+    ]
+    assert main._coerce_attach_ids("not-a-list") == []
+    assert main._coerce_attach_ids([1, 2, 3, 4, 5]) == [1, 2, 3]
+
+
+def test_documents_rate_limit_is_per_user(client, auth_as):
+    """FR-51's limiter proof: user A rate-limited while user B succeeds in
+    the same window — the half that proves it is not keyed per-IP."""
+    from app.ratelimit import DOCUMENTS_RATE_LIMIT
+
+    auth_as("uid-rl-a")
+    statuses = [
+        client.post(
+            "/documents", files={"file": (f"f{i}.txt", b"x", "text/plain")}
+        ).status_code
+        for i in range(DOCUMENTS_RATE_LIMIT + 1)
+    ]
+    assert statuses[-1] == 429
+    assert all(s == 200 for s in statuses[:-1])
+
+    auth_as("uid-rl-b")
+    resp = client.post(
+        "/documents", files={"file": ("b.txt", b"y", "text/plain")}
+    )
+    assert resp.status_code == 200

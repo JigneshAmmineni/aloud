@@ -26,9 +26,9 @@ def test_context_starts_with_exactly_one_system_message(make_settings):
 def test_attached_documents_are_injected_into_context(make_settings):
     """Document upload feature: attached docs ride in alongside the base prompt
     (and only then). The base identity prompt stays intact."""
-    from app.documents import Document
+    from db.documents_repo import AttachedDocument
 
-    docs = [Document("d1", "arch.md", "text/markdown", "cascade pipeline", 16)]
+    docs = [AttachedDocument(1, "arch.md", "markdown", "cascade pipeline")]
     *_, provider, _scratch, _ua = build_pipeline_parts(make_settings(), docs)
     combined = " ".join(
         m["content"] for m in provider.build() if isinstance(m.get("content"), str)
