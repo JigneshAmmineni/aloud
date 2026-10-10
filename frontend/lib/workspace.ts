@@ -139,3 +139,75 @@ export function downloadFilename(
   if (cleaned.toLowerCase().endsWith(ext)) return cleaned;
   return cleaned + ext;
 }
+
+/* ---- list sorting (FR-54 UI) ---- */
+
+export type SortColumn =
+  | "name"
+  | "type"
+  | "source"
+  | "created"
+  | "updated"
+  | "size";
+export type SortDir = "asc" | "desc";
+
+/** Display format: plain file-type for every source (agent docs are
+ * markdown, so "md"). */
+export function formatLabel(format: string): string {
+  if (format === "markdown") return "md";
+  if (format === "text") return "txt";
+  return format;
+}
+
+const NATURAL_DESC: SortColumn[] = ["created", "updated", "size"];
+
+/** Each click sorts — never idempotent: a new column takes its natural
+ * first direction (alphabetical for text, newest/largest first for dates
+ * and size); clicking the already-active column reverses it. */
+export function nextSort(
+  current: { col: SortColumn; dir: SortDir },
+  clicked: SortColumn,
+): { col: SortColumn; dir: SortDir } {
+  if (current.col === clicked) {
+    return { col: clicked, dir: current.dir === "asc" ? "desc" : "asc" };
+  }
+  return { col: clicked, dir: NATURAL_DESC.includes(clicked) ? "desc" : "asc" };
+}
+
+function activityOf(d: WorkspaceDoc): string {
+  return d.updated_at ?? d.created_at ?? "";
+}
+
+export function sortDocs(
+  docs: WorkspaceDoc[],
+  col: SortColumn,
+  dir: SortDir,
+): WorkspaceDoc[] {
+  const sorted = [...docs].sort((a, b) => {
+    let cmp: number;
+    switch (col) {
+      case "name":
+        cmp = a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
+        break;
+      case "type":
+        cmp = formatLabel(a.format).localeCompare(formatLabel(b.format));
+        break;
+      case "source":
+        cmp = a.source.localeCompare(b.source);
+        break;
+      case "created":
+        cmp = (a.created_at ?? "").localeCompare(b.created_at ?? "");
+        break;
+      case "updated":
+        cmp = activityOf(a).localeCompare(activityOf(b));
+        break;
+      case "size":
+        cmp = a.char_count - b.char_count;
+        break;
+    }
+    // stable tie-break so equal keys keep a deterministic order
+    if (cmp === 0) cmp = a.id - b.id;
+    return dir === "asc" ? cmp : -cmp;
+  });
+  return sorted;
+}

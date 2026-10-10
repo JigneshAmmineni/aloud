@@ -151,3 +151,42 @@ describe("downloadFilename", () => {
     expect(downloadFilename("x".repeat(500), "text", 7).length).toBeLessThan(130);
   });
 });
+
+describe("sorting", () => {
+  const docs = [
+    doc({ id: 1, title: "beta", char_count: 30, format: "pdf", created_at: "2026-10-01T00:00:00Z" }),
+    doc({ id: 2, title: "Alpha", char_count: 10, format: "markdown", created_at: "2026-10-03T00:00:00Z", updated_at: "2026-10-09T00:00:00Z" }),
+    doc({ id: 3, title: "gamma", char_count: 20, format: "text", created_at: "2026-10-02T00:00:00Z" }),
+  ];
+
+  it("sorts by each column, with updated falling back to created", async () => {
+    const { sortDocs } = await import("@/lib/workspace");
+    expect(sortDocs(docs, "name", "asc").map((d) => d.title)).toEqual([
+      "Alpha",
+      "beta",
+      "gamma",
+    ]); // case-insensitive alphabetical
+    expect(sortDocs(docs, "size", "desc").map((d) => d.id)).toEqual([1, 3, 2]);
+    expect(sortDocs(docs, "created", "desc").map((d) => d.id)).toEqual([2, 3, 1]);
+    // activity: doc 2 edited Oct 9 outranks doc 3's created Oct 2
+    expect(sortDocs(docs, "updated", "desc").map((d) => d.id)).toEqual([2, 3, 1]);
+    expect(sortDocs(docs, "type", "asc").map((d) => d.format)).toEqual([
+      "markdown",
+      "pdf",
+      "text",
+    ]); // md < pdf < txt
+  });
+
+  it("nextSort is never idempotent: repeat clicks reverse", async () => {
+    const { nextSort } = await import("@/lib/workspace");
+    let s = { col: "updated", dir: "desc" } as const;
+    let s1 = nextSort(s, "name");
+    expect(s1).toEqual({ col: "name", dir: "asc" }); // alphabetical first
+    const s2 = nextSort(s1, "name");
+    expect(s2).toEqual({ col: "name", dir: "desc" }); // reverse
+    const s3 = nextSort(s2, "name");
+    expect(s3).toEqual({ col: "name", dir: "asc" }); // and back
+    const s4 = nextSort(s3, "size");
+    expect(s4).toEqual({ col: "size", dir: "desc" }); // largest first
+  });
+});

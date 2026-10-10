@@ -6,24 +6,33 @@ import { MarkdownView } from "@/components/MarkdownView";
 import {
   MAX_TOTAL_CHARS,
   attachTotal,
+  formatLabel,
+  nextSort,
+  sortDocs,
+  type SortColumn,
+  type SortDir,
   type WorkspaceDoc,
   type WorkspaceState,
 } from "@/lib/workspace";
-
-const KIND_LABELS: Record<string, string> = {
-  summary: "summary",
-  action_items: "action items",
-  cleaned_idea: "cleaned-up idea",
-};
 
 function formatChars(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
 }
 
-function badge(doc: WorkspaceDoc): string {
-  if (doc.kind) return KIND_LABELS[doc.kind] ?? doc.kind;
-  return doc.format;
+function formatDate(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? "—" : d.toLocaleDateString();
 }
+
+const SORT_LABELS: Record<SortColumn, string> = {
+  name: "Name",
+  type: "Type",
+  source: "Source",
+  created: "Created",
+  updated: "Updated",
+  size: "Size",
+};
 
 function DocRow({
   doc,
@@ -49,20 +58,35 @@ function DocRow({
   // must never be mistaken for each other.
   const [confirming, setConfirming] = useState(false);
   return (
-    <li className={`ws-item${previewed ? " previewed" : ""}`}>
-      <button type="button" className="ws-item-main" onClick={onPreview}>
-        <span className="ws-title">{doc.title}</span>
-        <span className="ws-meta">
-          {badge(doc)} · {formatChars(doc.char_count)} chars
-        </span>
+    <li className={`ws-row${previewed ? " previewed" : ""}`}>
+      <button
+        type="button"
+        className="ws-cell ws-cell-name"
+        title={doc.title}
+        onClick={onPreview}
+      >
+        {doc.title}
       </button>
-      <span className="ws-actions">
+      <span className="ws-cell ws-cell-type">{formatLabel(doc.format)}</span>
+      <span className="ws-cell ws-cell-source">
+        {doc.source === "agent" ? "agent" : "upload"}
+      </span>
+      <span className="ws-cell ws-cell-date">{formatDate(doc.created_at)}</span>
+      <span className="ws-cell ws-cell-date">
+        {formatDate(doc.updated_at ?? doc.created_at)}
+      </span>
+      <span className="ws-cell ws-cell-size">{formatChars(doc.char_count)}</span>
+      <span className="ws-cell ws-actions">
         {idle && (
           <button
             type="button"
             className={`ws-attach${attached ? " on" : ""}`}
             aria-pressed={attached}
-            title={attached ? "Detach from next session" : "Attach to next session"}
+            title={
+              attached
+                ? "Detach from next session"
+                : "Attach to next session (kept in the agent's context)"
+            }
             onClick={onToggleAttach}
           >
             {attached ? "attached" : "attach"}
@@ -100,58 +124,14 @@ function DocRow({
   );
 }
 
-function DocList({
-  heading,
-  docs,
-  empty,
-  children,
-  ...rowProps
-}: {
-  heading: string;
-  docs: WorkspaceDoc[];
-  empty: string;
-  children?: React.ReactNode;
-  idle: boolean;
-  attachedIds: number[];
-  previewId: number | null;
-  onPreview: (d: WorkspaceDoc) => void;
-  onDownload: (d: WorkspaceDoc) => void;
-  onDelete: (d: WorkspaceDoc) => void;
-  onToggleAttach: (d: WorkspaceDoc) => void;
-}) {
-  return (
-    <section className="ws-list" aria-label={heading}>
-      <h3 className="ws-heading">{heading}</h3>
-      {docs.length === 0 ? (
-        <p className="ws-empty">{empty}</p>
-      ) : (
-        <ul>
-          {docs.map((d) => (
-            <DocRow
-              key={d.id}
-              doc={d}
-              idle={rowProps.idle}
-              attached={rowProps.attachedIds.includes(d.id)}
-              previewed={rowProps.previewId === d.id}
-              onPreview={() => rowProps.onPreview(d)}
-              onDownload={() => rowProps.onDownload(d)}
-              onDelete={() => rowProps.onDelete(d)}
-              onToggleAttach={() => rowProps.onToggleAttach(d)}
-            />
-          ))}
-        </ul>
-      )}
-      {children}
-    </section>
-  );
-}
-
 /**
- * The document workspace (FR-54): two side-by-side scrollable lists —
- * Uploaded and Created — with per-item preview, download, attach toggle
- * (idle only), and delete-behind-confirm; one preview pane, one document
- * at a time. Available while idle AND during a session; only upload and
- * the attach toggle are idle-gated.
+ * The document workspace (FR-54): ONE flat, column-structured list of the
+ * user's documents (both sources), sortable by any column via the Sort
+ * dropdown — each pick sorts by that column, picking it again reverses.
+ * Per-row preview (row click), download, attach toggle (idle only), and
+ * delete-behind-confirm; one preview pane, one document at a time.
+ * Available while idle AND during a session; only upload and the attach
+ * toggle are idle-gated.
  */
 export function Workspace({
   state,
@@ -181,9 +161,13 @@ export function Workspace({
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [busy, setBusy] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [sort, setSort] = useState<{ col: SortColumn; dir: SortDir }>({
+    col: "updated",
+    dir: "desc", // newest activity first — matches the agent's own ordering
+  });
+  const [sortOpen, setSortOpen] = useState(false);
 
-  const uploaded = state.docs.filter((d) => d.source === "uploaded");
-  const created = state.docs.filter((d) => d.source === "agent");
+  const docs = sortDocs(state.docs, sort.col, sort.dir);
   const previewDoc =
     state.previewId === null
       ? null
@@ -206,54 +190,98 @@ export function Workspace({
     }
   };
 
-  const rowProps = {
-    idle,
-    attachedIds,
-    previewId: state.previewId,
-    onPreview,
-    onDownload,
-    onDelete,
-    onToggleAttach,
+  const pickSort = (col: SortColumn) => {
+    setSort((s) => nextSort(s, col));
+    setSortOpen(false);
   };
 
   return (
     <aside className="workspace" aria-label="Documents">
-      <div className="ws-lists">
-        <DocList
-          heading="Uploaded"
-          docs={uploaded}
-          empty={loading ? "loading…" : "no uploads yet"}
-          {...rowProps}
-        >
-          {idle && (
-            <>
-              <button
-                type="button"
-                className="doc-attach"
-                disabled={busy}
-                onClick={() => inputRef.current?.click()}
-              >
-                {busy ? "reading…" : "+ upload a document"}
-              </button>
-              <input
-                ref={inputRef}
-                type="file"
-                accept=".txt,.md,.markdown,.pdf,text/plain,text/markdown,application/pdf"
-                multiple
-                hidden
-                onChange={(e) => handleFiles(e.target.files)}
-              />
-              {uploadError && <p className="doc-error">{uploadError}</p>}
-            </>
+      <div className="ws-bar">
+        <h3 className="ws-heading">Documents</h3>
+        <div className="ws-sort">
+          <button
+            type="button"
+            className="ws-sort-btn"
+            aria-haspopup="menu"
+            aria-expanded={sortOpen}
+            onClick={() => setSortOpen((o) => !o)}
+          >
+            sort: {SORT_LABELS[sort.col].toLowerCase()}{" "}
+            {sort.dir === "asc" ? "↑" : "↓"}
+          </button>
+          {sortOpen && (
+            <ul className="ws-sort-menu" role="menu">
+              {(Object.keys(SORT_LABELS) as SortColumn[]).map((col) => (
+                <li key={col}>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className={`ws-sort-item${sort.col === col ? " active" : ""}`}
+                    onClick={() => pickSort(col)}
+                  >
+                    {SORT_LABELS[col]}
+                    {sort.col === col ? (sort.dir === "asc" ? " ↑" : " ↓") : ""}
+                  </button>
+                </li>
+              ))}
+            </ul>
           )}
-        </DocList>
-        <DocList
-          heading="Created"
-          docs={created}
-          empty={loading ? "loading…" : "nothing written up yet"}
-          {...rowProps}
-        />
+        </div>
       </div>
+
+      {docs.length === 0 ? (
+        <p className="ws-empty">{loading ? "loading…" : "no documents yet"}</p>
+      ) : (
+        <>
+          <div className="ws-head ws-grid" aria-hidden>
+            <span>Name</span>
+            <span>Type</span>
+            <span>Source</span>
+            <span>Created</span>
+            <span>Updated</span>
+            <span>Size</span>
+            <span />
+          </div>
+          <ul className="ws-table">
+            {docs.map((d) => (
+              <DocRow
+                key={d.id}
+                doc={d}
+                idle={idle}
+                attached={attachedIds.includes(d.id)}
+                previewed={state.previewId === d.id}
+                onPreview={() => onPreview(d)}
+                onDownload={() => onDownload(d)}
+                onDelete={() => onDelete(d)}
+                onToggleAttach={() => onToggleAttach(d)}
+              />
+            ))}
+          </ul>
+        </>
+      )}
+
+      {idle && (
+        <>
+          <button
+            type="button"
+            className="doc-attach"
+            disabled={busy}
+            onClick={() => inputRef.current?.click()}
+          >
+            {busy ? "reading…" : "+ upload a document"}
+          </button>
+          <input
+            ref={inputRef}
+            type="file"
+            accept=".txt,.md,.markdown,.pdf,text/plain,text/markdown,application/pdf"
+            multiple
+            hidden
+            onChange={(e) => handleFiles(e.target.files)}
+          />
+          {uploadError && <p className="doc-error">{uploadError}</p>}
+        </>
+      )}
       {idle && attachedIds.length > 0 && (
         <p className="ws-budget">
           attached: {formatChars(total)} / {formatChars(MAX_TOTAL_CHARS)} chars
