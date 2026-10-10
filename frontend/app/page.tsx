@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { signOut } from "firebase/auth";
@@ -26,6 +26,7 @@ export default function Home() {
   const router = useRouter();
   const { user, loading, isAdmin } = useAuth();
   const workspace = useWorkspace(!loading && !!user);
+  const [docsOpen, setDocsOpen] = useState(false);
   const {
     state,
     mode,
@@ -48,6 +49,14 @@ export default function Home() {
   return (
     <main className="stage">
       <nav className="topnav" aria-label="account">
+        <button
+          type="button"
+          className="login-link"
+          aria-expanded={docsOpen}
+          onClick={() => setDocsOpen((o) => !o)}
+        >
+          Documents
+        </button>
         {isAdmin && (
           <Link className="login-link" href="/admin">
             Admin
@@ -84,9 +93,11 @@ export default function Home() {
 
       {/* FR-54: the workspace and preview are available while idle AND
           during a session; only upload and the attach toggle are idle-gated. */}
+      {docsOpen && (
       <Workspace
         state={workspace.state}
         idle={state === "idle"}
+        onClose={() => setDocsOpen(false)}
         attachedIds={workspace.attachedIds}
         loading={workspace.loading}
         error={workspace.error}
@@ -97,6 +108,7 @@ export default function Home() {
         onToggleAttach={workspace.toggleAttach}
         onUpload={workspace.upload}
       />
+      )}
 
       <footer className="foot" aria-hidden>
         <span>aloud</span>

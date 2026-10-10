@@ -289,7 +289,8 @@ body::after {
   top: 0;
   right: 0;
   height: 100dvh;
-  width: min(380px, 88vw);
+  width: min(620px, 92vw);
+  overflow-x: hidden;
   padding: 28px 24px 40px;
   overflow-y: auto;
   background: linear-gradient(180deg, #1c1916, #171411);
@@ -328,6 +329,26 @@ body::after {
 
 .ws-sort {
   position: relative;
+}
+
+.ws-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ws-close {
+  border: none;
+  background: none;
+  color: var(--ink-dim);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.ws-close:hover {
+  color: var(--ink);
 }
 
 .ws-sort-btn {
@@ -392,9 +413,15 @@ body::after {
 /* one flat, column-structured list (no cards) */
 .ws-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 34px 52px 74px 74px 44px minmax(96px, auto);
+  grid-template-columns: minmax(120px, 1fr) 32px 52px 62px 62px 42px 118px;
   gap: 8px;
   align-items: center;
+}
+
+.ws-head span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ws-head {
@@ -414,7 +441,7 @@ body::after {
 
 .ws-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 34px 52px 74px 74px 44px minmax(96px, auto);
+  grid-template-columns: minmax(120px, 1fr) 32px 52px 62px 62px 42px 118px;
   gap: 8px;
   align-items: center;
   padding: 7px 4px;
@@ -632,7 +659,7 @@ body::after {
   }
   .ws-grid,
   .ws-row {
-    grid-template-columns: minmax(0, 1fr) 74px 44px minmax(96px, auto);
+    grid-template-columns: minmax(0, 1fr) 62px 42px 118px;
   }
   .ws-cell-type,
   .ws-cell-source,

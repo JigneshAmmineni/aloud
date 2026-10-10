@@ -22,7 +22,13 @@ function formatChars(n: number): string {
 function formatDate(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = new Date(iso);
-  return isNaN(d.getTime()) ? "—" : d.toLocaleDateString();
+  if (isNaN(d.getTime())) return "—";
+  // short form (10/9/26) so the column tracks stay narrow
+  return d.toLocaleDateString(undefined, {
+    month: "numeric",
+    day: "numeric",
+    year: "2-digit",
+  });
 }
 
 const SORT_LABELS: Record<SortColumn, string> = {
@@ -139,6 +145,7 @@ export function Workspace({
   attachedIds,
   loading,
   error,
+  onClose,
   onPreview,
   onClosePreview,
   onDownload,
@@ -146,6 +153,7 @@ export function Workspace({
   onToggleAttach,
   onUpload,
 }: {
+  onClose: () => void;
   state: WorkspaceState;
   idle: boolean;
   attachedIds: number[];
@@ -199,6 +207,7 @@ export function Workspace({
     <aside className="workspace" aria-label="Documents">
       <div className="ws-bar">
         <h3 className="ws-heading">Documents</h3>
+        <div className="ws-bar-right">
         <div className="ws-sort">
           <button
             type="button"
@@ -227,6 +236,15 @@ export function Workspace({
               ))}
             </ul>
           )}
+        </div>
+        <button
+          type="button"
+          className="ws-close"
+          aria-label="Close documents"
+          onClick={onClose}
+        >
+          ×
+        </button>
         </div>
       </div>
 
