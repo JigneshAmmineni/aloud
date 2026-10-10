@@ -242,10 +242,14 @@ async def _read_document(args: dict, ctx: ToolContext) -> dict:
 
 
 async def _search_documents(args: dict, ctx: ToolContext) -> dict:
-    query = str(args.get("query", "")).strip()
-    if not query:
-        # FR-53.3: an empty query would ILIKE '%%' everything into a "match"
-        # and divide the count primitive by zero
+    query = str(args.get("query", ""))
+    # FR-53.3: non-empty AFTER stripping is a validation rule, not a
+    # mandate to mutate the term — the searched string must stay
+    # byte-identical to what the model asked for, or exact_matches stops
+    # transferring to an old_str that keeps its whitespace
+    if not query.strip():
+        # empty would ILIKE '%%' everything into a "match" and divide the
+        # count primitive by zero
         return {"status": "error", "error": "search needs a term"}
     document_id = args.get("document_id")
     log = logger.bind(session_id=ctx.session_id, component="agent.tools")
@@ -264,6 +268,7 @@ async def _search_documents(args: dict, ctx: ToolContext) -> dict:
             return {
                 "scope": "document",
                 "document_id": document_id,
+                "query": query,  # echoed verbatim — the transfer boundary
                 "matches": [
                     {"line": m.line, "snippet": m.snippet} for m in res.matches
                 ],
@@ -284,6 +289,7 @@ async def _search_documents(args: dict, ctx: ToolContext) -> dict:
         return {"status": "error", "error": "could not search the documents"}
     out = {
         "scope": "workspace",
+        "query": query,  # echoed verbatim
         "results": [
             {
                 "document_id": h.id,
@@ -314,7 +320,12 @@ async def _search_documents(args: dict, ctx: ToolContext) -> dict:
     return out
 
 
-def _steer_from_diagnosis(diag: EditDiagnosis, document_id: int, old_str: str | None) -> dict:
+def _steer_from_diagnosis(
+    diag: EditDiagnosis,
+    document_id: int,
+    old_str: str | None,
+    insert_line: int | None = None,
+) -> dict:
     """The diagnostic's stated precedence, rendered as steering text —
     always the nearest actionable obstacle."""
     if diag.reason == "not_found":
@@ -358,8 +369,8 @@ def _steer_from_diagnosis(diag: EditDiagnosis, document_id: int, old_str: str | 
         return {
             "status": "refused",
             "error": (
-                f"Invalid `insert_line`. It should be within "
-                f"[0, {diag.total_lines}]."
+                f"Invalid `insert_line`: {insert_line}. It should be "
+                f"within [0, {diag.total_lines}]."
             ),
         }
     if diag.reason == "over_ceiling":
@@ -455,7 +466,9 @@ async def _edit_document(args: dict, ctx: ToolContext) -> dict:
                     ctx.user_id, document_id, ceiling=MAX_DOC_CHARS,
                     insert_line=insert_line, insert_text=text_to_insert,
                 )
-                return _steer_from_diagnosis(diag, document_id, None)
+                return _steer_from_diagnosis(
+                    diag, document_id, None, insert_line=insert_line
+                )
 
         elif mode == "append":
             content = str(args.get("content", ""))

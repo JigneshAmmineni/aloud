@@ -51,6 +51,7 @@ from app.auth import AuthedUser, get_current_user_checked, get_current_user_id
 from app.config import load_settings
 from app.documents import (
     EXTRACT_SEMAPHORE,
+    MAX_FILE_BYTES,
     MAX_TOTAL_CHARS,
     DocumentError,
     extract_text,
@@ -223,7 +224,11 @@ async def upload_document(
     account's first action a foreign-key 500 — and because it provisions and
     writes persistent rows it verifies with check_revoked (FR-29)."""
     await provision_user(user.user_id, user.name)
-    data = await file.read()
+    # Bounded read: never materialize more than the cap + 1 byte — an
+    # unbounded read() of an authed 1 GB POST would take a 2 GB VM (and
+    # every live session) with it. One extra byte lets extract_text's
+    # size check fire with its normal message.
+    data = await file.read(MAX_FILE_BYTES + 1)
     filename = file.filename or "document"
     try:
         # Threadpool: pypdf is synchronous CPU work that must not occupy the

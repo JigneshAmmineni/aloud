@@ -147,7 +147,10 @@ _NOW = datetime.now(timezone.utc)
 
 async def _seed_two_users():
     """Two users, each with a session + usage event + turn metric +
-    transcript event + artifact, inserted through their own scoped context."""
+    transcript event + artifact + document, inserted through their own
+    scoped context (test (d)'s documents half must have a row of its OWN
+    to fail on — depending on another test file's leftovers proves
+    nothing in isolation)."""
     uid_a, uid_b = f"adm-a-{uuid.uuid4()}", f"adm-b-{uuid.uuid4()}"
     sess_a, sess_b = f"s-{uuid.uuid4()}", f"s-{uuid.uuid4()}"
     await init_db(PG_URL)
@@ -171,6 +174,13 @@ async def _seed_two_users():
                 TranscriptEvent(
                     session_id=sess, user_id=uid, ts=_NOW, role="user",
                     kind="final_transcript", text="private words",
+                )
+            )
+            db.add(
+                Document(
+                    user_id=uid, session_id=sess, source="agent",
+                    format="markdown", kind="summary",
+                    title="private doc", content="private body",
                 )
             )
             db.add(

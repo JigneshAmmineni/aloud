@@ -42,13 +42,14 @@ def notify_document_deleted(user_id: str, document_id: int) -> None:
     """FR-52: a destroyed row must stop shipping from EVERY live session of
     its owner — the block is re-sent on every step, so a stale section would
     keep 🔒 content the user destroyed in play for the rest of the session."""
-    for provider in live_providers_for(user_id):
+    providers = live_providers_for(user_id)
+    for provider in providers:
         provider.remove_document_section(document_id)
     logger.bind(
         component="agent.registry",
         event="registry.document_deleted",
         document_id=document_id,
-        notified=len(live_providers_for(user_id)),
+        notified=len(providers),
     ).info("delete propagated to live sessions")
 
 

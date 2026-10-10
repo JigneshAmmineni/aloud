@@ -117,12 +117,16 @@ describe("markDeleted", () => {
 });
 
 describe("rehydrate", () => {
-  it("replaces the list with server truth and clears tombstones — a reload shows server truth", () => {
+  it("keeps tombstones across a mid-session refresh and filters them out", () => {
+    // refresh runs after every upload; clearing tombstones there would
+    // re-open the resurrection window a late detached write exploits
     let state = rehydrate(emptyWorkspace, [doc({ id: 1 }), doc({ id: 2 })]);
     state = markDeleted(state, 1);
-    state = rehydrate(state, [doc({ id: 2 }), doc({ id: 3 })]);
-    expect(state.docs.map((d) => d.id)).toEqual([2, 3]);
-    expect(state.deletedIds).toEqual([]);
+    state = rehydrate(state, [doc({ id: 1 }), doc({ id: 2 }), doc({ id: 3 })]);
+    expect(state.docs.map((d) => d.id)).toEqual([2, 3]); // 1 stays dead
+    expect(state.deletedIds).toEqual([1]);
+    // a REAL reload starts from empty state, so server truth still rules
+    expect(rehydrate(emptyWorkspace, [doc({ id: 1 })]).docs).toHaveLength(1);
   });
 
   it("keeps the preview only while its document still exists", () => {

@@ -99,6 +99,8 @@ export default function Home() {
         idle={state === "idle"}
         onClose={() => setDocsOpen(false)}
         attachedIds={workspace.attachedIds}
+        attachedChars={workspace.attachedChars}
+        previewFailed={workspace.previewFailed}
         total={workspace.total}
         onLoadMore={workspace.loadMore}
         loading={workspace.loading}

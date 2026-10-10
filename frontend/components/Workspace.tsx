@@ -5,7 +5,6 @@ import { useRef, useState } from "react";
 import { MarkdownView } from "@/components/MarkdownView";
 import {
   MAX_TOTAL_CHARS,
-  attachTotal,
   formatLabel,
   nextSort,
   sortDocs,
@@ -143,9 +142,11 @@ export function Workspace({
   state,
   idle,
   attachedIds,
+  attachedChars,
   total,
   loading,
   error,
+  previewFailed,
   onClose,
   onLoadMore,
   onPreview,
@@ -157,6 +158,8 @@ export function Workspace({
 }: {
   onClose: () => void;
   total: number;
+  attachedChars: number;
+  previewFailed: boolean;
   onLoadMore: () => void;
   state: WorkspaceState;
   idle: boolean;
@@ -184,7 +187,6 @@ export function Workspace({
     state.previewId === null
       ? null
       : (state.docs.find((d) => d.id === state.previewId) ?? null);
-  const attachedChars = attachTotal(state.docs, attachedIds);
 
   const handleFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
@@ -329,7 +331,11 @@ export function Workspace({
               ×
             </button>
           </header>
-          {state.previewContent === null ? (
+          {previewFailed ? (
+            <p className="doc-error">
+              couldn't load this document — close and try again
+            </p>
+          ) : state.previewContent === null ? (
             <p className="ws-empty">loading…</p>
           ) : previewDoc.format === "markdown" ? (
             <MarkdownView content={state.previewContent} />

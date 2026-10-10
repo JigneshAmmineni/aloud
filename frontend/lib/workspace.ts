@@ -41,19 +41,23 @@ export const emptyWorkspace: WorkspaceState = {
   previewContent: null,
 };
 
-/** Reload / fresh visit: the lists are server-backed truth (FR-55) —
- * replaces the docs wholesale and clears tombstones (the server already
- * reflects real deletes). An open preview survives only if its document
- * still exists. */
+/** Refresh from server truth (FR-55). Tombstones SURVIVE and filter the
+ * fetched rows: refresh also runs mid-session (after every upload), and
+ * clearing them there would re-open the resurrection window — delete 42,
+ * upload a file, and a late detached write's announce for 42 would insert
+ * the card back. A real reload starts from empty state, so "reload shows
+ * server truth" still holds. An open preview survives only if its
+ * document still exists. */
 export function rehydrate(
   state: WorkspaceState,
   docs: WorkspaceDoc[],
 ): WorkspaceState {
+  const kept = docs.filter((d) => !state.deletedIds.includes(d.id));
   const previewAlive =
-    state.previewId !== null && docs.some((d) => d.id === state.previewId);
+    state.previewId !== null && kept.some((d) => d.id === state.previewId);
   return {
-    docs,
-    deletedIds: [],
+    docs: kept,
+    deletedIds: state.deletedIds,
     previewId: previewAlive ? state.previewId : null,
     previewContent: previewAlive ? state.previewContent : null,
   };
