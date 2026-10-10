@@ -51,6 +51,7 @@ from app.config import load_settings
 from app.documents import DocumentError, document_store, extract_text
 from app.ratelimit import rate_limited
 from db.engine import init_db, retire_bootstrap_engine
+from db.migrations import migrate_artifacts_to_documents
 from db.sessions_repo import session_is_active, sweep_orphaned_sessions
 from db.users_repo import provision_user
 
@@ -96,6 +97,10 @@ def _install_sigterm_goodbye() -> None:
 async def lifespan(app: FastAPI):
     auth.configure(settings.firebase_service_account_path)
     await init_db(settings.database_url)
+    # FR-50: run-once artifacts→documents copy, pre-serve in the
+    # RLS-bootstrap slot — before the sweep so a failed copy fails boot
+    # before anything else writes.
+    await migrate_artifacts_to_documents()
     # FR-32 boot sweep: close sessions orphaned by the previous process's
     # death and emit their inferred STT usage — before serving traffic.
     await sweep_orphaned_sessions()

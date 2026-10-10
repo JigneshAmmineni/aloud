@@ -41,7 +41,8 @@ APP_ROLE = "aloud_app"
 _RLS_TABLES = (
     "sessions",
     "transcript_events",
-    "artifacts",
+    "artifacts",  # until the §4.11 drop release: still holds 🔒 rows
+    "documents",
     "usage_events",
     "turn_metrics",
     "llm_traces",
@@ -126,9 +127,11 @@ async def _bootstrap_rls(engine: AsyncEngine, app_password: str) -> None:
         END $$;
         """,
         f"GRANT USAGE ON SCHEMA public TO {APP_ROLE};",
+        # schema_migrations is deliberately absent: only the bootstrap
+        # engine writes markers (FR-50), so the app role holds no grant.
         f"GRANT SELECT, INSERT, UPDATE, DELETE ON users, sessions,"
-        f" transcript_events, artifacts, usage_events, turn_metrics,"
-        f" llm_traces TO {APP_ROLE};",
+        f" transcript_events, artifacts, documents, usage_events,"
+        f" turn_metrics, llm_traces TO {APP_ROLE};",
         f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {APP_ROLE};",
         # Pre-auth databases: add columns create_all won't retrofit.
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_name VARCHAR(80);",

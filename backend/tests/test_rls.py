@@ -21,6 +21,7 @@ from app.auth import AuthedUser
 from db.engine import init_db, session_factory, user_scoped_session
 from db.models import (
     Artifact,
+    Document,
     LLMTrace,
     Session,
     TranscriptEvent,
@@ -215,6 +216,7 @@ def test_admin_context_reads_scoped_tables_never_content_tables():
                 TurnMetric,
                 TranscriptEvent,
                 Artifact,
+                Document,
                 LLMTrace,
             ):
                 assert (await db.execute(select(model))).scalars().all() == []
@@ -229,8 +231,10 @@ def test_admin_context_reads_scoped_tables_never_content_tables():
                 assert {uid_a, uid_b} <= users
 
             # (d) ...and ZERO rows from the content tables, even here —
-            # llm_traces is content (FR-49: no admin surface renders a trace)
-            for model in (TranscriptEvent, Artifact, LLMTrace):
+            # llm_traces is content (FR-49: no admin surface renders a
+            # trace). §4.11: documents joins; artifacts stays covered until
+            # its drop release (an empty-leftover-only test proves nothing).
+            for model in (TranscriptEvent, Artifact, Document, LLMTrace):
                 assert (await db.execute(select(model))).scalars().all() == []
 
     asyncio.run(run())
