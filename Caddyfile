@@ -10,8 +10,10 @@
 	# The site-wide basic_auth gate is gone: real per-user auth (Firebase,
 	# REQUIREMENTS §4.8) now gates every API route in the backend itself.
 
-	# signaling + health → backend; everything else → frontend
-	@backend path /api/* /start /sessions/* /healthz
+	# signaling + documents + health → backend; everything else → frontend
+	# (FR-52: prod previously reached the upload endpoint only through
+	# Next's rewrite hop — the workspace routes are matched directly)
+	@backend path /api/* /start /sessions/* /documents /documents/* /healthz
 	handle @backend {
 		reverse_proxy localhost:7860
 	}

@@ -5,13 +5,13 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { signOut } from "firebase/auth";
 
-import { ArtifactsPanel } from "@/components/ArtifactsPanel";
-import { DocumentUpload } from "@/components/DocumentUpload";
 import { SessionButton } from "@/components/SessionButton";
 import { WaveformBar } from "@/components/WaveformBar";
+import { Workspace } from "@/components/Workspace";
 import { useAuth } from "@/lib/auth";
 import { auth } from "@/lib/firebase";
 import { useAloudSession } from "@/lib/useAloudSession";
+import { useWorkspace } from "@/lib/useWorkspace";
 
 const STATUS: Record<string, string> = {
   idle: "tap to start thinking out loud",
@@ -25,19 +25,16 @@ const STATUS: Record<string, string> = {
 export default function Home() {
   const router = useRouter();
   const { user, loading, isAdmin } = useAuth();
+  const workspace = useWorkspace(!loading && !!user);
   const {
     state,
     mode,
     error,
     localTrack,
     botTrack,
-    artifacts,
-    documents,
-    uploadDocument,
-    removeDocument,
     talk,
     end,
-  } = useAloudSession();
+  } = useAloudSession({ onDocumentAnnounce: workspace.handleAnnounce });
 
   // FR-30: unauthenticated visits land on /login.
   useEffect(() => {
@@ -69,10 +66,12 @@ export default function Home() {
         <p className="tagline">a place to work out loud</p>
       </header>
 
-      <ArtifactsPanel artifacts={artifacts} />
-
       <div className="core">
-        <SessionButton state={state} onTalk={talk} onEnd={end} />
+        <SessionButton
+          state={state}
+          onTalk={() => talk(workspace.attachedIds)}
+          onEnd={end}
+        />
         <WaveformBar
           active={state === "active"}
           mode={mode}
@@ -81,14 +80,23 @@ export default function Home() {
         />
         <p className={`status ${state === "active" ? mode : state}`}>{status}</p>
         {error && <p className="error">{error}</p>}
-        {state === "idle" && (
-          <DocumentUpload
-            documents={documents}
-            onUpload={uploadDocument}
-            onRemove={removeDocument}
-          />
-        )}
       </div>
+
+      {/* FR-54: the workspace and preview are available while idle AND
+          during a session; only upload and the attach toggle are idle-gated. */}
+      <Workspace
+        state={workspace.state}
+        idle={state === "idle"}
+        attachedIds={workspace.attachedIds}
+        loading={workspace.loading}
+        error={workspace.error}
+        onPreview={workspace.preview}
+        onClosePreview={workspace.closePreview}
+        onDownload={workspace.download}
+        onDelete={workspace.deleteDoc}
+        onToggleAttach={workspace.toggleAttach}
+        onUpload={workspace.upload}
+      />
 
       <footer className="foot" aria-hidden>
         <span>aloud</span>
