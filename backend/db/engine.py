@@ -49,7 +49,8 @@ _RLS_TABLES = (
 )
 
 # FR-38: ONLY these tables' FOR SELECT policies carry the admin escape.
-# The content-bearing tables (transcript_events, artifacts) never do —
+# The content-bearing tables (transcript_events, documents, and artifacts
+# until its drop release) never do —
 # admin context reads zero rows from them, backing NFR-9 at the DB layer.
 _ADMIN_READ_TABLES = ("sessions", "usage_events", "turn_metrics")
 

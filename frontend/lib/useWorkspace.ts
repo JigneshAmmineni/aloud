@@ -34,6 +34,7 @@ async function fetchContent(id: number): Promise<string | null> {
 export function useWorkspace(enabled: boolean) {
   const [state, setState] = useState<WorkspaceState>(emptyWorkspace);
   const [attachedIds, setAttachedIds] = useState<number[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // the reducer decides WHETHER to refetch; the effect below does the IO
@@ -43,8 +44,12 @@ export function useWorkspace(enabled: boolean) {
     try {
       const res = await authedFetch("/documents");
       if (!res.ok) throw new Error();
-      const body = (await res.json()) as { documents: WorkspaceDoc[] };
+      const body = (await res.json()) as {
+        documents: WorkspaceDoc[];
+        total: number;
+      };
       setState((s) => rehydrate(s, body.documents));
+      setTotal(body.total);
       setError(null);
     } catch {
       setError("couldn't load your documents");
@@ -92,6 +97,25 @@ export function useWorkspace(enabled: boolean) {
     setState((s) => setPreview(s, null));
   }, []);
 
+  /** FR-52's continuation: a migrated corpus can exceed the page the
+   * first fetch returned — "show older" appends the next offset page. */
+  const loadMore = useCallback(async () => {
+    const res = await authedFetch(`/documents?offset=${state.docs.length}`);
+    if (!res.ok) return;
+    const body = (await res.json()) as {
+      documents: WorkspaceDoc[];
+      total: number;
+    };
+    setTotal(body.total);
+    setState((s) => {
+      const known = new Set(s.docs.map((d) => d.id));
+      return {
+        ...s,
+        docs: [...s.docs, ...body.documents.filter((d) => !known.has(d.id))],
+      };
+    });
+  }, [state.docs.length]);
+
   const upload = useCallback(
     async (file: File) => {
       const form = new FormData();
@@ -104,10 +128,29 @@ export function useWorkspace(enabled: boolean) {
           .catch(() => null);
         throw new Error(detail || "couldn't read that file");
       }
+      // FR-51 (preserved from v1): this visit's uploads enter the attach
+      // set by default — upload then Talk must reach the agent with no
+      // second tap. The budget refusal still guards the edge.
+      const doc = (await res.json()) as {
+        id: number;
+        char_count: number;
+      };
+      setAttachedIds((ids) => {
+        if (ids.includes(doc.id)) return ids;
+        const used = attachTotal(state.docs, ids);
+        if (used + doc.char_count > MAX_TOTAL_CHARS) {
+          setError(
+            "uploaded, but not attached — the attach set is at its " +
+              "character budget",
+          );
+          return ids;
+        }
+        return [...ids, doc.id];
+      });
       // FR-54: uploads surface immediately; the list itself is server truth
       await refresh();
     },
-    [refresh],
+    [refresh, state.docs],
   );
 
   const deleteDoc = useCallback(async (doc: WorkspaceDoc) => {
@@ -158,15 +201,23 @@ export function useWorkspace(enabled: boolean) {
     const a = document.createElement("a");
     a.href = url;
     a.download = downloadFilename(doc.title, doc.format, doc.id);
+    // iOS Safari (NFR-3): the anchor must be in the document, and revoking
+    // in the same task as click() cancels the save
+    document.body.appendChild(a);
     a.click();
-    URL.revokeObjectURL(url);
+    setTimeout(() => {
+      a.remove();
+      URL.revokeObjectURL(url);
+    }, 1000);
   }, []);
 
   return {
     state,
     attachedIds,
+    total,
     loading,
     error,
+    loadMore,
     handleAnnounce,
     preview,
     closePreview,

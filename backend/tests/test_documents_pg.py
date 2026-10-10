@@ -110,11 +110,34 @@ def test_workspace_search_results_cap_discloses_truncation():
     async def run():
         await init_db(PG_URL)
         await provision_user(uid, None)
+        rows = []
         for i in range(SEARCH_RESULTS_CAP + 2):
-            await insert_upload_row(uid, f"n{i}.txt", "text", "needle here")
+            rows.append(
+                await insert_upload_row(uid, f"n{i}.txt", "text", "needle here")
+            )
+        # touch the OLDEST row: the cap must keep the most recently ACTIVE
+        # documents, not the newest ids
+        from datetime import datetime, timezone
+
+        from sqlalchemy import update
+
+        from db.engine import user_scoped_session
+        from db.models import Document
+
+        async with user_scoped_session(uid) as db:
+            await db.execute(
+                update(Document)
+                .where(Document.id == rows[0].id)
+                .values(updated_at=datetime.now(timezone.utc))
+            )
+            await db.commit()
+
         res = await search_workspace(uid, "needle")
         assert len(res.hits) == SEARCH_RESULTS_CAP
         assert res.documents_matched == SEARCH_RESULTS_CAP + 2  # not silent
+        kept = {h.id for h in res.hits}
+        assert rows[0].id in kept  # just-touched oldest id survives the cap
+        assert rows[1].id not in kept  # the stale one drops instead
 
     asyncio.run(run())
 

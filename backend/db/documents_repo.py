@@ -487,7 +487,8 @@ async def search_workspace(user_id: str, query: str) -> WorkspaceSearchResult:
     sql = text(
         r"""
         WITH scanned AS (
-            SELECT id, title, kind, format, content
+            SELECT id, title, kind, format, content,
+                   COALESCE(updated_at, created_at) AS activity
             FROM documents
             WHERE user_id = :uid
             ORDER BY COALESCE(updated_at, created_at) DESC, id DESC
@@ -519,7 +520,7 @@ async def search_workspace(user_id: str, query: str) -> WorkspaceSearchResult:
             ELSE 0 END AS match_count,
             count(*) OVER () AS documents_matched
         FROM hits
-        ORDER BY COALESCE(id, id) DESC
+        ORDER BY activity DESC, id DESC
         LIMIT :results_cap
         """
     )
@@ -728,6 +729,10 @@ async def str_replace_document(
     replace_all), and the growth ceiling; SET replaces in the same single
     statement. None = refused or missing — the caller runs the diagnostic.
     The counting predicate is portable (length/replace exist in SQLite)."""
+    if replace_all and (expected_occurrences is None or expected_occurrences < 1):
+        # the tool layer validates too; a NULL here would render a
+        # count-IS-NULL predicate that silently always refuses
+        raise ValueError("replace_all requires expected_occurrences >= 1")
     required = expected_occurrences if replace_all else 1
     count_expr = (
         func.length(Document.content)
@@ -941,6 +946,7 @@ async def diagnose_edit_failure(
     required: int | None = None,
     insert_line: int | None = None,
     insert_text: str | None = None,
+    replace_len: int | None = None,
 ) -> EditDiagnosis:
     """The read-only diagnostic after a failed UPDATE (explicitly permitted:
     a refused write wrote nothing). The base read is portable; the
@@ -1041,8 +1047,14 @@ async def diagnose_edit_failure(
             return EditDiagnosis(
                 reason="bad_line", format=format, total_lines=total_lines
             )
+        # each mode's own growth arithmetic — replace swaps the whole
+        # content, so insert's cur_len + len + 1 would mis-steer a small
+        # replacement on a large row to "at its size limit"
+        if replace_len is not None and replace_len > cap:
+            return EditDiagnosis(reason="over_ceiling", format=format)
         if (
-            insert_text is not None
+            replace_len is None
+            and insert_text is not None
             and cur_len + len(insert_text) + 1 > cap
         ):
             return EditDiagnosis(reason="over_ceiling", format=format)

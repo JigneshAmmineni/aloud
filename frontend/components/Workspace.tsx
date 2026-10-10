@@ -143,9 +143,11 @@ export function Workspace({
   state,
   idle,
   attachedIds,
+  total,
   loading,
   error,
   onClose,
+  onLoadMore,
   onPreview,
   onClosePreview,
   onDownload,
@@ -154,6 +156,8 @@ export function Workspace({
   onUpload,
 }: {
   onClose: () => void;
+  total: number;
+  onLoadMore: () => void;
   state: WorkspaceState;
   idle: boolean;
   attachedIds: number[];
@@ -180,7 +184,7 @@ export function Workspace({
     state.previewId === null
       ? null
       : (state.docs.find((d) => d.id === state.previewId) ?? null);
-  const total = attachTotal(state.docs, attachedIds);
+  const attachedChars = attachTotal(state.docs, attachedIds);
 
   const handleFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
@@ -276,6 +280,11 @@ export function Workspace({
               />
             ))}
           </ul>
+          {state.docs.length < total && (
+            <button type="button" className="ws-more" onClick={onLoadMore}>
+              show older ({total - state.docs.length} more)
+            </button>
+          )}
         </>
       )}
 
@@ -302,7 +311,7 @@ export function Workspace({
       )}
       {idle && attachedIds.length > 0 && (
         <p className="ws-budget">
-          attached: {formatChars(total)} / {formatChars(MAX_TOTAL_CHARS)} chars
+          attached: {formatChars(attachedChars)} / {formatChars(MAX_TOTAL_CHARS)} chars
         </p>
       )}
       {error && <p className="doc-error">{error}</p>}

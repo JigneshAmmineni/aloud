@@ -407,3 +407,67 @@ def test_documents_rate_limit_is_per_user(client, auth_as):
         "/documents", files={"file": ("b.txt", b"y", "text/plain")}
     )
     assert resp.status_code == 200
+
+
+def test_upload_provisions_the_users_row(client, auth_as):
+    """FR-51/24: uploads precede /start, so POST /documents must provision —
+    SQLite doesn't enforce the FK, so without this assert removing
+    provision_user keeps CI green while prod 500s a new account's first
+    action."""
+    import asyncio
+
+    from sqlalchemy import select
+
+    from db.engine import session_factory
+    from db.models import User
+
+    auth_as("uid-fresh-upload")
+    assert (
+        client.post(
+            "/documents", files={"file": ("a.txt", b"hi", "text/plain")}
+        ).status_code
+        == 200
+    )
+
+    async def check():
+        async with session_factory()() as db:
+            row = (
+                await db.execute(select(User).where(User.id == "uid-fresh-upload"))
+            ).scalar_one_or_none()
+        assert row is not None
+
+    asyncio.run(check())
+
+
+def test_delete_route_reconciles_live_sessions(client, auth_as):
+    """FR-52's seam end-to-end: DELETE /documents/{id} drives
+    notify_document_deleted into every registered provider of the owner —
+    the destroyed row must stop shipping from live attach blocks."""
+    import agent.registry as registry_mod
+
+    class FakeProvider:
+        def __init__(self):
+            self.removed = []
+
+        def remove_document_section(self, doc_id):
+            self.removed.append(doc_id)
+            return True
+
+        def update_document_section(self, *a):
+            return True
+
+    auth_as("uid-del-live")
+    up = client.post(
+        "/documents", files={"file": ("gone.txt", b"bye", "text/plain")}
+    ).json()
+
+    mine, other_user = FakeProvider(), FakeProvider()
+    registry_mod.register_provider("s-live-1", "uid-del-live", mine)
+    registry_mod.register_provider("s-live-2", "uid-other", other_user)
+    try:
+        assert client.delete(f"/documents/{up['id']}").json() == {"deleted": True}
+        assert mine.removed == [up["id"]]
+        assert other_user.removed == []  # never another user's sessions
+    finally:
+        registry_mod.unregister_provider("s-live-1")
+        registry_mod.unregister_provider("s-live-2")

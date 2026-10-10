@@ -567,6 +567,23 @@ body::after {
   cursor: pointer;
 }
 
+.ws-more {
+  border: none;
+  background: none;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+  padding: 8px 4px;
+  text-align: left;
+}
+
+.ws-more:hover {
+  color: var(--ink);
+}
+
 .ws-budget {
   font-size: 10px;
   letter-spacing: 0.12em;

@@ -142,9 +142,16 @@ async def _create_document(args: dict, ctx: ToolContext) -> dict:
 
 
 async def _list_documents(args: dict, ctx: ToolContext) -> dict:
+    page = args.get("page")
+    try:
+        page = max(1, int(page)) if page is not None else 1
+    except (TypeError, ValueError):
+        return {"status": "error", "error": "page must be an integer"}
     try:
         items, total = await list_workspace_rows(
-            ctx.user_id, cap=LIST_DOCUMENTS_CAP
+            ctx.user_id,
+            offset=(page - 1) * LIST_DOCUMENTS_CAP,
+            cap=LIST_DOCUMENTS_CAP,
         )
     except Exception as e:
         # a DB blip is a tool RESULT, never a raised turn (round-4 rule);
@@ -169,6 +176,10 @@ async def _list_documents(args: dict, ctx: ToolContext) -> dict:
         ],
         "count": len(items),
         "total": total,
+        "page": page,
+        # FR-53.1: three caps otherwise compose into an unreachable region
+        # (20 listed, 50 scanned, 200 permitted)
+        "total_pages": max(1, -(-total // LIST_DOCUMENTS_CAP)),
     }
 
 
@@ -488,7 +499,7 @@ async def _edit_document(args: dict, ctx: ToolContext) -> dict:
             if row is None:
                 diag = await diagnose_edit_failure(
                     ctx.user_id, document_id, ceiling=MAX_DOC_CHARS,
-                    insert_text=content,
+                    replace_len=len(content),
                 )
                 if diag.reason == "unknown":
                     # gone or grown past the cap since the read
@@ -561,9 +572,19 @@ def build_registry() -> list[Tool]:
                 "List the user's recent documents — their uploads and your "
                 "write-ups, including past sessions: id, title, source, "
                 "kind, format, size, timestamps. Use when the user refers "
-                "to an earlier document, to find its id."
+                "to an earlier document, to find its id. Pages of 20, "
+                "newest activity first; pass page to reach older documents "
+                "(total_pages comes back in the result)."
             ),
-            parameters={"type": "object", "properties": {}},
+            parameters={
+                "type": "object",
+                "properties": {
+                    "page": {
+                        "type": "integer",
+                        "description": "1-based page (default 1).",
+                    }
+                },
+            },
             handler=_list_documents,
             is_write=False,
         ),

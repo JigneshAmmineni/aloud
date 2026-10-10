@@ -2177,13 +2177,17 @@ asking to delete by voice.
   end-to-end; and the NFR-8 negative (user A's search never returns
   user B's rows).
 - **FR-54** The workspace UI replaces the fixed artifact drawer and the
-  bare upload list on the session console: a workspace region with
-  **two side-by-side scrollable lists** — **Uploaded**
-  (`source='uploaded'`) and **Created** (`source='agent'`) — populated
-  from `GET /documents` when a signed-in user loads the page. Each item
-  shows title, kind/format badge, and timestamp (uploads add char
-  count), with per-item **preview** and **download** affordances
-  (memory.md §11's decided UI). Selecting an item opens the **single
+  bare upload list on the session console: a workspace panel behind a
+  **Documents toggle** (opens from the top nav, closes from the panel),
+  holding **one flat, column-structured list of both sources** —
+  columns Name, Type (the plain file type for every source: md/txt/pdf),
+  Source, Created, Updated, Size (chars — the attach budget's unit) —
+  populated from `GET /documents` when a signed-in user loads the page,
+  newest activity first, with a **sort control** over those columns
+  (picking a column sorts by it, picking the active one reverses —
+  never idempotent) and the FR-52 continuation surfaced as "show
+  older" whenever `total` exceeds the rendered rows. Per-item
+  **preview** and **download** affordances ride each row. Selecting an item opens the **single
   preview pane** — one document at a time, whichever was selected last:
   `markdown` renders as markdown, `text` and `pdf` (extracted text)
   render preformatted. **Sanitization is a requirement, not a style
@@ -2243,13 +2247,14 @@ asking to delete by voice.
   cross-session transport registry the feature doesn't otherwise
   need. The upsert's insert half stays load-bearing even with
   FR-54's fetch: an edited document can be absent from the client's
-  capped list. **And the insert half routes by `source`** — the
-  announce's metadata carries it, and an unknown-id upsert lands in
-  the matching list (uploaded → Uploaded, agent → Created): FR-53's
-  format gate made uploads editable, and inserting an edited upload
-  under Created would break FR-54's organizing idea. The client test
+  capped list. **And the insert half carries `source` intact** — the
+  announce's metadata has it, an unknown-id upsert lands in the single
+  activity-ordered list, and the Source column (plus any future
+  source-grouped view) depends on the upserted row keeping it: FR-53's
+  format gate made uploads editable, and an edited upload rendering as
+  agent-made would misattribute it. The client test
   gains the case: an update for an unknown **uploaded** id inserts
-  into the Uploaded list. **Deleted ids are tombstoned for the
+  carrying `source: "uploaded"`. **Deleted ids are tombstoned for the
   session**: FR-46 lets a write outlive its turn, so a
   `document.updated` can land after the user deleted that document —
   and the insert half would faithfully resurrect the card, the
