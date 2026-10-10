@@ -180,8 +180,43 @@ From single upload-at-start + copy-paste artifacts to a real document workspace.
 - Clicking a document opens a preview.
 - The agent can edit these documents, and the user sees changes live in the
   preview. Markdown first; other file types as the engineering allows.
-- Later (own spec, after the basics land): multiple adjustable preview windows;
-  live co-editing where user edits and agent edits flow both ways.
+- **Workspace v2 (own spec, §4.12 — first follow-up after the feature-4 PR
+  lands; decided 2026-10-10):** Claude-desktop-style file UI and direct
+  editing. Names-only file list (metadata columns from v1 retire; folders
+  maybe, as a nullable `folder` column); double-click opens a document in a
+  docked editor pane, multiple open documents become tabs; preview/source
+  toggle; CodeMirror 6 for editing md/text (pdf stays read-only); while the
+  workspace is open the Talk orb docks into the bottom ~30% of the list
+  pane, voice fully live. Floating drag/resize windows considered and
+  rejected (web-MDI UX trap, dies on phones). PDF *output* ("make it a
+  pdf") is its own small follow-up: client-side md→pdf export at download.
+  - **Concurrency model (VS Code-style, decided over CRDT):** the server
+    row is the buffer; the editor autosaves debounced (~1s), so the agent
+    always reads live state; agent edits stay content-anchored
+    (`str_replace`'s occurrence predicate is the version check); announces
+    re-render the open editor. CRDT (Yjs) rejected: cheap client-side but
+    the server would become a CRDT peer (update-log storage, agent ops
+    translated) — replaces the storage model for a rare case.
+  - **Race cases and their required resolutions** (the spec's checklist):
+    1. User types, agent idle → autosave writes; no race.
+    2. Agent edits, user buffer clean → announce re-renders; no race.
+    3. Agent edits inside the user's unsaved window (≤1s + RTT) → client
+       3-way merge (base = last synced, mine = buffer, theirs = announce);
+       disjoint regions merge silently, overlapping regions get an
+       explicit "agent edited this — apply / keep mine" banner. Blind
+       apply loses keystrokes; blind ignore lets the next autosave erase
+       the agent's edit — both forbidden.
+    4. Autosave races the agent's UPDATE at the server. Autosave-first:
+       the agent's `old_str` no longer matches → its edit refuses and the
+       model re-reads (no loss). Agent-first: a naive full-content
+       autosave would silently erase the agent's edit — so the save
+       carries compare-and-swap on the base `updated_at`; a moved base
+       refuses the save, the client merges (case 3) and retries.
+    5. Two of the user's own tabs editing one document → same CAS + merge
+       as case 4.
+    6. Truly simultaneous same-region typing (user + agent in the same
+       second) → degrades to case 3's banner; the only case real CRDT
+       would fix, accepted as out of scope.
 - Later, in two stages with different prerequisites (decided 2026-10-08):
   - **Mid-session uploads with on-request reads** — add a document while
     talking; the agent reaches it only when asked ("read the file I just
