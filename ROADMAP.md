@@ -206,14 +206,16 @@ From single upload-at-start + copy-paste artifacts to a real document workspace.
        explicit "agent edited this — apply / keep mine" banner. Blind
        apply loses keystrokes; blind ignore lets the next autosave erase
        the agent's edit — both forbidden. Granularity (decided
-       2026-10-10): WORD-level merge, LINE-level conflict reporting —
-       same line/different words auto-merges; only the same words
-       touched by both sides banners (fine-grained diff3 is still a
-       stateless snapshot merge, not CRDT). Default on conflict: keep
-       the user's version — stated cost: the agent's edit landed
-       server-side and reported success, so user-wins silently undoes
-       it unless the banner's "apply theirs" is taken; the spec states
-       this and the agent rediscovers on its next read.
+       2026-10-10): LINE-level diff3 — overlapping changed line-hunks
+       conflict, so the same line touched by both sides banners even
+       when the words differ; word-level merging was considered and
+       rejected (auto-stitching one sentence from two authors produces
+       fluent nonsense; noisier banners are the honest trade).
+       **Explicit spec decision: on conflict, USER edits take
+       precedence.** Stated cost: the agent's edit landed server-side
+       and reported success, so user-wins undoes it unless the
+       banner's "apply theirs" is taken; the spec states this and the
+       agent rediscovers on its next read.
     4. Autosave races the agent's UPDATE at the server. Autosave-first:
        the agent's `old_str` no longer matches → its edit refuses and the
        model re-reads (no loss). Agent-first: a naive full-content
