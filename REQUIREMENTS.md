@@ -1690,7 +1690,9 @@ asking to delete by voice.
   delete → the row is gone — for a migrated document the
   paired `artifacts` row too, in the same transaction — and a
   subsequent `read_document` of that id steers not-found.
-- **FR-53** The agent's document tools — FR-45 amended: same registry,
+- **FR-53** The agent's document tools, sub-numbered FR-53.1–53.9 so
+  each tool and mechanism is individually traceable and testable —
+  FR-45 amended: same registry,
   same discipline, renamed and extended. Renames: `create_artifact` →
   `create_document`, `list_artifacts` → `list_documents`,
   `read_artifact` → `read_document`, `edit_artifact` →
@@ -1711,7 +1713,7 @@ asking to delete by voice.
   an explicit `replace_all`, line-numbered paged reads, quoted
   steering errors — a proven interface for LLM editing, adopted
   rather than invented. What changes:
-  - `list_documents` returns both sources (id, source, kind, format,
+  - **FR-53.1** `list_documents` returns both sources (id, source, kind, format,
     timestamps, title 🔒) — the agent now sees past uploads too. This
     widens §6's deliberate cross-session carve-out from artifacts to
     documents; it stays narrow, explicit, and user-asked. It gains an
@@ -1724,7 +1726,7 @@ asking to delete by voice.
     paging over an ordering the agent's own edits mutate can drift
     between pages — accepted for v1 (a shifted page steers fine);
     keyset on `(activity, id)` is the revisit.
-  - `read_document` gains **pagination and line numbers** — FR-45's
+  - **FR-53.2** `read_document` gains **pagination and line numbers** — FR-45's
     named escape, in the shape Anthropic's file tools use: each line
     is prefixed with its absolute 1-based line number, and content is
     paged over `READ_DOCUMENT_MAX_CHARS`-sized slices whose boundaries
@@ -1779,7 +1781,7 @@ asking to delete by voice.
     line drift under the agent's own concurrent edits carries
     `list_documents`' acceptance: a shifted read steers fine; v1
     accepts it.
-  - **`search_documents`** — the Grep to `read_document`'s Read;
+  - **FR-53.3** **`search_documents`** — the Grep to `read_document`'s Read;
     Anthropic's file toolkit ships them as a pair, and the reason
     transfers: finding one passage by paging a 200k-char document
     through 8k-char reads is ~25 LLM rounds at roughly a second each,
@@ -1906,7 +1908,7 @@ asking to delete by voice.
     similarity ranking — semantic search belongs to the memory layer
     and its own eval framework; this tool is deliberately as dumb as
     grep.
-  - `edit_document` keeps `replace` and `append` exactly as FR-45
+  - **FR-53.4** `edit_document` keeps `replace` and `append` exactly as FR-45
     specced them — the over-cap `replace` refusal and the atomic
     DB-side `append` concatenation transfer verbatim — and adds
     **`str_replace`**, the real-editing mode FR-45's accepted
@@ -1985,7 +1987,7 @@ asking to delete by voice.
     knowledge the over-cap `replace` refusal exists to guarantee. **FR-45's "effectively append-only past the
     read cap" consequence is hereby retired** — the escape it named has
     landed.
-  - `edit_document` also gains **`insert`** (the text-editor tool's
+  - **FR-53.5** `edit_document` also gains **`insert`** (the text-editor tool's
     remaining verb): `insert_line` (0 = before the first line, N =
     after line N, numbered exactly as `read_document` prints them)
     plus `insert_text`. Same atomicity discipline as the other write
@@ -2001,7 +2003,7 @@ asking to delete by voice.
     steers with the memory tool's shape — "Invalid `insert_line`:
     {n}. It should be within [0, {n_lines}]." — with `{n_lines}`
     sourced by the generalized diagnostic read above.
-  - **`MAX_DOC_CHARS` becomes a storage ceiling, not just an upload
+  - **FR-53.6** **`MAX_DOC_CHARS` becomes a storage ceiling, not just an upload
     cap**: today it is enforced only in `extract_text`, and no write
     path checks length — forty individually-legal 5k appends would
     mint a 250k-char row that `read_document` fetches whole on every
@@ -2029,7 +2031,7 @@ asking to delete by voice.
     the ceiling each refuse, steer, and write nothing; an over-ceiling
     `create_document` refuses and steers; and a
     shrinking `str_replace` on an over-ceiling row succeeds.
-  - Editability is format-gated, not source-gated: `markdown` and
+  - **FR-53.7** Editability is format-gated, not source-gated: `markdown` and
     `text` documents are editable whichever source they came from
     (cleaning up an uploaded notes file is a first-class ask);
     `format='pdf'` is read-only — `edit_document` refuses with a
@@ -2039,7 +2041,7 @@ asking to delete by voice.
     UPDATE predicate itself** (`AND format` in the editable set) —
     free at the statement level, no pre-SELECT; the refusal message
     composes via the diagnostic read.
-  - **Editing an attached document reconciles with the FR-21 block —
+  - **FR-53.8** **Editing an attached document reconciles with the FR-21 block —
     the block and the tools now describe the same rows, and the spec
     says which wins.** The block's per-document header gains the
     document's id (`--- DOCUMENT id=42: notes.md ---`): without it,
@@ -2083,7 +2085,7 @@ asking to delete by voice.
     text — **in the editing session and in a second live session of
     the same user with the same document attached** (the cross-session
     half is the one a session-local implementation passes without).
-  - Announces: `document.created` / `document.updated` replace
+  - **FR-53.9** Announces: `document.created` / `document.updated` replace
     `artifact.created` / `artifact.updated` with the same upsert
     contract (FR-45); the payload is the document's metadata plus
     post-edit `content` (the `RETURNING` value — no follow-up SELECT)
