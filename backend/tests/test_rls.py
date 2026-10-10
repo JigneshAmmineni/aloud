@@ -313,15 +313,15 @@ def test_admin_context_cannot_write():
     asyncio.run(run())
 
 
-def test_artifact_tools_succeed_under_real_rls():
-    """Regression shape this guards (FR-45 registry handlers): the old
-    handler once refreshed its row AFTER commit — the transaction-local RLS
-    context had evaporated, the refresh SELECT matched zero rows, and every
-    artifact save failed on Postgres while sqlite tests stayed green. The
-    create AND edit paths must run cleanly under real policies (edit's
-    UPDATE ... RETURNING must see its row through RLS)."""
+def test_document_tools_succeed_under_real_rls():
+    """Regression shape this guards (FR-53 registry handlers): a handler
+    once refreshed its row AFTER commit — the transaction-local RLS context
+    had evaporated, the refresh SELECT matched zero rows, and every save
+    failed on Postgres while sqlite tests stayed green. The create,
+    str_replace, and insert paths must run cleanly under real policies
+    (UPDATE ... RETURNING must see its row through RLS)."""
     from agent.tools import ToolContext, build_registry
-    from db.models import Artifact as ArtifactModel
+    from db.models import Document as DocumentModel
 
     async def run():
         uid = f"art-{uuid.uuid4()}"
@@ -338,38 +338,53 @@ def test_artifact_tools_succeed_under_real_rls():
         ctx = ToolContext(session_id=sess, user_id=uid, turn_id=1, emit=emit)
         tools = {t.name: t for t in build_registry()}
 
-        created = await tools["create_artifact"].handler(
+        created = await tools["create_document"].handler(
             {"title": "T", "kind": "summary", "content": "body"}, ctx
         )
         assert created["status"] == "created"
-        edited = await tools["edit_artifact"].handler(
+        doc_id = created["document_id"]
+        edited = await tools["edit_document"].handler(
             {
-                "artifact_id": created["artifact_id"],
-                "mode": "append",
-                "content": "more",
+                "document_id": doc_id,
+                "mode": "str_replace",
+                "old_str": "body",
+                "new_str": "body v2",
             },
             ctx,
         )
         assert edited["status"] == "edited"
+        inserted = await tools["edit_document"].handler(
+            {
+                "document_id": doc_id,
+                "mode": "insert",
+                "insert_line": 1,
+                "text": "tail line",
+            },
+            ctx,
+        )
+        assert inserted["status"] == "edited"
         assert [e["type"] for e in emitted] == [
-            "artifact.created",
-            "artifact.updated",
+            "document.created",
+            "document.updated",
+            "document.updated",
         ]
 
         async with user_scoped_session(uid) as db:
             rows = (
                 (
                     await db.execute(
-                        select(ArtifactModel).where(ArtifactModel.session_id == sess)
+                        select(DocumentModel).where(
+                            DocumentModel.session_id == sess
+                        )
                     )
                 )
                 .scalars()
                 .all()
             )
             assert len(rows) == 1
-            assert rows[0].content == "body\nmore"
+            assert rows[0].content == "body v2\ntail line"
         # the in-transaction usage events landed too (FR-32/FR-38): one
-        # artifact count + one edit
+        # count + two edits, detail = kind for an agent document
         async with user_scoped_session(uid) as db:
             events = (
                 (
@@ -383,7 +398,8 @@ def test_artifact_tools_succeed_under_real_rls():
                 .scalars()
                 .all()
             )
-            assert sorted(e.unit for e in events) == ["count", "edits"]
+            assert sorted(e.unit for e in events) == ["count", "edits", "edits"]
+            assert {e.detail for e in events} == {"summary"}
 
     asyncio.run(run())
 

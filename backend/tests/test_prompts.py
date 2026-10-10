@@ -33,14 +33,20 @@ def test_prompt_keeps_greeting_instruction():
     assert "greet" in build_system_prompt().lower()
 
 
-def test_prompt_keeps_artifact_instructions():
-    """FR-12/FR-45: tools named, on-request only, never read aloud, and the
+def test_prompt_keeps_document_instructions():
+    """FR-12/FR-53: tools named, on-request only, never read aloud, and the
     FR-43 speak-first acknowledgment is directed (the prompt is guidance;
     the loop's backstop is the guarantee)."""
     prompt = build_system_prompt().lower()
-    for tool in ("create_artifact", "list_artifacts", "read_artifact", "edit_artifact"):
+    for tool in (
+        "create_document",
+        "list_documents",
+        "search_documents",
+        "read_document",
+        "edit_document",
+    ):
         assert tool in prompt
-    assert "never read an artifact" in prompt
+    assert "never read a document" in prompt
     assert "acknowledgment" in prompt
 
 

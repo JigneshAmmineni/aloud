@@ -30,11 +30,11 @@ from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
 from agent.context import ContextProvider
 from agent.loop import AgentLoopObserver, AgentLoopProcessor
 from agent.prompts import (
-    build_document_context_block,
     build_greeting_trigger,
     build_system_prompt,
 )
 from agent.providers import make_loop_llm, make_stt, make_tts
+from agent.registry import register_provider, unregister_provider
 from agent.sanitizer import make_text_filters
 from agent.tools import build_registry
 from app.config import Settings
@@ -161,7 +161,7 @@ def build_pipeline_parts(settings: Settings, documents=None, *, session_id=""):
     )
     context_provider = ContextProvider(
         build_system_prompt(),
-        build_document_context_block(documents) if documents else None,
+        documents,
         session_id=session_id,
     )
     scratch = LLMContext()
@@ -326,6 +326,9 @@ class CompanionAgent:
         traces.start()
         _inflight_writes[session_id] = write_tasks
         _live_tasks[session_id] = task
+        # FR-52/53.8: the registry is how HTTP-side deletes and other
+        # sessions' edits reach this session's attach block.
+        register_provider(session_id, self._user_id, context_provider)
         log.bind(event="session.started").info("Pipeline starting")
         end_reason = "user"  # tap and connection drop are indistinguishable (resume is descoped)
         try:
@@ -336,6 +339,10 @@ class CompanionAgent:
             raise
         finally:
             _live_tasks.pop(session_id, None)
+            # Same finally as the live-task pop (FR-52): a provider left
+            # registered pins the session's full 🔒 conversation in process
+            # memory for the container's life.
+            unregister_provider(session_id)
             closed = True  # the emit callback goes silent from here
             if _draining and end_reason == "user":
                 # ended by the shutdown drain, not the user — same label the

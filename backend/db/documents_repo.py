@@ -129,7 +129,7 @@ class WorkspaceItem:
 
 
 async def list_workspace_rows(
-    user_id: str, offset: int = 0
+    user_id: str, offset: int = 0, cap: int | None = None
 ) -> tuple[list[WorkspaceItem], int]:
     """GET /documents: both sources, newest-activity-first, capped, with a
     total so truncation is visible. `offset` is clamped >= 0 (FastAPI's int
@@ -159,7 +159,7 @@ async def list_workspace_rows(
                 .where(Document.user_id == user_id)
                 .order_by(*_activity_order())
                 .offset(offset)
-                .limit(WORKSPACE_LIST_CAP)
+                .limit(cap if cap is not None else WORKSPACE_LIST_CAP)
             )
         ).all()
         return [WorkspaceItem(*r) for r in rows], total
