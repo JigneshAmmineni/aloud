@@ -129,6 +129,11 @@ export async function guardTalk(
   return true;
 }
 
+/** FR-56's rename cap — mirrors the server's TITLE_MAX_CHARS (main.py);
+ * the title input and the rename guard both read this one, so raising the
+ * knob is a two-place change (server + here), not a hunt. */
+export const TITLE_MAX_CHARS = 200;
+
 /** FR-57.3's delete wiring, extracted so the data-loss half is
  * testable: only a SUCCESSFUL delete closes the tab — a failed one must
  * not drop the only copy of an unsaved buffer. */

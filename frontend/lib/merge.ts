@@ -27,8 +27,16 @@ function toLines(text: string): string[] {
   return lines;
 }
 
-function hunksFrom(baseText: string, sideText: string): Hunk[] {
-  const parts = diffLines(baseText, sideText);
+// bound the diff: jsdiff is O(N·D) and merge3 runs on the announce path
+// and on every 409 — on the same thread as a live voice session. Over
+// the bound we bail to the conflict banner instead of a UI freeze.
+const MAX_EDIT_LENGTH = 2000;
+
+function hunksFrom(baseText: string, sideText: string): Hunk[] | null {
+  const parts = diffLines(baseText, sideText, {
+    maxEditLength: MAX_EDIT_LENGTH,
+  });
+  if (!parts) return null; // over the bound: the caller falls back
   const hunks: Hunk[] = [];
   let baseLine = 0;
   let open: Hunk | null = null;
@@ -81,7 +89,12 @@ export type MergeResult = {
 export function merge3(base: string, mine: string, theirs: string): MergeResult {
   if (mine === theirs) return { merged: mine, conflict: false };
   const mineHunks = hunksFrom(base, mine);
-  const theirHunks = hunksFrom(base, theirs);
+  const theirHunks = mineHunks ? hunksFrom(base, theirs) : null;
+  if (!mineHunks || !theirHunks) {
+    // keeping MINE with the banner is already the specified outcome
+    // for "we couldn't reconcile this"
+    return { merged: mine, conflict: true };
+  }
 
   let conflict = false;
   const chosen: Hunk[] = [...mineHunks];

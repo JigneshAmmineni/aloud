@@ -599,7 +599,10 @@ describe("useEditor round-4", () => {
   it("a title-validation 400 reverts the rename and keeps saving content", async () => {
     authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
     authedFetch.mockResolvedValueOnce(
-      jsonResponse(400, { detail: "title is too long (limit 200 characters)" }),
+      jsonResponse(400, {
+        detail: "title is too long (limit 200 characters)",
+        code: "title_invalid",
+      }),
     );
     authedFetch.mockResolvedValueOnce(
       jsonResponse(200, { updated_at: "TOK-OK", char_count: 7 }),

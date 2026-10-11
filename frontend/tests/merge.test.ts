@@ -85,3 +85,13 @@ describe("trailing newline follows user precedence", () => {
     expect(r.merged).toBe("a\nb");
   });
 });
+
+describe("the edit bound", () => {
+  it("a diff too large to reconcile bails to mine + banner, not a freeze", () => {
+    const n = 3000;
+    const b = Array.from({ length: n }, (_, i) => `line ${i}`).join("\n");
+    const m = Array.from({ length: n }, (_, i) => `mine ${i}`).join("\n");
+    const t = Array.from({ length: n }, (_, i) => `theirs ${i}`).join("\n");
+    expect(merge3(b, m, t)).toEqual({ merged: m, conflict: true });
+  });
+});

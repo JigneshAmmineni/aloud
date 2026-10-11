@@ -60,6 +60,7 @@ describe("Workspace console docking (FR-57.4)", () => {
         loading={false}
         error={null}
         budgetError={null}
+        flushError={null}
         console={<button type="button">End</button>}
         editor={{
           tabs: [tab],

@@ -12,7 +12,7 @@ const ExternalSync = Annotation.define<boolean>();
 
 import { MarkdownView } from "@/components/MarkdownView";
 import type { EditorTab } from "@/lib/useEditor";
-import { downloadFilename } from "@/lib/workspace";
+import { downloadFilename, TITLE_MAX_CHARS } from "@/lib/workspace";
 
 /** The source editor is UNCONTROLLED after mount: external buffer
  * changes (announce merges, 409 merges, discard) land as a MINIMAL
@@ -185,7 +185,7 @@ export function EditorPane({
             <input
               key={`${active.id}:${active.title}`}
               className="ed-title"
-              maxLength={200}
+              maxLength={TITLE_MAX_CHARS}
               defaultValue={active.title}
               aria-label="Document title"
               title="Click to rename"
@@ -276,20 +276,6 @@ export function EditorPane({
               </button>
             </div>
           )}
-          {!active.terminal &&
-            !active.stalled &&
-            active.saveState === "error" && (
-              <div className="ed-banner ed-terminal" role="alert">
-                this document can't be saved right now — your text is kept.
-                <button type="button" onClick={() => downloadBuffer(active)}>
-                  download my copy
-                </button>
-                <button type="button" onClick={() => onDiscard(active.id)}>
-                  discard changes
-                </button>
-              </div>
-            )}
-
           <div className="ed-body">
             {active.loading ? (
               <p className="ws-empty">loading…</p>

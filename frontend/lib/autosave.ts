@@ -94,10 +94,21 @@ export function createSaveScheduler(
       paused = false;
       clearTimers();
       dirty = false;
-      inflight = save().catch(() => {});
+      inflight = save()
+        .catch(() => {})
+        .finally(() => {
+          inflight = null;
+          paused = wasPaused;
+          // a keystroke during THIS save re-dirtied, and its fire()
+          // bailed on the in-flight guard with the timers already
+          // cleared — without this re-arm the buffer sits dirty with
+          // no ceiling until the next keystroke (round-5 blocker 1)
+          if (dirty && !debounceTimer && !paused) {
+            debounceTimer = setTimeout(fire, debounceMs);
+            maxWaitTimer = setTimeout(fire, maxWaitMs);
+          }
+        });
       await inflight;
-      inflight = null;
-      paused = wasPaused;
     },
     dispose() {
       clearTimers();

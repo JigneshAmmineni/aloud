@@ -385,6 +385,9 @@ def test_attach_id_coercion_skips_dedupes_and_caps(monkeypatch):
         13,
     ]
     assert main._coerce_attach_ids([14.0, True]) == [14]
+    # the numeric bound (FR-59's class, applied to the attach list):
+    # 10**19 against an int4 column is a DataError that 500s /api/offer
+    assert main._coerce_attach_ids([10**19, 0, -5]) == []
     assert main._coerce_attach_ids("not-a-list") == []
     assert main._coerce_attach_ids([1, 2, 3, 4, 5]) == [1, 2, 3]
 

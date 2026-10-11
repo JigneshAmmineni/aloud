@@ -93,6 +93,15 @@ export default function Home() {
     [flushAll],
   );
 
+  // FR-58.1: closing the workspace is a flush point — BOTH closers (the
+  // nav toggle and the pane's ×) go through here; the toggle used to skip
+  // it. Fire-and-forget by design, unlike flushThen: the buffers stay
+  // mounted in this component, so a failed flush destroys nothing.
+  const closeWorkspace = useCallback(() => {
+    void flushAll();
+    setDocsOpen(false);
+  }, [flushAll]);
+
   const deleteDoc = workspace.deleteDoc;
   const closeDeleted = editor.closeDeleted;
   const handleDelete = useCallback(
@@ -117,7 +126,6 @@ export default function Home() {
       />
       <p className={`status ${state === "active" ? mode : state}`}>{status}</p>
       {error && <p className="error">{error}</p>}
-      {flushError && <p className="error">{flushError}</p>}
     </>
   );
 
@@ -128,7 +136,7 @@ export default function Home() {
           type="button"
           className="login-link"
           aria-expanded={docsOpen}
-          onClick={() => setDocsOpen((o) => !o)}
+          onClick={() => (docsOpen ? closeWorkspace() : setDocsOpen(true))}
         >
           Documents
         </button>
@@ -156,7 +164,12 @@ export default function Home() {
 
       {/* FR-57.4: with the workspace open the console docks into it;
           closed, the full-size console owns the stage */}
-      {!docsOpen && <div className="core">{consoleUI()}</div>}
+      {!docsOpen && (
+        <div className="core">
+          {consoleUI()}
+          {flushError && <p className="error">{flushError}</p>}
+        </div>
+      )}
 
       {docsOpen && (
         <Workspace
@@ -168,6 +181,7 @@ export default function Home() {
           loading={workspace.loading}
           error={workspace.error}
           budgetError={workspace.budgetError}
+          flushError={flushError}
           console={consoleUI()}
           editor={{
             tabs: editor.tabs,
@@ -182,11 +196,7 @@ export default function Home() {
             onRetryStalled: editor.retryStalled,
             onDiscard: editor.discard,
           }}
-          onClose={() => {
-            // FR-58.1: closing the workspace is a flush point
-            void flushAll();
-            setDocsOpen(false);
-          }}
+          onClose={closeWorkspace}
           onLoadMore={workspace.loadMore}
           onOpen={editor.open}
           onDownload={workspace.download}

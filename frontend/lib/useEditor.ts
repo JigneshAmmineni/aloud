@@ -19,7 +19,11 @@ import { useCallback, useRef, useState } from "react";
 import { authedFetch } from "@/lib/auth";
 import { createSaveScheduler, type SaveScheduler } from "@/lib/autosave";
 import { merge3 } from "@/lib/merge";
-import type { AnnouncedDoc, WorkspaceDoc } from "@/lib/workspace";
+import {
+  TITLE_MAX_CHARS,
+  type AnnouncedDoc,
+  type WorkspaceDoc,
+} from "@/lib/workspace";
 
 const MAX_409_RETRIES = 3;
 const BACKOFF_CAP_MS = 30_000;
@@ -255,11 +259,14 @@ export function useEditor({
         return;
       }
 
-      const detail: string | null = await res
-        .json()
-        .then((d) => d?.detail ?? null)
-        .catch(() => null);
-      if (res.status === 400 && detail && detail.includes("title")) {
+      const errBody = (await res.json().catch(() => null)) as {
+        detail?: string;
+        code?: string;
+      } | null;
+      const detail = errBody?.detail ?? null;
+      // the CODE, not the prose: branching on the detail text was the
+      // terminalKind fragility one classifier down (round 5)
+      if (res.status === 400 && errBody?.code === "title_invalid") {
         // a title-validation 400 is the one 4xx the user can fix in
         // place — and NOT a member of FR-58.1's TERMINAL class. Revert
         // the rename; the content edits it rode along with keep saving.
@@ -367,8 +374,9 @@ export function useEditor({
 
   const rename = useCallback(
     (id: number, title: string) => {
-      if (!title.trim() || title.length > 200) return; // the server
-      // would 400; keep the old name (the input is capped too)
+      // over-cap/empty would 400 server-side; keep the old name (the
+      // title input is capped to the same constant)
+      if (!title.trim() || title.length > TITLE_MAX_CHARS) return;
       patchTab(id, (t) => ({
         title,
         dirty: true,

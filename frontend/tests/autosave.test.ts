@@ -90,11 +90,14 @@ describe("pause/resume (FR-58.2's hold)", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     expect(saves).toHaveLength(2); // re-armed on resume
 
+    // dispose is a flag-clear, NOT a latch: discard() disposes while the
+    // tab can become editable again, so later dirtiness must still save
     s.dispose();
-    s.noteDirty();
-    // dispose cleared dirtiness; nothing fires
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(saves.length).toBeLessThanOrEqual(3);
+    expect(saves).toHaveLength(2); // dispose dropped the pending dirtiness
+    s.noteDirty();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(saves).toHaveLength(3); // post-dispose dirtiness still saves
   });
 });
 
@@ -117,5 +120,35 @@ describe("one save at a time", () => {
     resolveSave();
     await vi.advanceTimersByTimeAsync(5000);
     expect(starts).toHaveLength(2); // the reschedule lands after it settles
+  });
+});
+
+describe("flush never strands the ceiling (round-5 blocker 1)", () => {
+  it("a keystroke during a slow flush still saves by the max-wait", async () => {
+    let slow = true;
+    let resolveSave: () => void = () => {};
+    const starts: number[] = [];
+    const s = createSaveScheduler(async () => {
+      starts.push(Date.now());
+      if (slow) {
+        await new Promise<void>((r) => {
+          resolveSave = r;
+        });
+      }
+    });
+    s.noteDirty();
+    const flushP = s.flush(); // the flush's save starts and hangs
+    await vi.advanceTimersByTimeAsync(0);
+    expect(starts).toHaveLength(1);
+    s.noteDirty(); // typed 10ms into the flush
+    await vi.advanceTimersByTimeAsync(1000); // fire() bails on in-flight
+    expect(starts).toHaveLength(1);
+    slow = false;
+    resolveSave(); // the flush settles with the buffer dirty again
+    await flushP;
+    // the failure mode: dirty, no timers, nothing in flight — the buffer
+    // never saved again until the NEXT keystroke or flush point
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(starts).toHaveLength(2);
   });
 });

@@ -125,6 +125,7 @@ export function Workspace({
   loading,
   error,
   budgetError,
+  flushError,
   console: consoleSlot,
   editor,
   onClose,
@@ -144,6 +145,9 @@ export function Workspace({
   loading: boolean;
   error: string | null;
   budgetError: string | null;
+  /** FR-58.1's visible refusal — workspace-scoped, full size (the docked
+   * console is scaled down; a refusal rendered there is unreadable) */
+  flushError: string | null;
   /** FR-57.4: the session console docks into the list pane's bottom */
   console: React.ReactNode;
   editor: {
@@ -335,6 +339,7 @@ export function Workspace({
           </p>
         )}
         {budgetError && <p className="doc-error">{budgetError}</p>}
+        {flushError && <p className="doc-error">{flushError}</p>}
         {error && <p className="doc-error">{error}</p>}
 
         {/* FR-57.4: the console docks here — Talk/End, waveform, status,

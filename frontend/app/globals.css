@@ -888,15 +888,17 @@ body::after {
     justify-content: center;
     align-items: center;
     max-height: none;
-    /* transform, not zoom: zoom rescales the laid-out width too, so a
-       left:0;right:0 bar rendered at ~45vw (round-4 nit) */
+    /* zoom on the CHILDREN, not transform: zoom shrinks the laid-out
+       box as well as the paint, so 172px of button + 320px of waveform
+       fit the bar instead of overflowing the viewport (transform scales
+       only the paint — round 5); zoom on .ws-console ITSELF is what
+       rescaled the left:0;right:0 bar to ~45vw (round 4) */
     zoom: normal;
     overflow: visible;
   }
 
   .ws-v2.has-tabs .ws-console > * {
-    transform: scale(0.45);
-    transform-origin: center center;
+    zoom: 0.45;
   }
 }
 

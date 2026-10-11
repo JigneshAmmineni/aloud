@@ -217,10 +217,12 @@ async def email_check(request: Request):
     return {"registered": registered}
 
 
-# FR-56: content is at most MAX_DOC_CHARS characters; multibyte UTF-8 plus
-# JSON escaping and the title stay well inside this. An unbounded
-# request.json() would materialize an authed 1 GB POST the same way the
-# upload route's bounded read exists to prevent.
+# FR-56: 2 MiB comfortably covers a MAX_DOC_CHARS document even in 4-byte
+# UTF-8 plus JSON escaping and the title. A legacy over-ceiling row larger
+# than this 413s and cannot be saved through this route — accepted: the
+# growth gate exists because over-ceiling rows exist, but one past ~500k
+# chars is not plausible. An unbounded request.json() would materialize an
+# authed 1 GB POST the same way the upload route's bounded read prevents.
 MAX_SAVE_BODY_BYTES = 2 * 1024 * 1024
 
 # a path id beyond int32 is an unencodable bind -> 500 where FR-56's
@@ -373,13 +375,22 @@ async def save_document_route(
 
     title = body.get("title")
     if title is not None:
+        # code, not prose: the client classifies this as the ONE
+        # recoverable 4xx (revert the rename, keep saving the content) —
+        # branching on the detail text would make a copy edit data loss
         if not isinstance(title, str) or not title.strip():
             # the one field FR-57.1 leaves on screen must identify the row
-            raise HTTPException(status_code=400, detail="title can't be empty")
-        if len(title) > TITLE_MAX_CHARS:
-            raise HTTPException(
+            return JSONResponse(
                 status_code=400,
-                detail=f"title is too long (limit {TITLE_MAX_CHARS} characters)",
+                content={"detail": "title can't be empty", "code": "title_invalid"},
+            )
+        if len(title) > TITLE_MAX_CHARS:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": f"title is too long (limit {TITLE_MAX_CHARS} characters)",
+                    "code": "title_invalid",
+                },
             )
 
     raw_base = body.get("base_updated_at")
