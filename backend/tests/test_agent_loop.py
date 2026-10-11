@@ -1266,3 +1266,22 @@ def test_filler_fires_once_dead_air_crosses_the_threshold(monkeypatch):
     # and the filler-led turn is still marked, never laundered as healthy
     rows = _queued(h.recorder, TurnMetric)
     assert rows and any("filler" in k for k in rows[0].stages_ms)
+
+
+def test_filler_dies_with_its_tool_round(monkeypatch):
+    """2026-10-11 live (turn 5): the timer armed during an instant tool
+    round survived into step 2 and spoke "One moment." AFTER the edit was
+    already on screen, welded to "Done.". A filler armed for a round must
+    not fire once that round is over — the only remaining wait is speech."""
+    monkeypatch.setattr(loop_mod, "FILLER_DELAY_MS", 50)
+    scripts = [
+        [LLMToolCall(name="echo", arguments={}, id="c1"), _done()],
+        [0.2, LLMTextDelta("Done."), _done()],  # slow closing words
+    ]
+    h = make_loop(scripts, tools=[read_tool()])  # instant tool
+
+    asyncio.run(h.loop._run_turn("make the two lists"))
+
+    text = _pushed_text(h)
+    assert "Done." in text
+    assert not any(f in text for f in FILLER_LINES)

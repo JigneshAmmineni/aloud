@@ -89,6 +89,7 @@ class _TurnState:
         self.messages: list[dict] = []  # built list for the current call
         self.step_text = ""  # model text streamed this step
         self.step_filler = ""  # filler spoken this step, not yet appended
+        self.tools_done = False  # this step's tool round has completed
         self.filler_spoken: list[str] = []  # all filler texts this turn
         self.calls: list[LLMToolCall] = []  # current step's tool calls
         self.results: list[dict | None] = []
@@ -337,6 +338,7 @@ class AgentLoopProcessor(FrameProcessor):
         state.step_filler = ""
         state.calls = []
         state.results = []
+        state.tools_done = False
         state.usage = None
         state.ttfb_ms = None
         state.call_closed = False
@@ -459,6 +461,7 @@ class AgentLoopProcessor(FrameProcessor):
 
         if state.calls:
             await self._run_tools(state)
+            state.tools_done = True
             appended = state.step_filler + state.step_text
             self._context.append_step(appended, state.calls, state.results)
             state.appended_texts.append(appended)
@@ -489,11 +492,18 @@ class AgentLoopProcessor(FrameProcessor):
             return
         if self._filler_task is not None and not self._filler_task.done():
             return  # one pending filler at a time
+        armed_step = state.step
 
         async def fire_later() -> None:
             await asyncio.sleep(remaining_ms / 1000)
             if self._state is not state:
                 return  # the turn ended or was interrupted meanwhile
+            if state.step != armed_step or state.tools_done:
+                # the round this filler was armed for is OVER — the only
+                # wait left is the next step's speech, and "One moment."
+                # after the result is already on screen reads as lag the
+                # system invented (2026-10-11: step.2.filler at +73ms)
+                return
             if self._bot_speaking or self._audio_pending or state.step_text:
                 return  # something real reached the speaker in time
             await self._speak_filler(
