@@ -1216,8 +1216,10 @@ extends. Four design principles govern every FR below:
    same data-channel server-message path the panel already consumes
    (FR-45's upsert), renamed to the document vocabulary.
 
-Out of scope, deliberately: multiple/adjustable preview panes and live
-co-editing (later, own spec — roadmap); mid-conversation uploads
+Out of scope, deliberately: multiple/adjustable preview panes
+(floating windows were later considered and rejected — §4.12);
+user-side editing and co-editing: **specced by §4.12**;
+mid-conversation uploads
 (staged on the roadmap: on-request reads are feature 4's first
 follow-up, no context-engine dependency; proactive pickup is feature
 5, which also deprecates the upload-before-session flow);
