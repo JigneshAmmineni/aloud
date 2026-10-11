@@ -82,6 +82,9 @@ function overlaps(a: Hunk, b: Hunk): boolean {
 export type MergeResult = {
   merged: string;
   conflict: boolean; // some of THEIRS was dropped under user precedence
+  /** the diff exceeded MAX_EDIT_LENGTH: merged is MINE wholesale, and
+   * nothing hunk-level exists for "apply theirs" to flip (round 6) */
+  bailed?: true;
 };
 
 /** Line-level diff3. Disjoint hunks merge (both survive); overlapping
@@ -93,7 +96,7 @@ export function merge3(base: string, mine: string, theirs: string): MergeResult 
   if (!mineHunks || !theirHunks) {
     // keeping MINE with the banner is already the specified outcome
     // for "we couldn't reconcile this"
-    return { merged: mine, conflict: true };
+    return { merged: mine, conflict: true, bailed: true };
   }
 
   let conflict = false;

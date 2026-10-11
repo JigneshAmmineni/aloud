@@ -91,6 +91,13 @@ export function useEditor({
   const retries409 = useRef<Map<number, number>>(new Map());
   const failStreak = useRef<Map<number, number>>(new Map());
   const conflictSnaps = useRef<Map<number, ConflictSnap>>(new Map());
+  /** the latest announce per STILL-LOADING tab — replayed once open()'s
+   * GET resolves, or the editor installs pre-edit content over a newer
+   * agent edit and shows stale text with no indication (round 6) */
+  const pendingAnnounce = useRef<Map<number, AnnouncedDoc>>(new Map());
+  const handleAnnounceRef = useRef<
+    ((type: string, doc: AnnouncedDoc) => void) | null
+  >(null);
 
   const setTabsSync = useCallback((next: EditorTab[]) => {
     tabsRef.current = next; // ref first: event handlers read truth NOW
@@ -119,6 +126,7 @@ export function useEditor({
     retries409.current.delete(id);
     failStreak.current.delete(id);
     conflictSnaps.current.delete(id);
+    pendingAnnounce.current.delete(id);
   }, []);
 
   const scheduleRetry = useCallback((id: number) => {
@@ -347,12 +355,18 @@ export function useEditor({
         baseTitle: body.title,
         format: body.format,
       });
+      // replay the announce the loading gate stashed: the GET above was
+      // issued BEFORE the agent's edit landed, so what it returned may
+      // already be superseded (round 6)
+      const pending = pendingAnnounce.current.get(doc.id);
+      pendingAnnounce.current.delete(doc.id);
+      if (pending) handleAnnounceRef.current?.("document.updated", pending);
     },
     [doSave, patchTab, setTabsSync],
   );
 
   const edit = useCallback(
-    (id: number, text: string) => {
+    (id: number, text: string, fromDoc?: string) => {
       const current = tabsRef.current.find((t) => t.id === id);
       if (!current || current.buffer === text) {
         // the echo of our own external dispatch (announce merge,
@@ -360,13 +374,31 @@ export function useEditor({
         // re-PUT every clean announce (round-3 blocker 2)
         return;
       }
-      patchTab(id, (t) => ({
-        buffer: text,
-        dirty: true,
-        // a stalled/terminal tab keeps its error chip — "unsaved" would
-        // quietly promise an autosave that is not coming
-        saveState: t.stalled || t.terminal ? t.saveState : "unsaved",
-      }));
+      if (fromDoc !== undefined && fromDoc !== current.buffer) {
+        // the keystroke raced an external merge: CodeMirror's doc was
+        // still pre-merge when it fired, so adopting `text` would
+        // silently undo the merge the sync effect hasn't painted yet.
+        // Drop it — the effect restores the merged text; a lost
+        // keystroke beats a lost agent edit (round 6)
+        return;
+      }
+      patchTab(id, (t) => {
+        // a non-gone terminal clears on the next keystroke: the ceiling
+        // and format classes are fixable IN PLACE (shrink under the
+        // limit — the server allows the shrinking save), so read-only-
+        // until-discard blocked the one real recovery (round 6)
+        const clears = t.terminal !== null && t.terminalKind !== "gone";
+        return {
+          buffer: text,
+          dirty: true,
+          terminal: clears ? null : t.terminal,
+          terminalKind: clears ? null : t.terminalKind,
+          // a stalled/gone tab keeps its error chip — "unsaved" would
+          // quietly promise an autosave that is not coming
+          saveState:
+            !clears && (t.stalled || t.terminal) ? t.saveState : "unsaved",
+        };
+      });
       schedulers.current.get(id)?.noteDirty();
     },
     [patchTab],
@@ -418,11 +450,23 @@ export function useEditor({
       patchTab(id, (t) => {
         if (!snap) return { conflict: false };
         // theirs-precedence version of the original three-way
-        const theirsWon = merge3(snap.base, snap.theirs, snap.mine).merged;
+        const first = merge3(snap.base, snap.theirs, snap.mine);
         // fold in anything the user typed after the banner appeared
-        const final = merge3(snap.merged, t.buffer, theirsWon).merged;
+        const second = merge3(snap.merged, t.buffer, first.merged);
+        if (first.bailed || second.bailed) {
+          // over the edit bound there is nothing hunk-level to flip and
+          // the re-merge collapses to a no-op (round 6): an EXPLICIT
+          // click takes the agent's version wholesale — blind-apply is
+          // forbidden for the automatic path, not for the user's hand
+          return {
+            buffer: snap.theirs,
+            conflict: false,
+            dirty: true,
+            saveState: "unsaved",
+          };
+        }
         return {
-          buffer: final,
+          buffer: second.merged,
           conflict: false,
           dirty: true,
           saveState: "unsaved",
@@ -478,12 +522,18 @@ export function useEditor({
   );
 
   const close = useCallback(
-    async (id: number) => {
+    async (id: number, force = false) => {
       const tab = tabsRef.current.find((t) => t.id === id);
       if (tab && tab.dirty && !tab.terminal && !tab.stalled) {
         await schedulers.current.get(id)?.flush();
         const after = tabsRef.current.find((t) => t.id === id);
         if (after && after.dirty) return; // failed flush keeps the tab open
+      } else if (tab && tab.dirty && !force) {
+        // a dirty TERMINAL/stalled tab holds the ONLY copy of its text
+        // and cannot flush — its banner says "your text is kept", so a
+        // bare x must not be a silent discard; the pane confirms and
+        // calls again with force (round 6)
+        return;
       }
       dropBookkeeping(id);
       const rest = tabsRef.current.filter((t) => t.id !== id);
@@ -501,7 +551,11 @@ export function useEditor({
       dropBookkeeping(id);
       const rest = tabsRef.current.filter((t) => t.id !== id);
       setTabsSync(rest);
-      setActiveId((a) => (a === id ? null : a));
+      // fall back to a surviving tab like close() does — null under a
+      // non-empty strip renders an empty editor body (round 6)
+      setActiveId((a) =>
+        a === id ? (rest.length ? rest[rest.length - 1].id : null) : a,
+      );
     },
     [dropBookkeeping, setTabsSync],
   );
@@ -513,7 +567,12 @@ export function useEditor({
     (type: string, doc: AnnouncedDoc) => {
       if (type !== "document.updated" && type !== "document.created") return;
       const tab = tabsRef.current.find((t) => t.id === doc.id);
-      if (!tab || tab.loading || tab.loadFailed || tab.terminal) return;
+      if (!tab || tab.loadFailed || tab.terminal) return;
+      if (tab.loading) {
+        // stash, don't drop: open()'s in-flight GET predates this edit
+        pendingAnnounce.current.set(doc.id, doc);
+        return;
+      }
 
       const apply = (theirs: string, token: string | null) => {
         const wasDirty =
@@ -576,6 +635,7 @@ export function useEditor({
     },
     [patchTab],
   );
+  handleAnnounceRef.current = handleAnnounce;
 
   /** FR-58.1: the pre-/start flush — all dirty tabs must land, including
    * stalled/terminal ones (the user resolves those explicitly before the

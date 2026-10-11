@@ -152,3 +152,25 @@ describe("flush never strands the ceiling (round-5 blocker 1)", () => {
     expect(starts).toHaveLength(2);
   });
 });
+
+describe("one flush at a time", () => {
+  it("concurrent flush points share one save instead of sibling PUTs", async () => {
+    let resolveSave: () => void = () => {};
+    let starts = 0;
+    const s = createSaveScheduler(async () => {
+      starts += 1;
+      await new Promise<void>((r) => {
+        resolveSave = r;
+      });
+    });
+    s.noteDirty();
+    const f1 = s.flush();
+    const f2 = s.flush(); // preview toggle + tab switch on the same tab
+    await vi.advanceTimersByTimeAsync(0);
+    expect(starts).toBe(1);
+    resolveSave();
+    await f1;
+    await f2;
+    expect(starts).toBe(1); // both settled on the SAME save
+  });
+});

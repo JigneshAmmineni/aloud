@@ -154,8 +154,8 @@ export function Workspace({
     tabs: EditorTab[];
     activeId: number | null;
     onActivate: (id: number) => void;
-    onClose: (id: number) => void;
-    onEdit: (id: number, text: string) => void;
+    onClose: (id: number, force?: boolean) => void;
+    onEdit: (id: number, text: string, fromDoc?: string) => void;
     onSetView: (id: number, view: "source" | "preview") => void;
     onApplyTheirs: (id: number) => void;
     onDismissConflict: (id: number) => void;
@@ -185,6 +185,12 @@ export function Workspace({
 
   const startDrag = (e: React.PointerEvent) => {
     e.preventDefault();
+    // pointer capture + listeners on the ELEMENT, not window: an unmount
+    // mid-drag (workspace closed with the pointer down) used to leak
+    // window listeners that kept setting state on a dead component
+    // (round 6)
+    const el = e.currentTarget as HTMLElement;
+    el.setPointerCapture(e.pointerId);
     const startX = e.clientX;
     const startW = leftWidth;
     const move = (ev: PointerEvent) => {
@@ -192,13 +198,13 @@ export function Workspace({
       setLeftWidth(Math.min(560, Math.max(220, w)));
     };
     const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-      window.removeEventListener("pointercancel", up);
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+      el.removeEventListener("pointercancel", up);
     };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-    window.addEventListener("pointercancel", up);
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
   };
 
   const docs = sortDocs(state.docs, sort.col, sort.dir);
@@ -347,10 +353,12 @@ export function Workspace({
         <div className="ws-console">{consoleSlot}</div>
       </div>
 
+      {/* presentational chrome, not role="separator": that role
+          announces an adjustable control a screen reader can't adjust
+          (no keyboard path) — the split works at its default width */}
       <div
         className="ws-divider"
-        role="separator"
-        aria-orientation="vertical"
+        aria-hidden
         title="Drag to resize"
         onPointerDown={startDrag}
       />

@@ -23,6 +23,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
+from typing import Annotated
 
 from obs.logging import setup_logging
 
@@ -225,25 +226,34 @@ async def email_check(request: Request):
 # authed 1 GB POST the same way the upload route's bounded read prevents.
 MAX_SAVE_BODY_BYTES = 2 * 1024 * 1024
 
-# a path id beyond int32 is an unencodable bind -> 500 where FR-56's
-# precedence says not-found; the same class FR-59 bounded for offset
-_DOC_ID = Path(ge=1, le=2_147_483_647)
+# documents.id is a SQLAlchemy Integer -> int32; a value beyond it is an
+# unencodable bind -> 500 where FR-56's precedence says not-found (the
+# same class FR-59 bounded for offset). Annotated, NOT a shared Path()
+# default: FastAPI writes back onto a FieldInfo handed in as a default,
+# so one instance shared across routes is a latent footgun (round 6).
+INT32_MAX = 2_147_483_647
+DocId = Annotated[int, Path(ge=1, le=INT32_MAX)]
 
 
-async def _bounded_json(request: Request, cap: int) -> dict | None:
-    """Read at most cap+1 bytes of body and parse JSON; None on refusal."""
+async def _bounded_json(
+    request: Request, cap: int
+) -> tuple[dict | None, str | None]:
+    """Read at most cap+1 bytes of body and parse JSON. Returns
+    (body, None) or (None, "too_large" | "malformed") — a typed refusal
+    like EditDiagnosis/SaveOutcome, not an in-band sentinel key a client
+    body could legitimately contain (round 6)."""
     chunks: list[bytes] = []
     size = 0
     async for chunk in request.stream():
         size += len(chunk)
         if size > cap:
-            return None
+            return None, "too_large"
         chunks.append(chunk)
     try:
         body = json.loads(b"".join(chunks))
     except Exception:
-        return {"__malformed__": True}
-    return body if isinstance(body, dict) else {"__malformed__": True}
+        return None, "malformed"
+    return (body, None) if isinstance(body, dict) else (None, "malformed")
 
 
 # FR-51: per-USER limiter, declared with the route's own auth callable so
@@ -314,7 +324,7 @@ async def list_documents_route(
 
 @app.get("/documents/{document_id}")
 async def get_document_route(
-    document_id: int = _DOC_ID,
+    document_id: DocId,
     user_id: str = Depends(get_current_user_id),
 ):
     """FR-52: one owned document with full content — preview, download, and
@@ -342,7 +352,7 @@ async def get_document_route(
 # disabled account can overwrite its own documents for its residual token
 # hour exactly as its live session's edit tools allow, and cannot grow
 # anything (FR-29 deliberately unchanged).
-TITLE_MAX_CHARS = 200
+TITLE_MAX_CHARS = 200  # mirrored in frontend/lib/workspace.ts — change BOTH
 
 _saves_limiter = user_rate_limited(
     DOCUMENT_SAVE_RATE_LIMIT, 60.0, get_current_user_id
@@ -352,20 +362,20 @@ _saves_limiter = user_rate_limited(
 @app.put("/documents/{document_id}", dependencies=[Depends(_saves_limiter)])
 async def save_document_route(
     request: Request,
-    document_id: int = _DOC_ID,
+    document_id: DocId,
     user_id: str = Depends(get_current_user_id),
 ):
     """FR-56: save (and optionally rename) a document — the NULL-safe CAS
     is the concurrency seam the whole §4.12 editor rides. The base token
     is OPAQUE to the client (echoed byte-for-byte); the server parses it
     at full precision."""
-    body = await _bounded_json(request, MAX_SAVE_BODY_BYTES)
-    if body is None:
+    body, body_err = await _bounded_json(request, MAX_SAVE_BODY_BYTES)
+    if body_err == "too_large":
         raise HTTPException(
             status_code=413,
             detail=f"save body too large (limit {MAX_SAVE_BODY_BYTES} bytes)",
         )
-    if body.get("__malformed__"):
+    if body is None:
         # distinct from the content-validation 400: the client treats
         # validation text literally when classifying failures
         raise HTTPException(status_code=400, detail="body must be a JSON object")
@@ -456,7 +466,7 @@ async def save_document_route(
 
 @app.delete("/documents/{document_id}")
 async def delete_document_route(
-    document_id: int = _DOC_ID,
+    document_id: DocId,
     user_id: str = Depends(get_current_user_id),
 ):
     """FR-52: hard delete behind the client's confirming affordance; the
@@ -565,7 +575,7 @@ def _coerce_attach_ids(raw) -> list[int]:
                 continue
         else:
             continue
-        if not (1 <= doc_id <= 2_147_483_647):
+        if not (1 <= doc_id <= INT32_MAX):
             # the offset/path-id bound, applied to the attach list too:
             # 10**19 against an int4 column is an asyncpg DataError that
             # 500s session establishment

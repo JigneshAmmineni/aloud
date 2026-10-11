@@ -669,6 +669,12 @@ body::after {
   cursor: pointer;
 }
 
+.ed-tab-alert {
+  color: #e0a23f; /* conflict/stalled/terminal on a BACKGROUND tab — the
+                     dirty dot alone carried three meanings (round 6) */
+  font-weight: 700;
+}
+
 .ed-tab-close {
   border: none;
   background: none;

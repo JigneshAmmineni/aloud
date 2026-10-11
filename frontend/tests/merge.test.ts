@@ -92,6 +92,10 @@ describe("the edit bound", () => {
     const b = Array.from({ length: n }, (_, i) => `line ${i}`).join("\n");
     const m = Array.from({ length: n }, (_, i) => `mine ${i}`).join("\n");
     const t = Array.from({ length: n }, (_, i) => `theirs ${i}`).join("\n");
-    expect(merge3(b, m, t)).toEqual({ merged: m, conflict: true });
+    expect(merge3(b, m, t)).toEqual({
+      merged: m,
+      conflict: true,
+      bailed: true,
+    });
   });
 });

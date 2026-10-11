@@ -26,7 +26,7 @@ function SourceEditor({
 }: {
   tab: EditorTab;
   editable: boolean;
-  onEdit: (id: number, text: string) => void;
+  onEdit: (id: number, text: string, fromDoc?: string) => void;
 }) {
   const cmRef = useRef<ReactCodeMirrorRef>(null);
   const initial = useRef(tab.buffer);
@@ -66,7 +66,10 @@ function SourceEditor({
         ) {
           return;
         }
-        onEdit(tab.id, value);
+        // the doc BEFORE this change rides along so edit() can tell a
+        // keystroke that raced an unpainted external merge from a
+        // normal one (round 6)
+        onEdit(tab.id, value, viewUpdate.startState.doc.toString());
       }}
       extensions={tab.format === "markdown" ? [markdown()] : []}
       theme="dark"
@@ -121,8 +124,8 @@ export function EditorPane({
   tabs: EditorTab[];
   activeId: number | null;
   onActivate: (id: number) => void;
-  onClose: (id: number) => void;
-  onEdit: (id: number, text: string) => void;
+  onClose: (id: number, force?: boolean) => void;
+  onEdit: (id: number, text: string, fromDoc?: string) => void;
   onSetView: (id: number, view: "source" | "preview") => void;
   onApplyTheirs: (id: number) => void;
   onDismissConflict: (id: number) => void;
@@ -146,7 +149,10 @@ export function EditorPane({
     active.format !== "pdf" &&
     !active.loading &&
     !active.loadFailed &&
-    !active.terminal;
+    // non-gone terminals STAY editable: the ceiling/format classes are
+    // fixed by editing (shrink under the limit) and edit() clears them;
+    // only a deleted row is truly read-only (round 6)
+    active.terminalKind !== "gone";
 
   return (
     <section className="ed-pane" aria-label="Editor">
@@ -164,6 +170,11 @@ export function EditorPane({
               title={t.title}
               onClick={() => onActivate(t.id)}
             >
+              {(t.conflict || t.stalled || t.terminal) && (
+                <span className="ed-tab-alert" aria-label="needs attention">
+                  !{" "}
+                </span>
+              )}
               {t.dirty ? "• " : ""}
               {t.title}
             </button>
@@ -171,7 +182,22 @@ export function EditorPane({
               type="button"
               className="ed-tab-close"
               aria-label={`Close ${t.title}`}
-              onClick={() => onClose(t.id)}
+              onClick={() => {
+                if (t.dirty && (t.terminal || t.stalled)) {
+                  // this buffer cannot flush on close — the banner just
+                  // promised "your text is kept", so x asks first and
+                  // forces only on an explicit yes (round 6)
+                  if (
+                    window.confirm(
+                      "this tab has text that couldn't be saved — close anyway and lose it?",
+                    )
+                  ) {
+                    onClose(t.id, true);
+                  }
+                  return;
+                }
+                onClose(t.id);
+              }}
             >
               ×
             </button>

@@ -627,3 +627,172 @@ describe("useEditor round-4", () => {
     expect(result.current.tabs[0].saveState).toBe("saved"); // content landed
   });
 });
+
+describe("useEditor round-6", () => {
+  it("closing a dirty terminal tab is refused without force, closes with it", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    authedFetch.mockResolvedValueOnce(jsonResponse(404, { detail: "gone" }));
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "the only copy\n");
+    });
+    await act(async () => {
+      await result.current.flushAll(); // 404 -> terminal, buffer kept
+    });
+    expect(result.current.tabs[0].terminalKind).toBe("gone");
+    expect(result.current.tabs[0].dirty).toBe(true);
+
+    await act(async () => {
+      await result.current.close(1); // bare x: refused
+    });
+    expect(result.current.tabs).toHaveLength(1);
+
+    await act(async () => {
+      await result.current.close(1, true); // confirmed: closes
+    });
+    expect(result.current.tabs).toHaveLength(0);
+  });
+
+  it("closeDeleted falls back to a surviving tab, not null-under-tabs", async () => {
+    authedFetch.mockResolvedValue(jsonResponse(200, GET_BODY));
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+      await result.current.open(doc(2));
+      await result.current.open(doc(3));
+    });
+    act(() => {
+      result.current.activate(3);
+    });
+    act(() => {
+      result.current.closeDeleted(3);
+    });
+    expect(result.current.tabs.map((t) => t.id)).toEqual([1, 2]);
+    expect(result.current.activeId).toBe(2);
+  });
+
+  it("a keystroke whose pre-change doc is not the buffer is dropped", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    // an announce merges while CodeMirror still shows the old doc
+    act(() => {
+      result.current.handleAnnounce("document.updated", {
+        ...doc(1),
+        content: "merged by announce\n",
+        content_omitted: false,
+        updated_at: "TOK-MERGE",
+      } as never);
+    });
+    // the raced keystroke: CM's doc was still the PRE-merge text
+    act(() => {
+      result.current.edit(1, GET_BODY.content + "x", GET_BODY.content);
+    });
+    expect(result.current.tabs[0].buffer).toBe("merged by announce\n");
+    // an ordinary keystroke (fromDoc === buffer) still lands
+    act(() => {
+      result.current.edit(1, "merged by announce\nx", "merged by announce\n");
+    });
+    expect(result.current.tabs[0].buffer).toBe("merged by announce\nx");
+  });
+
+  it("a ceiling-class terminal clears on the next keystroke and saves", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(400, { detail: "this document is at its size limit" }),
+    );
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { updated_at: "TOK-SHRUNK", char_count: 5 }),
+    );
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "too big\n");
+    });
+    await act(async () => {
+      await result.current.flushAll(); // 400 gate -> terminal "other"
+    });
+    expect(result.current.tabs[0].terminalKind).toBe("other");
+
+    act(() => {
+      result.current.edit(1, "tiny\n"); // the in-place fix: shrink
+    });
+    expect(result.current.tabs[0].terminal).toBeNull();
+    await act(async () => {
+      await result.current.flushAll();
+    });
+    expect(result.current.tabs[0].saveState).toBe("saved");
+    expect(result.current.tabs[0].baseToken).toBe("TOK-SHRUNK");
+  });
+
+  it("an announce during the initial load is replayed, not dropped", async () => {
+    let resolveGet: (r: Response) => void = () => {};
+    authedFetch.mockImplementationOnce(
+      () => new Promise<Response>((r) => (resolveGet = r)),
+    );
+    const { result } = renderHook(() => useEditor());
+    let openP: Promise<void>;
+    act(() => {
+      openP = result.current.open(doc(1));
+    });
+    // the agent's edit lands while the GET is still in flight
+    act(() => {
+      result.current.handleAnnounce("document.updated", {
+        ...doc(1),
+        content: "agent edit, newer than the GET\n",
+        content_omitted: false,
+        updated_at: "TOK-NEWER",
+      } as never);
+    });
+    await act(async () => {
+      resolveGet(jsonResponse(200, GET_BODY)); // pre-edit content
+      await openP;
+    });
+    const tab = result.current.tabs[0];
+    expect(tab.buffer).toBe("agent edit, newer than the GET\n");
+    expect(tab.baseToken).toBe("TOK-NEWER");
+  });
+
+  it("apply-theirs on a BAILED merge takes theirs wholesale, never a no-op", async () => {
+    const lines = (p: string) =>
+      Array.from({ length: 3000 }, (_, i) => `${p} ${i}`).join("\n") + "\n";
+    const base = lines("base");
+    const mine = lines("mine");
+    const theirs = lines("theirs");
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { ...GET_BODY, content: base }),
+    );
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, mine);
+    });
+    act(() => {
+      result.current.handleAnnounce("document.updated", {
+        ...doc(1),
+        content: theirs,
+        content_omitted: false,
+        updated_at: "TOK-THEIRS",
+      } as never);
+    });
+    const afterMerge = result.current.tabs[0];
+    expect(afterMerge.conflict).toBe(true);
+    expect(afterMerge.buffer).toBe(mine); // the bail kept mine wholesale
+
+    act(() => {
+      result.current.applyTheirs(1);
+    });
+    const applied = result.current.tabs[0];
+    expect(applied.buffer).toBe(theirs); // the explicit click flips it
+    expect(applied.conflict).toBe(false);
+  });
+});

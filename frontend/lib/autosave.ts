@@ -33,6 +33,7 @@ export function createSaveScheduler(
   let dirty = false;
   let paused = false;
   let inflight: Promise<void> | null = null;
+  let flushing: Promise<void> | null = null;
 
   const clearTimers = () => {
     if (debounceTimer) clearTimeout(debounceTimer);
@@ -82,8 +83,14 @@ export function createSaveScheduler(
         maxWaitTimer = setTimeout(fire, maxWaitMs);
       }
     },
-    async flush() {
-      if (inflight) await inflight;
+    flush() {
+      // ONE flush at a time too: two flush points landing while a save
+      // is in flight (preview toggle + tab switch on the same tab) would
+      // both park on inflight, then both start sibling PUTs with the
+      // same base — a self-409 that burns a retry slot (round 6).
+      if (flushing) return flushing;
+      flushing = (async () => {
+        if (inflight) await inflight;
       // save UNCONDITIONALLY: the scheduler's flag clears before a save,
       // so after a FAILED save only the caller's state still knows the
       // buffer is dirty — the saver no-ops when clean (round-2 blocker 1).
@@ -108,7 +115,11 @@ export function createSaveScheduler(
             maxWaitTimer = setTimeout(fire, maxWaitMs);
           }
         });
-      await inflight;
+        await inflight;
+      })().finally(() => {
+        flushing = null;
+      });
+      return flushing;
     },
     dispose() {
       clearTimers();

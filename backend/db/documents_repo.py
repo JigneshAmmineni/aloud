@@ -504,6 +504,12 @@ async def search_workspace(user_id: str, query: str) -> WorkspaceSearchResult:
     sql = text(
         r"""
         WITH scanned AS (
+            -- known trade (round 6): count(*) OVER () forces the whole
+            -- user partition (content included) through a WindowAgg
+            -- tuplestore before LIMIT can emit — worst case at quota is
+            -- ~40 MB of temp writes. Accepted against the extra round
+            -- trip it saves; if it bites, count from a content-free
+            -- subquery or join content back after the LIMIT.
             SELECT id, title, kind, format, content,
                    COALESCE(updated_at, created_at) AS activity,
                    count(*) OVER () AS total_docs
