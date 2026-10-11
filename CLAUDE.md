@@ -49,6 +49,33 @@ Server-side encryption (key held by us) is added post-MVP. To make this painless
 
 ---
 
+## SDLC — how a feature ships
+
+The lifecycle every feature follows, start to finish. The Workflow rules below are the hard rules inside it; this is the shape of the whole loop.
+
+**1. Roadmap.** Every feature starts as a [ROADMAP.md](ROADMAP.md) entry — vision, rough scope, open questions, decisions parked as "spec-time". Working notes there are aspirational and carry no weight in specs or reviews. Feature order is deliberate (dependencies are stated in the entries).
+
+**2. Spec.** When a feature is next up, it is specced from its roadmap entry into [REQUIREMENTS.md](REQUIREMENTS.md) as a new § on its own branch, and the spec PR goes through the same Claude-review gate as code — spec PRs get multiple review rounds too (§4.11 took 12). Spec conventions:
+- **FRs are atomic, and the first sentence of an FR *is* the requirement.** Everything after it is mechanism, rationale, or bounds.
+- **Requirements are state, not journey.** Amend FRs in place; delete removed features outright. The journey lives in ROADMAP.md and git history, never in REQUIREMENTS.md.
+- Contested design decisions are written into the spec explicitly (e.g., §4.12: on merge conflict, user edits take precedence; CRDTs rejected for server-row-as-buffer). Reviewers then check that a mechanism exists behind every stated guarantee.
+
+**3. Implementation.** A feature branch off `main` implements the §. Commits land at reasonable checkpoints on Claude's judgment (no approval needed); pushes and the PR itself need explicit approval — see Workflow rules. The per-push approval can be lifted for one PR by an explicit standing instruction (e.g., "keep fixing and pushing until there are no blockers, then merge"); it covers that PR only and expires at merge.
+
+**4. The review loop.** Every push to the PR triggers CI and the tailored Claude review; rounds repeat until a round returns zero blocking findings.
+- **Local gates before every push**, all in Docker: `npx tsc --noEmit`, vitest, the backend suite on the CI lane (`docker compose run --rm -e DATABASE_URL=sqlite+aiosqlite:// backend python -m pytest -q`), the Postgres-only lane (`tests/test_documents_pg.py` with `RLS_TEST_DATABASE_URL`), `ruff check .`, and a clean `npm run build` (stop the dev container first — `.next` contention). Compose sets a Postgres `DATABASE_URL`, so the sqlite env override is what reproduces CI.
+- **When a round lands:** findings summary as its own turn-ending message first (real vs. churn, fix vs. push back), then fix without waiting — the Workflow rules below spell this out. Where the review mandates a test, prefer proving it discriminates (revert the fix, watch it fail) over trusting it.
+- Fixes land as one commit per round (`fix: PR #N round K — …`). A new push supersedes a running review — cancel the stale run rather than paying for both.
+- Non-blocking findings are either fixed in the same round or carried forward explicitly (recorded in the round summary, or opening the next branch's to-do list) — never silently dropped. An advisory can be accepted with a comment recording the trade instead of a change.
+
+**5. Merge.** Merge commit, not squash (matches #21/#22). The merge boundary enforces CURRENT-ARCHITECTURE.md accuracy (see Docs). Merging is covered by the same approval rule as pushes unless a standing instruction already authorized it at zero blockers.
+
+**6. Deploy.** Always the user's call, never Claude's. The "Deploy to production" workflow ships a chosen `main` commit to the VM, health-checks it, and only then moves `prod`; rollback moves `prod` backward. Before any deploy whose range includes a DB migration: manual `pg_dump` first (deployment.md §13). Deploys batch — several merged features can ship as one promotion. A promotion gate (golden-audio E2E + manual talk-through) is planned to run inside the deploy workflow (ROADMAP.md "Process infrastructure").
+
+**7. Behavioral acceptance.** Changes to prompts or agent behavior get a dated `docs/evals/` file **written before the run**, results appended after — that file is what the PR's acceptance bar points to. If only the owner can run the check (live voice session), the deferral is recorded in the Results section with its resume point and the PR ships provisionally; the eval stays open until the owner runs it.
+
+---
+
 ## Workflow rules
 
 - **Branching model:** `main` is the GitHub default and the integration "workbench" — feature branches PR into it (CI + Claude review gate). `prod` is the production pointer: it only ever moves to a **verified-deployed** commit (the deploy workflow moves it after the health check; rollback moves it backward). Promotion to prod is always the user's explicit call. `prototype-gemini-live` preserves the original Gemini Live prototype (retired design docs: see the Docs section).
