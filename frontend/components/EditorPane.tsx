@@ -1,11 +1,63 @@
 "use client";
 
+import { useEffect, useRef } from "react";
+
 import { markdown } from "@codemirror/lang-markdown";
-import CodeMirror from "@uiw/react-codemirror";
+import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 
 import { MarkdownView } from "@/components/MarkdownView";
 import type { EditorTab } from "@/lib/useEditor";
 import { downloadFilename } from "@/lib/workspace";
+
+/** The source editor is UNCONTROLLED after mount: external buffer
+ * changes (announce merges, 409 merges, discard) land as a MINIMAL
+ * CodeMirror transaction so the caret maps through them in place
+ * (FR-58.2) — a controlled whole-value replace throws the caret to the
+ * end of the file on every merge, mid-sentence. */
+function SourceEditor({
+  tab,
+  editable,
+  onEdit,
+}: {
+  tab: EditorTab;
+  editable: boolean;
+  onEdit: (id: number, text: string) => void;
+}) {
+  const cmRef = useRef<ReactCodeMirrorRef>(null);
+  const initial = useRef(tab.buffer);
+
+  useEffect(() => {
+    const view = cmRef.current?.view;
+    if (!view) return;
+    const a = view.state.doc.toString();
+    const b = tab.buffer;
+    if (a === b) return;
+    // common prefix/suffix trim -> one small change, caret preserved
+    let p = 0;
+    while (p < a.length && p < b.length && a[p] === b[p]) p++;
+    let endA = a.length;
+    let endB = b.length;
+    while (endA > p && endB > p && a[endA - 1] === b[endB - 1]) {
+      endA--;
+      endB--;
+    }
+    view.dispatch({
+      changes: { from: p, to: endA, insert: b.slice(p, endB) },
+    });
+  }, [tab.buffer]);
+
+  return (
+    <CodeMirror
+      ref={cmRef}
+      value={initial.current}
+      onChange={(value) => onEdit(tab.id, value)}
+      extensions={tab.format === "markdown" ? [markdown()] : []}
+      theme="dark"
+      basicSetup={{ lineNumbers: true, foldGutter: false }}
+      editable={editable}
+    />
+  );
+}
 
 const SAVE_LABEL: Record<EditorTab["saveState"], string> = {
   saved: "saved",
@@ -47,6 +99,7 @@ export function EditorPane({
   onDismissConflict,
   onRename,
   onRetryStalled,
+  onDiscard,
 }: {
   tabs: EditorTab[];
   activeId: number | null;
@@ -58,6 +111,7 @@ export function EditorPane({
   onDismissConflict: (id: number) => void;
   onRename: (id: number, title: string) => void;
   onRetryStalled: (id: number) => void;
+  onDiscard: (id: number) => void;
 }) {
   const active = tabs.find((t) => t.id === activeId) ?? null;
   if (tabs.length === 0) {
@@ -112,7 +166,7 @@ export function EditorPane({
         <>
           <div className="ed-bar">
             <input
-              key={active.id}
+              key={`${active.id}:${active.title}`}
               className="ed-title"
               defaultValue={active.title}
               aria-label="Document title"
@@ -171,6 +225,9 @@ export function EditorPane({
               <button type="button" onClick={() => downloadBuffer(active)}>
                 download my copy
               </button>
+              <button type="button" onClick={() => onDiscard(active.id)}>
+                discard changes
+              </button>
             </div>
           )}
           {active.conflict && (
@@ -194,8 +251,24 @@ export function EditorPane({
               <button type="button" onClick={() => downloadBuffer(active)}>
                 download my copy
               </button>
+              <button type="button" onClick={() => onDiscard(active.id)}>
+                discard changes
+              </button>
             </div>
           )}
+          {!active.terminal &&
+            !active.stalled &&
+            active.saveState === "error" && (
+              <div className="ed-banner ed-terminal" role="alert">
+                this document can't be saved right now — your text is kept.
+                <button type="button" onClick={() => downloadBuffer(active)}>
+                  download my copy
+                </button>
+                <button type="button" onClick={() => onDiscard(active.id)}>
+                  discard changes
+                </button>
+              </div>
+            )}
 
           <div className="ed-body">
             {active.loading ? (
@@ -217,15 +290,11 @@ export function EditorPane({
             ) : active.format === "pdf" ? (
               <pre className="ws-pre">{active.buffer}</pre>
             ) : (
-              <CodeMirror
-                value={active.buffer}
-                onChange={(value) => onEdit(active.id, value)}
-                extensions={
-                  active.format === "markdown" ? [markdown()] : []
-                }
-                theme="dark"
-                basicSetup={{ lineNumbers: true, foldGutter: false }}
+              <SourceEditor
+                key={active.id}
+                tab={active}
                 editable={editable}
+                onEdit={onEdit}
               />
             )}
           </div>

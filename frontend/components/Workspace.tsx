@@ -157,6 +157,7 @@ export function Workspace({
     onDismissConflict: (id: number) => void;
     onRename: (id: number, title: string) => void;
     onRetryStalled: (id: number) => void;
+    onDiscard: (id: number) => void;
   };
   onClose: () => void;
   onLoadMore: () => void;
@@ -358,6 +359,7 @@ export function Workspace({
         onDismissConflict={editor.onDismissConflict}
         onRename={editor.onRename}
         onRetryStalled={editor.onRetryStalled}
+        onDiscard={editor.onDiscard}
       />
     </aside>
   );

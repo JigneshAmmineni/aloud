@@ -70,6 +70,7 @@ describe("Workspace console docking (FR-57.4)", () => {
           onDismissConflict: noop,
           onRename: noop,
           onRetryStalled: noop,
+          onDiscard: noop,
         }}
         onClose={noop}
         onLoadMore={noop}

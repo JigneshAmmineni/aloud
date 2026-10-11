@@ -329,3 +329,75 @@ describe("useEditor round-2 fixes", () => {
     expect(puts()).toBeLessThan(8); // and never at 1 Hz (30s of hammering = 30)
   });
 });
+
+describe("useEditor round-2 blockers", () => {
+  it("flushAll issues a PUT for a tab whose previous save FAILED — Talk recovers", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    authedFetch.mockResolvedValueOnce(jsonResponse(500, {})); // save 1 fails
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { updated_at: "TOK-RECOVERED", char_count: 2 }),
+    );
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "v2");
+    });
+    await act(async () => {
+      await result.current.flushAll(); // hits the 500
+    });
+    expect(result.current.tabs[0].dirty).toBe(true);
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.flushAll(); // must PUT again, not no-op
+    });
+    expect(ok).toBe(true);
+    expect(result.current.tabs[0].saveState).toBe("saved");
+  });
+
+  it("401 is retryable: the editor never goes read-only over a token blip", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY));
+    authedFetch.mockResolvedValueOnce(jsonResponse(401, {}));
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "v2");
+    });
+    await act(async () => {
+      await result.current.flushAll();
+    });
+    const tab = result.current.tabs[0];
+    expect(tab.terminal).toBeNull(); // not terminal
+    expect(tab.saveState).toBe("unsaved"); // retryable, buffer kept
+  });
+
+  it("discard reverts to the last synced content and unblocks flushAll", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY));
+    authedFetch.mockResolvedValue(jsonResponse(500, {})); // saves keep failing
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "doomed edit");
+    });
+    await act(async () => {
+      await result.current.flushAll();
+    });
+    expect(result.current.tabs[0].dirty).toBe(true);
+    act(() => {
+      result.current.discard(1);
+    });
+    const tab = result.current.tabs[0];
+    expect(tab.buffer).toBe(GET_BODY.content); // back to synced truth
+    expect(tab.dirty).toBe(false);
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.flushAll();
+    });
+    expect(ok).toBe(true); // Talk unblocked by the user's explicit choice
+  });
+});

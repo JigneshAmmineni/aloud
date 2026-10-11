@@ -154,6 +154,15 @@ export function useWorkspace(enabled: boolean) {
       if (m.has(meta.id)) {
         m.set(meta.id, meta.char_count);
         syncAttached();
+        // FR-51's visibility: a save that grew an ATTACHED document past
+        // the budget must say so — /start would slice it silently
+        const used = [...m.values()].reduce((a, b) => a + b, 0);
+        if (used > MAX_TOTAL_CHARS) {
+          setBudgetError(
+            "this save put the attached set over the character budget — " +
+              "detach something before your next session",
+          );
+        }
       }
       setState((s) =>
         updateDocMeta(s, meta.id, meta.title, meta.char_count, meta.updated_at),
@@ -216,17 +225,20 @@ export function useWorkspace(enabled: boolean) {
   );
 
   const deleteDoc = useCallback(
-    async (doc: WorkspaceDoc) => {
-      const res = await authedFetch(`/documents/${doc.id}`, { method: "DELETE" });
-      if (!res.ok) {
+    async (doc: WorkspaceDoc): Promise<boolean> => {
+      const res = await authedFetch(`/documents/${doc.id}`, {
+        method: "DELETE",
+      }).catch(() => null);
+      if (!res || !res.ok) {
         setError("couldn't delete that document");
-        return;
+        return false;
       }
       setState((s) => markDeleted(s, doc.id));
       // "show older" must not advertise a phantom row after a delete
       setTotal((t) => Math.max(0, t - 1));
       attachedRef.current.delete(doc.id);
       syncAttached();
+      return true;
     },
     [syncAttached],
   );

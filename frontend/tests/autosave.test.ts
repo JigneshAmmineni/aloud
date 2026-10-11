@@ -34,7 +34,11 @@ describe("createSaveScheduler", () => {
     expect(saves.length).toBeGreaterThanOrEqual(2);
   });
 
-  it("flush saves a dirty buffer immediately and settles", async () => {
+  it("flush invokes the saver unconditionally — the saver owns dirtiness", async () => {
+    // round-2 blocker 1: the scheduler's own flag clears BEFORE a save,
+    // so a failed save left flush() a no-op while the buffer stayed
+    // dirty; flush now always calls through and the saver no-ops when
+    // clean (useEditor's doSave guards on the tab's dirty flag)
     let saved = 0;
     const s = createSaveScheduler(async () => {
       saved += 1;
@@ -42,8 +46,8 @@ describe("createSaveScheduler", () => {
     s.noteDirty();
     await s.flush();
     expect(saved).toBe(1);
-    await s.flush(); // clean: no extra save
-    expect(saved).toBe(1);
+    await s.flush(); // called again; a clean SAVER no-ops, not the scheduler
+    expect(saved).toBe(2);
   });
 
   it("keystrokes during an in-flight save reschedule instead of dropping", async () => {

@@ -45,14 +45,16 @@ export function createSaveScheduler(
     clearTimers();
     if (!dirty || paused) return;
     dirty = false;
-    inflight = save().finally(() => {
-      inflight = null;
-      // keystrokes during the save re-dirtied: reschedule
-      if (dirty && !debounceTimer) {
-        debounceTimer = setTimeout(fire, debounceMs);
-        maxWaitTimer = setTimeout(fire, maxWaitMs);
-      }
-    });
+    inflight = save()
+      .catch(() => {}) // the saver owns failure handling; never leak
+      .finally(() => {
+        inflight = null;
+        // keystrokes during the save re-dirtied: reschedule
+        if (dirty && !debounceTimer) {
+          debounceTimer = setTimeout(fire, debounceMs);
+          maxWaitTimer = setTimeout(fire, maxWaitMs);
+        }
+      });
     await inflight;
   };
 
@@ -78,10 +80,15 @@ export function createSaveScheduler(
     },
     async flush() {
       if (inflight) await inflight;
-      if (dirty) {
-        paused = false; // an explicit flush point overrides the hold
-        await fire();
-      }
+      // save UNCONDITIONALLY: the scheduler's flag clears before a save,
+      // so after a FAILED save only the caller's state still knows the
+      // buffer is dirty — the saver no-ops when clean (round-2 blocker 1)
+      paused = false; // an explicit flush point overrides the hold
+      clearTimers();
+      dirty = false;
+      inflight = save().catch(() => {});
+      await inflight;
+      inflight = null;
     },
     dispose() {
       clearTimers();

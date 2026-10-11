@@ -121,7 +121,14 @@ export function useEditor({
   const doSave = useCallback(
     async (id: number) => {
       const tab = tabsRef.current.find((t) => t.id === id);
-      if (!tab || tab.terminal || tab.loading || tab.loadFailed || tab.stalled)
+      if (
+        !tab ||
+        !tab.dirty || // flush fires unconditionally; clean tabs no-op
+        tab.terminal ||
+        tab.loading ||
+        tab.loadFailed ||
+        tab.stalled
+      )
         return;
       const sent = tab.buffer;
       const sentTitle = tab.title;
@@ -177,10 +184,13 @@ export function useEditor({
         retries409.current.set(id, attempt);
         patchTab(id, (t) => {
           const r = merge3(t.base, t.buffer, cur.content);
-          if (r.conflict && !conflictSnaps.current.has(id)) {
+          if (r.conflict) {
+            // a later conflict refreshes theirs/merged so "apply theirs"
+            // replays the NEWEST agent edit, not the first one
+            const prev = conflictSnaps.current.get(id);
             conflictSnaps.current.set(id, {
-              base: t.base,
-              mine: t.buffer,
+              base: prev?.base ?? t.base,
+              mine: prev?.mine ?? t.buffer,
               theirs: cur.content,
               merged: r.merged,
             });
@@ -205,7 +215,10 @@ export function useEditor({
         return;
       }
 
-      if (res.status === 429 || res.status >= 500) {
+      if (res.status === 401 || res.status === 429 || res.status >= 500) {
+        // 401 is RETRYABLE (FR-58.1 "401-then-refresh"): authedFetch sends
+        // no Bearer while auth.currentUser is momentarily null — terminal
+        // here would freeze the editor read-only mid-sentence
         patchTab(id, { saveState: "unsaved" });
         scheduleRetry(id);
         return;
@@ -287,7 +300,13 @@ export function useEditor({
 
   const edit = useCallback(
     (id: number, text: string) => {
-      patchTab(id, { buffer: text, dirty: true, saveState: "unsaved" });
+      patchTab(id, (t) => ({
+        buffer: text,
+        dirty: true,
+        // a stalled/terminal tab keeps its error chip — "unsaved" would
+        // quietly promise an autosave that is not coming
+        saveState: t.stalled || t.terminal ? t.saveState : "unsaved",
+      }));
       schedulers.current.get(id)?.noteDirty();
     },
     [patchTab],
@@ -356,6 +375,30 @@ export function useEditor({
     [patchTab],
   );
 
+  /** "Discard changes": revert the buffer to the last synced content —
+   * the explicit way out of a stuck save (failed flush, stalled,
+   * terminal) that the Talk-refusal copy promises. The tab stays open;
+   * the user loses only what could not be saved, by their own hand. */
+  const discard = useCallback(
+    (id: number) => {
+      retries409.current.set(id, 0);
+      failStreak.current.set(id, 0);
+      conflictSnaps.current.delete(id);
+      patchTab(id, (t) => ({
+        buffer: t.base,
+        dirty: false,
+        saveState: "saved",
+        stalled: false,
+        conflict: false,
+        // a 404-terminal stays terminal (the row is gone); gate/ceiling
+        // terminals clear — the pre-failure content is saved content
+        terminal:
+          t.terminal && t.terminal.includes("deleted") ? t.terminal : null,
+      }));
+    },
+    [patchTab],
+  );
+
   /** FR-58.3's manual retry out of the stalled state. */
   const retryStalled = useCallback(
     (id: number) => {
@@ -418,10 +461,11 @@ export function useEditor({
             };
           }
           const r = merge3(t.base, t.buffer, theirs);
-          if (r.conflict && !conflictSnaps.current.has(doc.id)) {
+          if (r.conflict) {
+            const prev = conflictSnaps.current.get(doc.id);
             conflictSnaps.current.set(doc.id, {
-              base: t.base,
-              mine: t.buffer,
+              base: prev?.base ?? t.base,
+              mine: prev?.mine ?? t.buffer,
               theirs,
               merged: r.merged,
             });
@@ -452,6 +496,7 @@ export function useEditor({
       scheduler?.pause();
       void authedFetch(`/documents/${doc.id}`)
         .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null) // offline: no unhandled rejection; resume below
         .then(
           (body: { content: string; updated_at: string | null } | null) => {
             if (body) apply(body.content, body.updated_at);
@@ -483,6 +528,7 @@ export function useEditor({
     applyTheirs,
     dismissConflict,
     retryStalled,
+    discard,
     handleAnnounce,
     flushAll,
   };

@@ -879,7 +879,9 @@ body::after {
     left: 0;
     right: 0;
     bottom: 0;
-    height: 72px;
+    /* under zoom 0.45 this occupies ~72 real px — matching the editor's
+       bottom reservation above */
+    height: 160px;
     z-index: 30;
     background: #17141166;
     backdrop-filter: blur(6px);

@@ -241,3 +241,35 @@ def test_offset_numeric_bound_survives_absurd_values():
         assert items == [] and total >= 1  # empty page, same total, no 500
 
     asyncio.run(run())
+
+
+def test_cas_chain_round_trips_timestamptz():
+    """The self-409 regression on the PROD shape: Postgres timestamptz
+    carries microseconds + offset; the serialized string must round-trip
+    through fromisoformat into a base that matches IS NOT DISTINCT FROM."""
+    uid = _uid()
+
+    async def run():
+        from datetime import datetime
+
+        from db.documents_repo import save_document_content
+
+        await init_db(PG_URL)
+        await provision_user(uid, None)
+        row = await insert_upload_row(uid, "t.md", "markdown", "v1")
+
+        out1 = await save_document_content(
+            uid, row.id, "v2", base_updated_at=None, title=None, ceiling=10_000
+        )
+        assert out1.row is not None
+        token = out1.row.updated_at.isoformat()  # what the route returns
+
+        out2 = await save_document_content(
+            uid, row.id, "v3",
+            base_updated_at=datetime.fromisoformat(token),  # the echoed base
+            title=None, ceiling=10_000,
+        )
+        assert out2.row is not None, f"self-409 on echoed token {token!r}"
+        assert out2.row.content == "v3"
+
+    asyncio.run(run())

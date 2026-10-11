@@ -91,8 +91,11 @@ export default function Home() {
   const closeDeleted = editor.closeDeleted;
   const handleDelete = useCallback(
     async (doc: WorkspaceDoc) => {
-      await deleteDoc(doc);
-      closeDeleted(doc.id); // a deleted document closes its tab (FR-57.3)
+      // only a SUCCESSFUL delete closes the tab — a failed one must not
+      // drop the only copy of an unsaved buffer (round-2 blocker 3)
+      if (await deleteDoc(doc)) {
+        closeDeleted(doc.id); // a deleted document closes its tab (FR-57.3)
+      }
     },
     [deleteDoc, closeDeleted],
   );
@@ -175,6 +178,7 @@ export default function Home() {
             onDismissConflict: editor.dismissConflict,
             onRename: editor.rename,
             onRetryStalled: editor.retryStalled,
+            onDiscard: editor.discard,
           }}
           onClose={() => {
             // FR-58.1: closing the workspace is a flush point
