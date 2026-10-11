@@ -550,10 +550,13 @@ def build_registry() -> list[Tool]:
         Tool(
             name="create_document",
             description=(
-                "Write up a document of the conversation and put it on the "
-                "user's screen: a structured summary, a list of action "
-                "items, or a cleaned-up version of the user's idea. Use "
-                "only when the user asks for a write-up."
+                "Create a NEW document on the user's screen: a structured "
+                "summary, a list of action items, or a cleaned-up version "
+                "of the user's idea. Use ONLY when the user explicitly "
+                "asks for a document or write-up — 'write that up', "
+                "'create a summary doc', 'put that in a document'. "
+                "'Give me a summary', 'summarize this', or any question "
+                "is answered OUT LOUD, never by creating a document."
             ),
             parameters={
                 "type": "object",
