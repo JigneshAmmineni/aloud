@@ -2630,6 +2630,44 @@ upsert/tombstone/close-on-delete rules extend to editor tabs
 move on user saves too, via FR-56's `char_count` response. FR-29 —
 deliberately unchanged (FR-56 states local verification and why).
 
+### 4.13 Create gate — the judge in front of document creation
+
+- **FR-60** **`create_document` executes only after a server-side judge
+  confirms the user explicitly asked for a new document; otherwise the
+  call returns a steering refusal and nothing is written.** The
+  description-only boundary did not hold in live use (the 2026-10-10
+  eval's recorded result: "note that down" mid-discussion produced a
+  new document), so the boundary is code, not prompt. Mechanism:
+  - The gate sits in the agent loop's dispatch (`agent/gate.py` +
+    the loop's `_gate_allows`), in front of the handler — a refused
+    call runs no handler and writes nothing.
+  - The judge is ONE bounded yes/no LLM call ("did the user explicitly
+    request a new document in their recent turns?") through the same
+    provider-neutral FR-48 client the loop uses — no second provider,
+    no new SDK surface. Evidence is the last 4 user turns (600 chars
+    each) plus the proposed title; never document content, never tool
+    results, and the prompt marks the quoted turns as data.
+  - Anything but a clear YES refuses, and the gate **fails closed**: a
+    judge error or timeout (4s) refuses with the same steering — the
+    worst failure mode is one extra voice turn, never an unwanted
+    document.
+  - The refusal text steers the recovery: add to an existing document
+    via `edit_document`, or ask the user and call again — after a
+    spoken yes, the confirmation is in the recent turns and the judge
+    allows the retry. The deliberate scope limit: the judge does NOT
+    pick which existing document fits; the main agent owns that with
+    the attached documents in its context.
+  - Instrumented like any stage (`step.N.gate.create_document` + a
+    `tool.gated` log line with the verdict), and the judge's tokens
+    land on the turn as ordinary LLM usage (FR-45).
+  - The gated set is `agent/gate.py`'s `GATED_TOOLS`;
+    `delete_document` joins it when that tool ships (ROADMAP).
+
+| Knob | Default | Where |
+|---|---|---|
+| `JUDGE_TIMEOUT_S` (judge call ceiling; on breach the gate refuses) | 4s | `agent/gate.py` |
+| Judge evidence window (user turns / chars per turn) | 4 / 600 | `agent/gate.py` |
+
 ---
 
 ## 5. Non-Functional Requirements

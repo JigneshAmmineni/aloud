@@ -197,6 +197,17 @@ From single upload-at-start + copy-paste artifacts to a real document workspace.
     re-render the open editor. CRDT (Yjs) rejected: cheap client-side but
     the server would become a CRDT peer (update-log storage, agent ops
     translated) — replaces the storage model for a rare case.
+  - **Create gate (shipped as FR-60, §4.13, 2026-10-11):** the
+    description-only create boundary failed live ("note that down"
+    made a new doc); creation is now gated by a server-side yes/no
+    judge over the user's recent turns, failing closed. Judge
+    considered-and-rejected extras: having it also pick which existing
+    document a change fits — too much for a cheap fast classifier, and
+    the main agent already holds the docs in context.
+  - **`delete_document` tool (planned):** expose deletion to the agent,
+    gated by the SAME FR-60 judge (explicit request required, fail
+    closed) — deletion is more destructive than creation, so it does
+    not ship before one-step undo exists.
   - **Versioning / undo (decided 2026-10-10):** v1 is **one-step undo** —
     a `previous_content` 🔒 column written on every edit (agent or user),
     so "undo that" restores the pre-edit text; a full

@@ -44,6 +44,7 @@ from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from agent.context import ContextProvider
+from agent.gate import GATE_REFUSAL, GATED_TOOLS, judge_allows
 from agent.prompts import (
     FALLBACK_GREETING_LINES,
     FALLBACK_LINES,
@@ -513,9 +514,19 @@ class AgentLoopProcessor(FrameProcessor):
         log = self._log.bind(turn_id=state.turn_id, step=state.step, tool=call.name)
         t0 = time.monotonic()
         outcome = "ok"
+        denied = (
+            tool is not None
+            and tool.name in GATED_TOOLS
+            and not await self._gate_allows(state, call, log)
+        )
         if tool is None:
             result = {"status": "error", "error": f"unknown tool: {call.name}"}
             outcome = "error"
+        elif denied:
+            # FR-60: the judge said no (or failed — the gate fails
+            # closed). The refusal steers the model to edit_document or
+            # to asking the user; no handler runs, nothing is written.
+            result = dict(GATE_REFUSAL)
         else:
             # asyncio.create_task, NOT self.create_task: a processor-owned
             # task dies with the pipeline, and a write cancelled mid-commit
@@ -565,6 +576,45 @@ class AgentLoopProcessor(FrameProcessor):
             event="tool.invoked", duration_ms=duration_ms, outcome=outcome
         ).info(f"{call.name}: {outcome} in {duration_ms}ms")
         state.results[index] = result
+
+    async def _gate_allows(
+        self, state: _TurnState, call: LLMToolCall, log
+    ) -> bool:
+        """FR-60: one judge call through the loop's own FR-48 client,
+        instrumented like any stage and FAILING CLOSED — a judge error
+        degrades to the agent asking the user, never to an unwanted
+        write. Judge tokens land on the turn like any LLM call."""
+        g0 = time.monotonic()
+        try:
+            allowed, usage = await judge_allows(
+                self._llm,
+                call.name,
+                call.arguments,
+                self._context.recent_user_texts(),
+            )
+        except Exception as e:
+            allowed = False
+            log.bind(event="gate.judge_failed").warning(
+                f"gate judge failed ({type(e).__name__}) — refusing {call.name}"
+            )
+        else:
+            if usage is not None:
+                self._recorder.record_llm_usage(
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                    turn_id=state.turn_id,
+                )
+        gate_ms = round((time.monotonic() - g0) * 1000)
+        self._recorder.record_step_stage(
+            state.turn_id, f"step.{state.step}.gate.{call.name}", gate_ms
+        )
+        log.bind(
+            event="tool.gated", allowed=allowed, duration_ms=gate_ms
+        ).info(
+            f"{call.name}: gate {'allowed' if allowed else 'refused'} "
+            f"in {gate_ms}ms"
+        )
+        return allowed
 
     def _write_done(self, call: LLMToolCall, task: asyncio.Task) -> None:
         """Done-callback for every write task — the FR-46 landing path for

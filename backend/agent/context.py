@@ -188,6 +188,17 @@ class ContextProvider:
         self._messages.append({"role": "assistant", "content": text})
         self._approx_chars += len(text)
 
+    def recent_user_texts(self, n: int = 4) -> list[str]:
+        """FR-60: the gate's evidence — the last n USER turns, oldest
+        first. Tool results carry role 'tool' in the neutral format, so
+        role 'user' here is genuinely the user's speech."""
+        texts = [
+            m["content"]
+            for m in self._messages
+            if m["role"] == "user" and isinstance(m["content"], str)
+        ]
+        return texts[-n:]
+
     def _approx_tokens(self) -> int:
         # O(1): the running counter is maintained by every append/update
         # (rounds 3-4 review) — the declared-approximate heuristic never

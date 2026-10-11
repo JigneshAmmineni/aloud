@@ -48,6 +48,12 @@ Scripted, two runs each, live session:
 
 ## Results
 
+**2026-10-11 (live session) — FAIL.** Mid-discussion of an idea inside
+an existing document, "note that down" produced a NEW document instead
+of an edit. The description-only boundary does not hold. Superseded by
+the FR-60 judge gate (docs/evals/2026-10-11-create-gate-judge.md); the
+scripted turns below move there and run against the gate.
+
 **2026-10-11 — owner run pending (recorded decision, not a met bar).**
 The change ships with PR #22 provisionally: the check needs a live
 voice session, which only the owner can run. Same pattern as the 3.1

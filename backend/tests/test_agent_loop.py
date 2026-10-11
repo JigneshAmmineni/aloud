@@ -1118,3 +1118,97 @@ def test_no_filler_on_tool_choice_none_calls():
     text = _pushed_text(h)
     assert not any(f in text for f in FILLER_LINES)
     assert any(line in text for line in FALLBACK_GREETING_LINES)
+
+
+# ---------------- FR-60: the create gate ----------------
+
+
+def _create_tool(ran):
+    async def handler(args, ctx):
+        ran.append(args)
+        return {"status": "created", "id": 1}
+
+    return Tool(
+        name="create_document",
+        description="t",
+        parameters={"type": "object", "properties": {}},
+        handler=handler,
+        is_write=True,
+    )
+
+
+def test_gated_create_refused_when_judge_says_no():
+    """FR-60: on the judge's NO the handler never runs, and the model sees
+    the steering refusal as the tool result — the turn still speaks."""
+    ran: list = []
+    scripts = [
+        [
+            LLMToolCall(name="create_document", arguments={"title": "x"}, id="c1"),
+            _done(),
+        ],
+        [LLMTextDelta("NO"), _done()],  # the judge's call
+        [LLMTextDelta("I added it to your notes instead."), _done()],
+    ]
+    h = make_loop(scripts, tools=[_create_tool(ran)])
+
+    asyncio.run(h.loop._run_turn("note that down"))
+
+    assert ran == []  # nothing was written
+    final_messages = h.llm.calls[2]["messages"]
+    tool_result = next(m for m in final_messages if m["role"] == "tool")
+    assert tool_result["content"]["status"] == "refused"
+    assert "edit_document" in tool_result["content"]["error"]
+    assert h.llm.calls[1]["tools"] is None  # the judge call declares none
+    assert "notes instead" in _pushed_text(h)
+
+
+def test_gated_create_runs_on_yes_and_judge_usage_lands_on_the_turn():
+    ran: list = []
+    scripts = [
+        [
+            LLMToolCall(name="create_document", arguments={"title": "x"}, id="c1"),
+            _done(),
+        ],
+        [LLMTextDelta("YES"), _done(usage=LLMUsage(40, 1))],
+        [LLMTextDelta("Done, it's on your screen."), _done()],
+    ]
+    h = make_loop(scripts, tools=[_create_tool(ran)])
+
+    asyncio.run(h.loop._run_turn("make a new doc called x"))
+
+    assert len(ran) == 1
+    # FR-45: the judge's tokens are attributed like any LLM call
+    assert any(
+        e.stage == "llm" and e.quantity == 40
+        for e in _queued(h.recorder, UsageEvent)
+    )
+
+
+def test_gate_fails_closed_on_a_judge_error():
+    ran: list = []
+    scripts = [
+        [LLMToolCall(name="create_document", arguments={}, id="c1"), _done()],
+        [RuntimeError("judge provider drop")],
+        [LLMTextDelta("Want me to start a new doc for this?"), _done()],
+    ]
+    h = make_loop(scripts, tools=[_create_tool(ran)])
+
+    asyncio.run(h.loop._run_turn("note it"))
+
+    assert ran == []  # a judge failure must never become an unwanted write
+    final_messages = h.llm.calls[2]["messages"]
+    tool_result = next(m for m in final_messages if m["role"] == "tool")
+    assert tool_result["content"]["status"] == "refused"
+
+
+def test_ungated_tools_never_consult_the_judge():
+    scripts = [
+        [LLMToolCall(name="echo", arguments={}, id="c1"), _done()],
+        [LLMTextDelta("ok"), _done()],
+    ]
+    h = make_loop(scripts, tools=[read_tool()])
+
+    asyncio.run(h.loop._run_turn("go"))
+
+    # exactly two LLM calls: the step and the final — no judge between
+    assert len(h.llm.calls) == 2
