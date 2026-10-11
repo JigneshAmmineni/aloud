@@ -11,7 +11,7 @@ from sqlalchemy import select
 import agent.registry as registry_mod
 import app.main as main
 from db.documents_repo import save_document_content
-from db.engine import init_db, session_factory
+from db.engine import session_factory
 from db.models import UsageEvent
 
 
