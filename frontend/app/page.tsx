@@ -101,7 +101,7 @@ export default function Home() {
 
   if (loading || !user) return null;
 
-  const consoleUI = (_compact: boolean) => (
+  const consoleUI = () => (
     <>
       <SessionButton state={state} onTalk={guardedTalk} onEnd={end} />
       <WaveformBar
@@ -151,7 +151,7 @@ export default function Home() {
 
       {/* FR-57.4: with the workspace open the console docks into it;
           closed, the full-size console owns the stage */}
-      {!docsOpen && <div className="core">{consoleUI(false)}</div>}
+      {!docsOpen && <div className="core">{consoleUI()}</div>}
 
       {docsOpen && (
         <Workspace
@@ -163,18 +163,24 @@ export default function Home() {
           loading={workspace.loading}
           error={workspace.error}
           budgetError={workspace.budgetError}
-          console={consoleUI(true)}
+          console={consoleUI()}
           editor={{
             tabs: editor.tabs,
             activeId: editor.activeId,
-            onActivate: editor.setActiveId,
+            onActivate: editor.activate,
             onClose: editor.close,
             onEdit: editor.edit,
             onSetView: editor.setView,
             onApplyTheirs: editor.applyTheirs,
             onDismissConflict: editor.dismissConflict,
+            onRename: editor.rename,
+            onRetryStalled: editor.retryStalled,
           }}
-          onClose={() => setDocsOpen(false)}
+          onClose={() => {
+            // FR-58.1: closing the workspace is a flush point
+            void flushAll();
+            setDocsOpen(false);
+          }}
           onLoadMore={workspace.loadMore}
           onOpen={editor.open}
           onDownload={workspace.download}

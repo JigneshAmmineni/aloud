@@ -155,6 +155,8 @@ export function Workspace({
     onSetView: (id: number, view: "source" | "preview") => void;
     onApplyTheirs: (id: number) => void;
     onDismissConflict: (id: number) => void;
+    onRename: (id: number, title: string) => void;
+    onRetryStalled: (id: number) => void;
   };
   onClose: () => void;
   onLoadMore: () => void;
@@ -222,7 +224,12 @@ export function Workspace({
       className={`workspace ws-v2${editor.tabs.length ? " has-tabs" : ""}`}
       aria-label="Documents"
     >
-      <div className="ws-left" style={{ width: leftWidth }}>
+      {/* a CSS variable, not an inline width: the 720px media query's
+          width:100% must win on phones (NFR-3) */}
+      <div
+        className="ws-left"
+        style={{ "--ws-left-w": `${leftWidth}px` } as React.CSSProperties}
+      >
         <div className="ws-bar">
           <h3 className="ws-heading">Documents</h3>
           <div className="ws-bar-right">
@@ -349,6 +356,8 @@ export function Workspace({
         onSetView={editor.onSetView}
         onApplyTheirs={editor.onApplyTheirs}
         onDismissConflict={editor.onDismissConflict}
+        onRename={editor.onRename}
+        onRetryStalled={editor.onRetryStalled}
       />
     </aside>
   );

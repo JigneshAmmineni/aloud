@@ -303,7 +303,7 @@ body::after {
 }
 
 .ws-left {
-  width: 320px; /* inline style drives it; this is the no-JS fallback */
+  width: var(--ws-left-w, 320px);
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
@@ -708,6 +708,24 @@ body::after {
 .ed-toggle button.on {
   color: var(--ink);
   background: rgba(233, 226, 214, 0.09);
+}
+
+.ed-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 3px 6px;
+}
+
+.ed-title:hover:not(:disabled),
+.ed-title:focus {
+  border-color: rgba(233, 226, 214, 0.16);
+  outline: none;
 }
 
 .ed-meta {

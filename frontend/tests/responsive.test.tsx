@@ -29,8 +29,8 @@ const tab: EditorTab = {
   dirty: false,
   saveState: "saved",
   terminal: null,
+  stalled: false,
   conflict: false,
-  theirs: null,
   loading: false,
   loadFailed: false,
   view: "source",
@@ -68,6 +68,8 @@ describe("Workspace console docking (FR-57.4)", () => {
           onSetView: noop,
           onApplyTheirs: noop,
           onDismissConflict: noop,
+          onRename: noop,
+          onRetryStalled: noop,
         }}
         onClose={noop}
         onLoadMore={noop}

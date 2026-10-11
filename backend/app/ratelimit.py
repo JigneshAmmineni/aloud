@@ -88,8 +88,8 @@ def user_rate_limited(max_requests: int, window_s: float, auth_dep):
         request: Request, user: AuthedUser | str = Depends(auth_dep)
     ) -> None:
         # the dep may yield AuthedUser (checked routes) or the plain uid
-        # (get_current_user_id routes) — key on the uid either way
-        key = getattr(user, "user_id", user)
+        # string (get_current_user_id routes) — key on the uid either way
+        key = user if isinstance(user, str) else user.user_id
         _check(buckets, key, max_requests, window_s, request.url.path)
 
     return dependency

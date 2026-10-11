@@ -5,6 +5,7 @@ import CodeMirror from "@uiw/react-codemirror";
 
 import { MarkdownView } from "@/components/MarkdownView";
 import type { EditorTab } from "@/lib/useEditor";
+import { downloadFilename } from "@/lib/workspace";
 
 const SAVE_LABEL: Record<EditorTab["saveState"], string> = {
   saved: "saved",
@@ -18,7 +19,9 @@ function downloadBuffer(tab: EditorTab) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = tab.title || `document-${tab.id}`;
+  // the one path where the buffer is the only copy — same sanitized,
+  // never-double-extended filename as the list's download
+  a.download = downloadFilename(tab.title, tab.format, tab.id);
   document.body.appendChild(a);
   a.click();
   setTimeout(() => {
@@ -42,6 +45,8 @@ export function EditorPane({
   onSetView,
   onApplyTheirs,
   onDismissConflict,
+  onRename,
+  onRetryStalled,
 }: {
   tabs: EditorTab[];
   activeId: number | null;
@@ -51,6 +56,8 @@ export function EditorPane({
   onSetView: (id: number, view: "source" | "preview") => void;
   onApplyTheirs: (id: number) => void;
   onDismissConflict: (id: number) => void;
+  onRename: (id: number, title: string) => void;
+  onRetryStalled: (id: number) => void;
 }) {
   const active = tabs.find((t) => t.id === activeId) ?? null;
   if (tabs.length === 0) {
@@ -104,6 +111,22 @@ export function EditorPane({
       {active && (
         <>
           <div className="ed-bar">
+            <input
+              key={active.id}
+              className="ed-title"
+              defaultValue={active.title}
+              aria-label="Document title"
+              title="Click to rename"
+              disabled={!editable}
+              onBlur={(e) => {
+                const v = e.target.value.trim();
+                if (v && v !== active.title) onRename(active.id, v);
+                else e.target.value = active.title;
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+              }}
+            />
             {active.format === "markdown" && editable && (
               <span className="ed-toggle" role="group" aria-label="View">
                 <button
@@ -139,6 +162,17 @@ export function EditorPane({
             </span>
           </div>
 
+          {active.stalled && (
+            <div className="ed-banner ed-terminal" role="alert">
+              someone else is editing this document — your text is kept.
+              <button type="button" onClick={() => onRetryStalled(active.id)}>
+                try again
+              </button>
+              <button type="button" onClick={() => downloadBuffer(active)}>
+                download my copy
+              </button>
+            </div>
+          )}
           {active.conflict && (
             <div className="ed-banner" role="alert">
               the agent edited this while you were typing — your version is

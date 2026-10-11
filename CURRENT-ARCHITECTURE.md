@@ -334,8 +334,10 @@ VM = single point of failure.
 ## 6. Pages & API surface
 
 **Frontend routes:** `/` — the app (Talk button, waveform states, and the
-document workspace: one flat sortable list (names + sizes), sanitized preview pane,
-download, delete-with-confirm, idle-gated upload and attach toggles with
+document workspace: one flat sortable list (names + sizes) beside the
+§4.12 tabbed editor (CodeMirror; sanitized markdown preview toggle;
+autosave with CAS merge; docked console), download, delete-with-confirm,
+idle-gated upload and attach toggles with
 the visible 400k budget; redirects to /login when signed out) · `/login`
 (FR-30: one form for sign-in/sign-up + Google) · admin pages (FR-41, all
 URL-addressable, tab bar + breadcrumbs, admin claim required): `/admin`

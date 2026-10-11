@@ -224,3 +224,20 @@ def test_workspace_search_never_returns_other_users_rows():
         assert res.hits == [] and res.documents_matched == 0
 
     asyncio.run(run())
+
+
+def test_offset_numeric_bound_survives_absurd_values():
+    """FR-59: ?offset=10**19 was an unencodable-bigint 500 on asyncpg —
+    the clamp bounds it numerically and keeps FR-52's empty-page rule."""
+    uid = _uid()
+
+    async def run():
+        await init_db(PG_URL)
+        await provision_user(uid, None)
+        await insert_upload_row(uid, "a.txt", "text", "x")
+        from db.documents_repo import list_workspace_rows
+
+        items, total = await list_workspace_rows(uid, offset=10**19)
+        assert items == [] and total >= 1  # empty page, same total, no 500
+
+    asyncio.run(run())

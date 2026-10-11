@@ -94,6 +94,7 @@ export function updateDocMeta(
   id: number,
   title: string,
   charCount: number,
+  updatedAt?: string,
 ): WorkspaceState {
   const doc = state.docs.find((d) => d.id === id);
   if (!doc) return state;
@@ -101,7 +102,8 @@ export function updateDocMeta(
     ...doc,
     title,
     char_count: charCount,
-    updated_at: new Date().toISOString(),
+    // the 200 carries the server's clock; the client's is the fallback
+    updated_at: updatedAt ?? new Date().toISOString(),
   };
   return { ...state, docs: [updated, ...state.docs.filter((d) => d.id !== id)] };
 }

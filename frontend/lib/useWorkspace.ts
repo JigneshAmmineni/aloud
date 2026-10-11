@@ -144,13 +144,20 @@ export function useWorkspace(enabled: boolean) {
   /** FR-56: the user's own save moves the row, the attach accounting,
    * and the budget — the announce path only covers agent edits. */
   const noteSaved = useCallback(
-    (meta: { id: number; title: string; char_count: number }) => {
+    (meta: {
+      id: number;
+      title: string;
+      char_count: number;
+      updated_at: string;
+    }) => {
       const m = attachedRef.current;
       if (m.has(meta.id)) {
         m.set(meta.id, meta.char_count);
         syncAttached();
       }
-      setState((s) => updateDocMeta(s, meta.id, meta.title, meta.char_count));
+      setState((s) =>
+        updateDocMeta(s, meta.id, meta.title, meta.char_count, meta.updated_at),
+      );
     },
     [syncAttached],
   );

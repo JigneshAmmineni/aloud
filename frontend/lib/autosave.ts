@@ -14,6 +14,10 @@ export type SaveScheduler = {
   noteDirty(): void;
   /** Save now if dirty; resolves when the in-flight save settles. */
   flush(): Promise<void>;
+  /** FR-58.2's hold: timers stop (dirtiness is kept) until resume —
+   * the pending autosave must not race the omitted-content refetch. */
+  pause(): void;
+  resume(): void;
   dispose(): void;
 };
 
@@ -27,6 +31,7 @@ export function createSaveScheduler(
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let maxWaitTimer: ReturnType<typeof setTimeout> | null = null;
   let dirty = false;
+  let paused = false;
   let inflight: Promise<void> | null = null;
 
   const clearTimers = () => {
@@ -38,7 +43,7 @@ export function createSaveScheduler(
 
   const fire = async () => {
     clearTimers();
-    if (!dirty) return;
+    if (!dirty || paused) return;
     dirty = false;
     inflight = save().finally(() => {
       inflight = null;
@@ -54,14 +59,29 @@ export function createSaveScheduler(
   return {
     noteDirty() {
       dirty = true;
+      if (paused) return; // held: dirtiness kept, timers stay quiet
       if (debounceTimer) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(fire, debounceMs);
       // the ceiling: set once per dirty stretch, never reset by keystrokes
       if (!maxWaitTimer) maxWaitTimer = setTimeout(fire, maxWaitMs);
     },
+    pause() {
+      paused = true;
+      clearTimers();
+    },
+    resume() {
+      paused = false;
+      if (dirty) {
+        debounceTimer = setTimeout(fire, debounceMs);
+        maxWaitTimer = setTimeout(fire, maxWaitMs);
+      }
+    },
     async flush() {
       if (inflight) await inflight;
-      if (dirty) await fire();
+      if (dirty) {
+        paused = false; // an explicit flush point overrides the hold
+        await fire();
+      }
     },
     dispose() {
       clearTimers();

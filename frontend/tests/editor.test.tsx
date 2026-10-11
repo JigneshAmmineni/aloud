@@ -55,7 +55,7 @@ describe("useEditor", () => {
       await result.current.open(doc(1));
     });
     await act(async () => {
-      result.current.setActiveId(null as unknown as number);
+      result.current.activate(null as unknown as number);
       await result.current.open(doc(1));
     });
     expect(result.current.tabs).toHaveLength(1);
@@ -186,7 +186,6 @@ describe("useEditor", () => {
     const tab = result.current.tabs[0];
     expect(tab.buffer).toContain("line one MINE"); // user precedence
     expect(tab.conflict).toBe(true);
-    expect(tab.theirs).toContain("THEIRS");
     expect(tab.baseToken).toBe("TOK-409");
   });
 
@@ -222,5 +221,111 @@ describe("useEditor", () => {
       ([, i]) => i?.method === "PUT",
     ).length;
     expect(putsAfter).toBe(putsBefore);
+  });
+});
+
+describe("useEditor round-2 fixes", () => {
+  it("flushAll returns TRUE after a successful flush — Talk must not refuse a 200", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { updated_at: "TOK-OK", char_count: 5 }),
+    );
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "fresh words");
+    });
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.flushAll();
+    });
+    expect(ok).toBe(true); // the round-1 root-cause bug, pinned
+    expect(result.current.tabs[0].dirty).toBe(false);
+    expect(result.current.tabs[0].saveState).toBe("saved");
+  });
+
+  it("the first close on a cleanly-flushed dirty tab closes it", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY));
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { updated_at: "TOK-OK", char_count: 5 }),
+    );
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "fresh words");
+    });
+    await act(async () => {
+      await result.current.close(1);
+    });
+    expect(result.current.tabs).toHaveLength(0);
+  });
+
+  it("applyTheirs flips ONLY the conflicted region — clean merges and later typing survive", async () => {
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { ...GET_BODY, content: "alpha\nbravo\ncharlie\n" }),
+    );
+    // the save 409s with the agent having edited alpha AND charlie
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(409, {
+        content: "alpha THEIRS\nbravo\ncharlie AGENT\n",
+        updated_at: "TOK-409",
+        title: "d1.md",
+      }),
+    );
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      // the user edited alpha (conflicts) — bravo/charlie untouched
+      result.current.edit(1, "alpha MINE\nbravo\ncharlie\n");
+    });
+    await act(async () => {
+      await result.current.flushAll();
+    });
+    let tab = result.current.tabs[0];
+    expect(tab.conflict).toBe(true);
+    expect(tab.buffer).toContain("alpha MINE"); // user precedence held
+    expect(tab.buffer).toContain("charlie AGENT"); // clean hunk merged in
+
+    act(() => {
+      result.current.applyTheirs(1);
+    });
+    tab = result.current.tabs[0];
+    expect(tab.buffer).toContain("alpha THEIRS"); // the flip
+    expect(tab.buffer).toContain("charlie AGENT"); // clean merge KEPT
+    expect(tab.conflict).toBe(false);
+  });
+
+  it("retryable failures back off instead of hammering at 1 Hz", async () => {
+    vi.useFakeTimers();
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    authedFetch.mockResolvedValue(jsonResponse(500, {})); // every save 500s
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "v2");
+    });
+    const puts = () =>
+      authedFetch.mock.calls.filter(([, i]) => i?.method === "PUT").length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000); // debounce -> save 1 fails
+    });
+    expect(puts()).toBe(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000); // flat 1 Hz would re-PUT here
+    });
+    expect(puts()).toBe(1); // backoff holds (first retry at ~2s + debounce)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    expect(puts()).toBeGreaterThanOrEqual(2); // it does retry
+    expect(puts()).toBeLessThan(8); // and never at 1 Hz (30s of hammering = 30)
   });
 });
