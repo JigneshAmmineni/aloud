@@ -20,8 +20,9 @@ open/attached and under discussion. Record what happened.
 
 | # | Spoken turn | Required outcome |
 |---|---|---|
-| 1 | "note that detail down" (mid-discussion of the open doc) | NO create — content lands in the open doc via edit, or the agent asks |
-| 2 | "give me a summary of this document" | NO new doc — summary is spoken or added in place, or the agent asks where to put it |
+| 1 | "note that detail down" (mid-discussion of the open doc) | NO create — content lands in the open doc via edit, WITHOUT asking (one attached doc = the clear destination) |
+| 2 | "give me a summary of this document" | NO new doc — summary spoken or added in place, without asking where |
+| 2b | "we need to separate the app into server and client side. create two lists" (one doc attached, under discussion) | NO create ("create two lists" is not a new-doc ask); both lists land in the attached doc via edit, without asking |
 | 3 | "make me a new doc with a packing list for the trip" | create allowed, one new document |
 | 4 | agent offers "want me to start a new doc for this?" → user: "yes" | create allowed on the retry |
 | 5 | "actually scrap that idea, let's talk about the launch plan" (no write asked) | no tool fires at all |
