@@ -57,6 +57,7 @@ from app.config import load_settings
 from app.documents import (
     EXTRACT_SEMAPHORE,
     MAX_DOC_CHARS,
+    TITLE_MAX_CHARS,
     MAX_FILE_BYTES,
     MAX_TOTAL_CHARS,
     DocumentError,
@@ -345,14 +346,13 @@ async def get_document_route(
     }
 
 
-# §4.12 FR-56: the editor's autosave target. TITLE_MAX_CHARS caps a
-# rename — uploads are bounded incidentally by filenames, a rename by
-# nothing. Verification is local (get_current_user_id), a stated choice:
+# §4.12 FR-56: the editor's autosave target. TITLE_MAX_CHARS (imported —
+# app/documents.py owns the one cap for every writer) bounds a rename.
+# Verification is local (get_current_user_id), a stated choice:
 # a save writes only rows the account already owns, quota-bounded — a
 # disabled account can overwrite its own documents for its residual token
 # hour exactly as its live session's edit tools allow, and cannot grow
 # anything (FR-29 deliberately unchanged).
-TITLE_MAX_CHARS = 200  # mirrored in frontend/lib/workspace.ts — change BOTH
 
 _saves_limiter = user_rate_limited(
     DOCUMENT_SAVE_RATE_LIMIT, 60.0, get_current_user_id

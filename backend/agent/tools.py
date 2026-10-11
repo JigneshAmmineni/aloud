@@ -13,7 +13,7 @@ from typing import Awaitable, Callable
 from loguru import logger
 
 from agent.registry import notify_document_updated
-from app.documents import MAX_DOC_CHARS
+from app.documents import MAX_DOC_CHARS, TITLE_MAX_CHARS
 from db.documents_repo import (
     LIST_DOCUMENTS_CAP,
     READ_DOCUMENT_MAX_CHARS,
@@ -27,6 +27,7 @@ from db.documents_repo import (
     insert_document_line,
     list_workspace_rows,
     read_document_page,
+    rename_document,
     replace_document_content,
     search_document,
     search_workspace,
@@ -392,10 +393,13 @@ async def _edit_document(args: dict, ctx: ToolContext) -> dict:
     except (TypeError, ValueError):
         return {"status": "error", "error": "document_id must be an integer"}
     mode = args.get("mode")
-    if mode not in ("replace", "append", "str_replace", "insert"):
+    if mode not in ("replace", "append", "str_replace", "insert", "rename"):
         return {
             "status": "error",
-            "error": "mode must be 'replace', 'append', 'str_replace', or 'insert'",
+            "error": (
+                "mode must be 'replace', 'append', 'str_replace', "
+                "'insert', or 'rename'"
+            ),
         }
 
     kw = dict(ceiling=MAX_DOC_CHARS, turn_id=ctx.turn_id, session_id=ctx.session_id)
@@ -484,6 +488,25 @@ async def _edit_document(args: dict, ctx: ToolContext) -> dict:
                     insert_text=content,
                 )
                 return _steer_from_diagnosis(diag, document_id, None)
+
+        elif mode == "rename":
+            title = str(args.get("title", "")).strip()
+            if not title:
+                return {"status": "error", "error": "title is required for rename"}
+            if len(title) > TITLE_MAX_CHARS:
+                return {
+                    "status": "error",
+                    "error": (
+                        f"title is too long (limit {TITLE_MAX_CHARS} "
+                        "characters)"
+                    ),
+                }
+            row = await rename_document(
+                ctx.user_id, document_id, title,
+                turn_id=ctx.turn_id, session_id=ctx.session_id,
+            )
+            if row is None:
+                return {"status": "not_found", "document_id": document_id}
 
         else:  # replace
             content = str(args.get("content", ""))
@@ -683,7 +706,10 @@ def build_registry() -> list[Tool]:
                 "search_documents' exact_matches) with new_str; 'insert' "
                 "inserts text after line insert_line (0 = at the start); "
                 "'append' adds to the end; 'replace' rewrites the whole "
-                "content (short documents only — read it first). old_str "
+                "content (short documents only — read it first); 'rename' "
+                "changes ONLY the title. The title is NOT part of the "
+                "document content — to change it, always use 'rename' "
+                "(never str_replace, never a full replace). old_str "
                 "matches the STORED text: never include the 'N: ' "
                 "line-number prefixes from read_document."
             ),
@@ -696,7 +722,13 @@ def build_registry() -> list[Tool]:
                     },
                     "mode": {
                         "type": "string",
-                        "enum": ["str_replace", "insert", "append", "replace"],
+                        "enum": [
+                            "str_replace",
+                            "insert",
+                            "append",
+                            "replace",
+                            "rename",
+                        ],
                         "description": "How to edit.",
                     },
                     "old_str": {
@@ -744,7 +776,10 @@ def build_registry() -> list[Tool]:
                     },
                     "title": {
                         "type": "string",
-                        "description": "replace: optional new title.",
+                        "description": (
+                            "rename: the new title (required); replace: "
+                            "optional new title."
+                        ),
                     },
                 },
                 "required": ["document_id", "mode"],

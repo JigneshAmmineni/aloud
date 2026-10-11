@@ -21,6 +21,12 @@ from pypdf import PdfReader
 # latency budget — more input tokens raise time-to-first-token.
 MAX_FILE_BYTES = 5 * 1024 * 1024  # 5 MB per file
 MAX_DOC_CHARS = 200_000  # per document, after extraction
+
+# §4.12 FR-56: caps a rename from ANY writer (the editor's save route and
+# the agent's rename mode) — uploads are bounded incidentally by
+# filenames, a rename by nothing. Mirrored in frontend/lib/workspace.ts —
+# change BOTH.
+TITLE_MAX_CHARS = 200
 MAX_TOTAL_CHARS = 400_000  # across all docs attached to one session
 
 # FR-51: at most this many extractions run at once; excess uploads queue.
