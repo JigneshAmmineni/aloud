@@ -173,6 +173,24 @@ export function Workspace({
     dir: "desc",
   });
   const [sortOpen, setSortOpen] = useState(false);
+  // FR-57.2: the list/editor divider drags to resize
+  const [leftWidth, setLeftWidth] = useState(320);
+
+  const startDrag = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = leftWidth;
+    const move = (ev: PointerEvent) => {
+      const w = startW + (ev.clientX - startX);
+      setLeftWidth(Math.min(560, Math.max(220, w)));
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
 
   const docs = sortDocs(state.docs, sort.col, sort.dir);
   const openIds = new Set(editor.tabs.map((t) => t.id));
@@ -204,7 +222,7 @@ export function Workspace({
       className={`workspace ws-v2${editor.tabs.length ? " has-tabs" : ""}`}
       aria-label="Documents"
     >
-      <div className="ws-left">
+      <div className="ws-left" style={{ width: leftWidth }}>
         <div className="ws-bar">
           <h3 className="ws-heading">Documents</h3>
           <div className="ws-bar-right">
@@ -313,6 +331,14 @@ export function Workspace({
             fully live while the user edits */}
         <div className="ws-console">{consoleSlot}</div>
       </div>
+
+      <div
+        className="ws-divider"
+        role="separator"
+        aria-orientation="vertical"
+        title="Drag to resize"
+        onPointerDown={startDrag}
+      />
 
       <EditorPane
         tabs={editor.tabs}

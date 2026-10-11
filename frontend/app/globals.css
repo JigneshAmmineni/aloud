@@ -303,7 +303,7 @@ body::after {
 }
 
 .ws-left {
-  width: min(320px, 42vw);
+  width: 320px; /* inline style drives it; this is the no-JS fallback */
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
@@ -322,15 +322,23 @@ body::after {
 /* FR-57.4: the docked console — Talk/End, waveform, status, live */
 .ws-console {
   flex: 0 0 auto;
-  max-height: 32dvh;
   border-top: 1px solid rgba(233, 226, 214, 0.1);
-  padding-top: 8px;
+  padding-top: 10px;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 4px;
   zoom: 0.55;
-  overflow: hidden;
+}
+
+/* the docked orb must stay round — no flex squish — and the idle
+   tagline is noise in a pane this small (the active states still show) */
+.ws-console > * {
+  flex: 0 0 auto;
+}
+
+.ws-console .status.idle {
+  display: none;
 }
 
 @keyframes slide-in {
@@ -595,6 +603,19 @@ body::after {
   font-size: 10px;
   letter-spacing: 0.12em;
   color: var(--ink-dim);
+}
+
+/* FR-57.2: the draggable list/editor divider */
+.ws-divider {
+  flex: 0 0 6px;
+  cursor: col-resize;
+  background: transparent;
+  border-left: 1px solid rgba(233, 226, 214, 0.08);
+  transition: background 0.2s;
+}
+
+.ws-divider:hover {
+  background: rgba(233, 226, 214, 0.08);
 }
 
 /* ---- the editor pane (FR-57/58) ---- */
