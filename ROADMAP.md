@@ -171,6 +171,32 @@ The rules:
   - `docs/notes/memory.md` — passing mention in a scaling note
 - C-3 still binds everywhere: never therapy/therapist/counselor.
 
+### 3.3 Thinking-partner mode — proactive reasoning & ambient capture
+
+Two capabilities the 2026-10-11 live sessions showed the agent lacks, both
+deferred to their own spec (they change the agent's core behavior, not one
+tool):
+
+- **Proactive reasoning partner.** Asked "how are we going to get the list
+  of movies — stored or an API?", the agent answered "I don't have
+  information on that; the document doesn't cover it." Unhelpful by
+  design: today's prompt makes it a transcriber/reader. The user should be
+  able to ask "is this viable?", "what do you think of this change?" and
+  get a reasoned opinion that draws on the model's own knowledge, clearly
+  framed as opinion, which the user can then have written down. Likely a
+  system-prompt stance change plus an eval; possibly a mode or per-turn
+  classification so brain-dump turns still get silence, questions get
+  thinking.
+- **Ambient capture while thinking out loud.** During brainstorming the
+  user should not have to say "make a note of that" after every idea —
+  ideas spoken mid-flow should land in the working document, coherently
+  structured, as they're said (the product vision's "gives their words
+  structure" line, still unimplemented). Needs care against the FR-60
+  boundary (ambient WRITES to the discussed doc are wanted; ambient
+  CREATES are not) and against barge-in (writes mid-speech). Candidate
+  shape: a capture mode the user toggles by voice ("take notes while I
+  talk"), scoped to one target document.
+
 ### 4. Documents & artifacts rework
 
 From single upload-at-start + copy-paste artifacts to a real document workspace.
