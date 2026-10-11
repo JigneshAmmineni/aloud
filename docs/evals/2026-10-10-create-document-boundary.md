@@ -48,4 +48,9 @@ Scripted, two runs each, live session:
 
 ## Results
 
-_(append after running)_
+**2026-10-11 — owner run pending (recorded decision, not a met bar).**
+The change ships with PR #22 provisionally: the check needs a live
+voice session, which only the owner can run. Same pattern as the 3.1
+A/B pause — the deferral is recorded here with its resume point (the
+four scripted turns above), and this section is the place the outcome
+gets appended.

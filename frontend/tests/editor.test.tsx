@@ -512,3 +512,115 @@ describe("useEditor round-3 blockers", () => {
     expect(result.current.tabs[0].baseTitle).toBe("server-renamed.md");
   });
 });
+
+describe("useEditor round-4", () => {
+  it("three clustered 409s stall; retryStalled resets and saves again", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    const conflict = () =>
+      jsonResponse(409, {
+        content: "server\n",
+        updated_at: "TOK-C",
+        title: "d1.md",
+      });
+    authedFetch.mockResolvedValueOnce(conflict());
+    authedFetch.mockResolvedValueOnce(conflict());
+    authedFetch.mockResolvedValueOnce(conflict());
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { updated_at: "TOK-WIN", char_count: 4 }),
+    );
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "mine\n");
+    });
+    for (let i = 0; i < 3; i++) {
+      await act(async () => {
+        await result.current.flushAll();
+      });
+      act(() => {
+        result.current.edit(1, `mine v${i}\n`); // keep conflicting
+      });
+    }
+    expect(result.current.tabs[0].stalled).toBe(true);
+    // stalled: no further PUTs even when dirty
+    const putsAtStall = authedFetch.mock.calls.filter(
+      ([, i]) => i?.method === "PUT",
+    ).length;
+    await act(async () => {
+      await result.current.flushAll();
+    });
+    expect(
+      authedFetch.mock.calls.filter(([, i]) => i?.method === "PUT"),
+    ).toHaveLength(putsAtStall);
+
+    act(() => {
+      result.current.retryStalled(1);
+    });
+    await act(async () => {
+      await result.current.flushAll();
+    });
+    expect(result.current.tabs[0].stalled).toBe(false);
+    expect(result.current.tabs[0].saveState).toBe("saved");
+  });
+
+  it("a 200 arriving after an announce moved the base does not roll truth back", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    let resolvePut: (r: Response) => void = () => {};
+    authedFetch.mockImplementationOnce(
+      () => new Promise<Response>((r) => (resolvePut = r)),
+    );
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "mine\n");
+    });
+    let flushP: Promise<boolean>;
+    await act(async () => {
+      flushP = result.current.flushAll(); // PUT in flight
+      await Promise.resolve();
+      // an announce lands mid-flight and moves the base forward
+      result.current.handleAnnounce("document.updated", {
+        ...doc(1),
+        content: "agent newer\n",
+        content_omitted: false,
+        updated_at: "TOK-ANNOUNCE-NEWER",
+      } as never);
+      resolvePut(jsonResponse(200, { updated_at: "TOK-MINE-OLDER", char_count: 5 }));
+      await flushP;
+    });
+    const tab = result.current.tabs[0];
+    expect(tab.baseToken).toBe("TOK-ANNOUNCE-NEWER"); // never rolled back
+  });
+
+  it("a title-validation 400 reverts the rename and keeps saving content", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(400, { detail: "title is too long (limit 200 characters)" }),
+    );
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { updated_at: "TOK-OK", char_count: 7 }),
+    );
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "content");
+      // simulate a pre-cap client letting a long title through
+      result.current.rename(1, "t".repeat(199));
+    });
+    await act(async () => {
+      await result.current.flushAll(); // 400: title reverts, NOT terminal
+    });
+    expect(result.current.tabs[0].terminal).toBeNull();
+    expect(result.current.tabs[0].title).toBe("d1.md"); // reverted
+    await act(async () => {
+      await result.current.flushAll();
+    });
+    expect(result.current.tabs[0].saveState).toBe("saved"); // content landed
+  });
+});

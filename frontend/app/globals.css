@@ -879,17 +879,24 @@ body::after {
     left: 0;
     right: 0;
     bottom: 0;
-    /* under zoom 0.45 this occupies ~72 real px — matching the editor's
-       bottom reservation above */
-    height: 160px;
+    height: 72px;
     z-index: 30;
     background: #17141166;
     backdrop-filter: blur(6px);
     border-top: 1px solid rgba(233, 226, 214, 0.12);
     flex-direction: row;
     justify-content: center;
+    align-items: center;
     max-height: none;
-    zoom: 0.45;
+    /* transform, not zoom: zoom rescales the laid-out width too, so a
+       left:0;right:0 bar rendered at ~45vw (round-4 nit) */
+    zoom: normal;
+    overflow: visible;
+  }
+
+  .ws-v2.has-tabs .ws-console > * {
+    transform: scale(0.45);
+    transform-origin: center center;
   }
 }
 

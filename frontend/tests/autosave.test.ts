@@ -97,3 +97,25 @@ describe("pause/resume (FR-58.2's hold)", () => {
     expect(saves.length).toBeLessThanOrEqual(3);
   });
 });
+
+describe("one save at a time", () => {
+  it("a keystroke during a slow save never launches a sibling save", async () => {
+    let resolveSave: () => void = () => {};
+    const starts: number[] = [];
+    const s = createSaveScheduler(async () => {
+      starts.push(Date.now());
+      await new Promise<void>((r) => {
+        resolveSave = r;
+      });
+    });
+    s.noteDirty();
+    await vi.advanceTimersByTimeAsync(1000); // save 1 starts, hangs
+    expect(starts).toHaveLength(1);
+    s.noteDirty(); // keystroke mid-save re-arms the debounce
+    await vi.advanceTimersByTimeAsync(5000); // debounce AND max-wait fire
+    expect(starts).toHaveLength(1); // …but no concurrent sibling PUT
+    resolveSave();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(starts).toHaveLength(2); // the reschedule lands after it settles
+  });
+});

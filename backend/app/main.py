@@ -17,6 +17,7 @@ disabled account cannot open or complete a new session.
 """
 
 import asyncio
+import json
 import signal
 import time
 import uuid
@@ -229,8 +230,6 @@ _DOC_ID = Path(ge=1, le=2_147_483_647)
 
 async def _bounded_json(request: Request, cap: int) -> dict | None:
     """Read at most cap+1 bytes of body and parse JSON; None on refusal."""
-    import json
-
     chunks: list[bytes] = []
     size = 0
     async for chunk in request.stream():
@@ -241,8 +240,8 @@ async def _bounded_json(request: Request, cap: int) -> dict | None:
     try:
         body = json.loads(b"".join(chunks))
     except Exception:
-        return {}
-    return body if isinstance(body, dict) else {}
+        return {"__malformed__": True}
+    return body if isinstance(body, dict) else {"__malformed__": True}
 
 
 # FR-51: per-USER limiter, declared with the route's own auth callable so
@@ -364,6 +363,10 @@ async def save_document_route(
             status_code=413,
             detail=f"save body too large (limit {MAX_SAVE_BODY_BYTES} bytes)",
         )
+    if body.get("__malformed__"):
+        # distinct from the content-validation 400: the client treats
+        # validation text literally when classifying failures
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
     if not isinstance(body.get("content"), str):
         raise HTTPException(status_code=400, detail="content (string) is required")
     content = body["content"]
@@ -550,6 +553,11 @@ def _coerce_attach_ids(raw) -> list[int]:
             except ValueError:
                 continue
         else:
+            continue
+        if not (1 <= doc_id <= 2_147_483_647):
+            # the offset/path-id bound, applied to the attach list too:
+            # 10**19 against an int4 column is an asyncpg DataError that
+            # 500s session establishment
             continue
         if doc_id in seen:
             continue

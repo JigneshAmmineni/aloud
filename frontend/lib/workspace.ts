@@ -129,6 +129,19 @@ export async function guardTalk(
   return true;
 }
 
+/** FR-57.3's delete wiring, extracted so the data-loss half is
+ * testable: only a SUCCESSFUL delete closes the tab — a failed one must
+ * not drop the only copy of an unsaved buffer. */
+export async function deleteAndCloseTab(
+  deleteDoc: (doc: WorkspaceDoc) => Promise<boolean>,
+  closeTab: (id: number) => void,
+  doc: WorkspaceDoc,
+): Promise<boolean> {
+  const ok = await deleteDoc(doc);
+  if (ok) closeTab(doc.id);
+  return ok;
+}
+
 /** FR-52's download filename: derives from an untrusted 🔒 title — path
  * separators and control characters stripped, length-capped, empty →
  * document-{id}; the extension is .md for markdown and .txt for text AND

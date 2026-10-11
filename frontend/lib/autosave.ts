@@ -43,7 +43,11 @@ export function createSaveScheduler(
 
   const fire = async () => {
     clearTimers();
-    if (!dirty || paused) return;
+    // ONE save at a time: a keystroke during a slow save must not launch
+    // a sibling PUT with the same base (it would 409 against itself,
+    // burn a retry slot, and fake an agent conflict — round 4 blocker 1);
+    // the in-flight save's finally reschedules for the new dirtiness.
+    if (inflight || !dirty || paused) return;
     dirty = false;
     inflight = save()
       .catch(() => {}) // the saver owns failure handling; never leak

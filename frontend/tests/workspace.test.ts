@@ -166,3 +166,17 @@ describe("guardTalk (FR-58.1's Talk gate, the wiring itself)", () => {
     expect(errors).toHaveLength(1);
   });
 });
+
+describe("deleteAndCloseTab (FR-57.3's wiring, the data-loss half)", () => {
+  it("closes the tab only on a successful delete", async () => {
+    const { deleteAndCloseTab } = await import("@/lib/workspace");
+    const closed: number[] = [];
+    const d = doc({ id: 7 });
+
+    await deleteAndCloseTab(async () => false, (id) => closed.push(id), d);
+    expect(closed).toEqual([]); // a failed delete keeps the tab (and buffer)
+
+    await deleteAndCloseTab(async () => true, (id) => closed.push(id), d);
+    expect(closed).toEqual([7]);
+  });
+});

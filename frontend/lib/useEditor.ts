@@ -43,6 +43,10 @@ export type EditorTab = {
   /** terminal failure text (404/403/gate/ceiling) — autosave stopped,
    * buffer offered for download */
   terminal: string | null;
+  /** "gone" = the row no longer exists (survives discard); "other"
+   * clears when the user discards (the pre-failure content IS saved
+   * content). Never branch on the user-facing prose. */
+  terminalKind: "gone" | "other" | null;
   /** FR-58.3: the bounded 409 retries ran out — "someone else is editing
    * this document", manual retry, buffer intact */
   stalled: boolean;
@@ -136,6 +140,7 @@ export function useEditor({
         return;
       const sent = tab.buffer;
       const sentTitle = tab.title;
+      const sentToken = tab.baseToken;
       const renaming = sentTitle !== tab.baseTitle;
       patchTab(id, { saveState: "saving" });
       let res: Response;
@@ -165,6 +170,18 @@ export function useEditor({
         retries409.current.set(id, 0);
         failStreak.current.set(id, 0);
         patchTab(id, (t) => {
+          if (t.baseToken !== sentToken) {
+            // an announce moved base/baseToken while this save was in
+            // flight (HTTP vs data channel — the ordering isn't ours to
+            // assume): adopting OUR result would roll truth backwards
+            // and guarantee a 409 against a stale base. Keep the newer
+            // base; our content is still unsynced relative to it.
+            const stillDirty = t.buffer !== t.base || t.title !== t.baseTitle;
+            return {
+              dirty: stillDirty,
+              saveState: stillDirty ? "unsaved" : "saved",
+            };
+          }
           // a rename issued DURING this save stays dirty (round-3: the
           // buffer-only recompute dropped it with a lying "saved" chip)
           const stillDirty = t.buffer !== sent || t.title !== sentTitle;
@@ -238,15 +255,27 @@ export function useEditor({
         return;
       }
 
+      const detail: string | null = await res
+        .json()
+        .then((d) => d?.detail ?? null)
+        .catch(() => null);
+      if (res.status === 400 && detail && detail.includes("title")) {
+        // a title-validation 400 is the one 4xx the user can fix in
+        // place — and NOT a member of FR-58.1's TERMINAL class. Revert
+        // the rename; the content edits it rode along with keep saving.
+        patchTab(id, (t) => ({
+          title: t.baseTitle,
+          saveState: "unsaved",
+        }));
+        schedulers.current.get(id)?.noteDirty();
+        return;
+      }
       // terminal: 404 (deleted elsewhere), 403, the format gate, the
       // ceiling — stop retrying, name it, keep the buffer exportable
-      const detail = await res
-        .json()
-        .then((d) => d?.detail)
-        .catch(() => null);
       schedulers.current.get(id)?.dispose();
       patchTab(id, {
         saveState: "error",
+        terminalKind: res.status === 404 ? "gone" : "other",
         terminal:
           res.status === 404
             ? "this document was deleted elsewhere — download your copy below"
@@ -274,6 +303,7 @@ export function useEditor({
         dirty: false,
         saveState: "saved",
         terminal: null,
+        terminalKind: null,
         stalled: false,
         conflict: false,
         loading: true,
@@ -337,7 +367,8 @@ export function useEditor({
 
   const rename = useCallback(
     (id: number, title: string) => {
-      if (!title.trim()) return; // the server would 400; keep the old name
+      if (!title.trim() || title.length > 200) return; // the server
+      // would 400; keep the old name (the input is capped too)
       patchTab(id, (t) => ({
         title,
         dirty: true,
@@ -418,10 +449,10 @@ export function useEditor({
         saveState: "saved",
         stalled: false,
         conflict: false,
-        // a 404-terminal stays terminal (the row is gone); gate/ceiling
-        // terminals clear — the pre-failure content is saved content
-        terminal:
-          t.terminal && t.terminal.includes("deleted") ? t.terminal : null,
+        // a gone-terminal stays terminal (the row no longer exists);
+        // gate/ceiling terminals clear — pre-failure content IS saved
+        terminal: t.terminalKind === "gone" ? t.terminal : null,
+        terminalKind: t.terminalKind === "gone" ? t.terminalKind : null,
       }));
     },
     [patchTab],

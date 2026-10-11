@@ -12,7 +12,12 @@ import { auth } from "@/lib/firebase";
 import { useAloudSession } from "@/lib/useAloudSession";
 import { useEditor } from "@/lib/useEditor";
 import { useWorkspace } from "@/lib/useWorkspace";
-import { guardTalk, type AnnouncedDoc, type WorkspaceDoc } from "@/lib/workspace";
+import {
+  deleteAndCloseTab,
+  guardTalk,
+  type AnnouncedDoc,
+  type WorkspaceDoc,
+} from "@/lib/workspace";
 
 const STATUS: Record<string, string> = {
   idle: "",
@@ -75,7 +80,14 @@ export default function Home() {
   // never fire beforeunload)
   const flushThen = useCallback(
     (navigate: () => void) => async () => {
-      await flushAll();
+      // same contract as Talk: navigation must not quietly destroy the
+      // buffer Talk refuses to proceed past (round-4 nit — asymmetry)
+      if (!(await flushAll())) {
+        setFlushError(
+          "your latest edits haven't saved — fix or discard them first",
+        );
+        return;
+      }
       navigate();
     },
     [flushAll],
@@ -85,11 +97,7 @@ export default function Home() {
   const closeDeleted = editor.closeDeleted;
   const handleDelete = useCallback(
     async (doc: WorkspaceDoc) => {
-      // only a SUCCESSFUL delete closes the tab — a failed one must not
-      // drop the only copy of an unsaved buffer (round-2 blocker 3)
-      if (await deleteDoc(doc)) {
-        closeDeleted(doc.id); // a deleted document closes its tab (FR-57.3)
-      }
+      await deleteAndCloseTab(deleteDoc, closeDeleted, doc);
     },
     [deleteDoc, closeDeleted],
   );

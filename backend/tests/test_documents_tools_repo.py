@@ -315,3 +315,11 @@ def test_concurrent_append_and_str_replace_lose_neither(db_url):
         assert row.content.endswith("appended")
 
     asyncio.run(run())
+
+
+def test_fold_counts_newline_separators_against_the_window():
+    """FR-59: two 25-char lines fit a 50-char window only if the joining
+    newline is NOT counted — it is, so they split. Reverting the separator
+    accounting fails here (the five older fold tests can't see it)."""
+    pages = fold_pages("x" * 25 + "\n" + "y" * 25, max_chars=50, max_lines=99)
+    assert [[e.line_no for e in p] for p in pages] == [[1], [2]]

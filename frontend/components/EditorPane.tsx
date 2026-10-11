@@ -57,10 +57,14 @@ function SourceEditor({
       ref={cmRef}
       value={initial.current}
       onChange={(value, viewUpdate) => {
+        const txs = viewUpdate.transactions;
+        // EVERY transaction external -> purely our own sync; a mixed
+        // update still carries a user keystroke and must reach edit()
         if (
-          viewUpdate.transactions.some((tr) => tr.annotation(ExternalSync))
+          txs.length > 0 &&
+          txs.every((tr) => tr.annotation(ExternalSync) !== undefined)
         ) {
-          return; // our own sync, not a keystroke
+          return;
         }
         onEdit(tab.id, value);
       }}
@@ -181,6 +185,7 @@ export function EditorPane({
             <input
               key={`${active.id}:${active.title}`}
               className="ed-title"
+              maxLength={200}
               defaultValue={active.title}
               aria-label="Document title"
               title="Click to rename"
@@ -194,7 +199,9 @@ export function EditorPane({
                 if (e.key === "Enter") (e.target as HTMLInputElement).blur();
               }}
             />
-            {active.format === "markdown" && editable && (
+            {active.format === "markdown" &&
+              !active.loading &&
+              !active.loadFailed && (
               <span className="ed-toggle" role="group" aria-label="View">
                 <button
                   type="button"

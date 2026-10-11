@@ -30,6 +30,7 @@ const base: EditorTab = {
   dirty: false,
   saveState: "saved",
   terminal: null,
+  terminalKind: null,
   stalled: false,
   conflict: false,
   loading: false,
