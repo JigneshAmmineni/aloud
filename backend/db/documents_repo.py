@@ -342,7 +342,9 @@ def fold_pages(content: str, max_chars: int, max_lines: int) -> list[list[PageEn
             pages.append(cur)
             cur, cur_chars = [], 0
             continue
-        if len(rest) <= room or (not cur and len(rest) <= max_chars):
+        # (cur empty implies room == max_chars, so one condition covers
+        # both the fits-here and fits-a-fresh-page cases)
+        if len(rest) <= room:
             cur.append(PageEntry(i + 1, rest, False))
             cur_chars += len(rest)
             i += 1
@@ -383,6 +385,14 @@ def page_index_for_line(pages: list[list[PageEntry]], line: int) -> int | None:
 
 
 @dataclass
+class PageOutOfRange:
+    """Typed refusal for a page/line beyond the document (the module's
+    EditDiagnosis pattern — no stringly-encoded payloads)."""
+
+    total_pages: int
+
+
+@dataclass
 class DocumentPageResult:
     id: int
     title: str
@@ -403,10 +413,10 @@ async def read_document_page(
     *,
     page: int | None = None,
     line: int | None = None,
-) -> DocumentPageResult | str:
-    """FR-53.2: one owned document, one page. Returns the result, or a
-    string reason: "not_found", or "page_out_of_range:{total}" for the
-    steering message. `line` wins over `page` when both arrive."""
+) -> DocumentPageResult | PageOutOfRange | None:
+    """FR-53.2: one owned document, one page. None = not found (NFR-8
+    shape); PageOutOfRange carries total_pages for the steering message.
+    `line` wins over `page` when both arrive."""
     async with user_scoped_session(user_id) as db:
         row = (
             await db.execute(
@@ -416,17 +426,17 @@ async def read_document_page(
             )
         ).scalar_one_or_none()
     if row is None:
-        return "not_found"
+        return None
     pages = fold_pages(row.content, READ_DOCUMENT_MAX_CHARS, PAGE_MAX_LINES)
     total = len(pages)
     if line is not None:
         idx = page_index_for_line(pages, line)
         if idx is None:
-            return f"page_out_of_range:{total}"
+            return PageOutOfRange(total_pages=total)
     else:
         idx = (page or 1) - 1
         if idx < 0 or idx >= total:
-            return f"page_out_of_range:{total}"
+            return PageOutOfRange(total_pages=total)
     entries = pages[idx]
     total_lines = row.content.count("\n") + 1
     return DocumentPageResult(
@@ -516,7 +526,7 @@ async def search_workspace(user_id: str, query: str) -> WorkspaceSearchResult:
             CASE WHEN content_hit THEN
                 (length(lower(content))
                  - length(replace(lower(content), lower(:q), '')))
-                / length(:q)
+                / length(lower(:q))
             ELSE 0 END AS match_count,
             count(*) OVER () AS documents_matched
         FROM hits

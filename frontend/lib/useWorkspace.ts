@@ -46,6 +46,10 @@ export function useWorkspace(enabled: boolean) {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // the budget refusal has its OWN slot: refresh()'s success path clears
+  // `error`, and round 3's blocker was exactly that wiping the refusal a
+  // breath after tryAttach raised it
+  const [budgetError, setBudgetError] = useState<string | null>(null);
   const [previewFailed, setPreviewFailed] = useState(false);
 
   // The single source of attach truth: id -> char_count. Synchronous, so
@@ -71,11 +75,11 @@ export function useWorkspace(enabled: boolean) {
       if (m.has(id)) return true;
       const used = [...m.values()].reduce((a, b) => a + b, 0);
       if (used + charCount > MAX_TOTAL_CHARS) {
-        setError(refusal);
+        setBudgetError(refusal);
         return false;
       }
       m.set(id, charCount);
-      setError(null);
+      setBudgetError(null);
       syncAttached();
       return true;
     },
@@ -99,9 +103,11 @@ export function useWorkspace(enabled: boolean) {
           total: number;
         };
         serverTotal = body.total;
-        if (body.documents.length === 0) break;
         const known = new Set(docs.map((d) => d.id));
-        docs = [...docs, ...body.documents.filter((d) => !known.has(d.id))];
+        const fresh = body.documents.filter((d) => !known.has(d.id));
+        // no growth: never loop on a shifting window of rows already seen
+        if (fresh.length === 0) break;
+        docs = [...docs, ...fresh];
       } while (docs.length < target && docs.length < serverTotal);
       setState((s) => rehydrate(s, docs));
       setTotal(serverTotal);
@@ -119,30 +125,49 @@ export function useWorkspace(enabled: boolean) {
   }, [enabled, refresh]);
 
   /** Wired into the session's onServerMessage: FR-55's upsert rules. The
-   * refetch decision reads the ref mirror so the updater stays pure. */
-  const handleAnnounce = useCallback((type: string, doc: AnnouncedDoc) => {
-    if (type !== "document.created" && type !== "document.updated") return;
-    const s = stateRef.current;
-    if (s.deletedIds.includes(doc.id)) return; // tombstoned: ignore entirely
-    setState((prev) => upsertFromAnnounce(prev, doc).state);
-    // refetch ONLY on omitted content, and only while that doc is previewed
-    if (doc.content_omitted && s.previewId === doc.id) {
-      void fetchContent(doc.id).then((content) => {
-        if (content !== null) {
-          setState((prev) =>
-            prev.previewId === doc.id
-              ? { ...prev, previewContent: content }
-              : prev,
-          );
-        }
-      });
-    }
-  }, []);
+   * refetch decision is the REDUCER's (state.refetchId) — the effect below
+   * consumes it, so the mandated test covers the live path. */
+  const handleAnnounce = useCallback(
+    (type: string, doc: AnnouncedDoc) => {
+      if (type !== "document.created" && type !== "document.updated") return;
+      // an edited document's new size must reach the attach accounting —
+      // the announce ships char_count for exactly this
+      const m = attachedRef.current;
+      if (m.has(doc.id) && typeof doc.char_count === "number") {
+        m.set(doc.id, doc.char_count);
+        syncAttached();
+      }
+      setState((prev) => upsertFromAnnounce(prev, doc));
+    },
+    [syncAttached],
+  );
+
+  // the refetch half: consumes the reducer's decision
+  useEffect(() => {
+    const id = state.refetchId;
+    if (id === null) return;
+    setState((s) => ({ ...s, refetchId: null }));
+    void fetchContent(id).then((content) => {
+      if (stateRef.current.previewId !== id) return; // moved on: stale
+      if (content === null) {
+        // a failed oversized-announce refetch must not leave the pane
+        // silently on pre-edit content
+        setPreviewFailed(true);
+        return;
+      }
+      setState((prev) =>
+        prev.previewId === id ? { ...prev, previewContent: content } : prev,
+      );
+    });
+  }, [state.refetchId]);
 
   const preview = useCallback(async (doc: WorkspaceDoc) => {
     setPreviewFailed(false);
     setState((s) => setPreview(s, doc.id, null));
     const content = await fetchContent(doc.id);
+    if (stateRef.current.previewId !== doc.id) {
+      return; // a stale response must not paint over the current document
+    }
     if (content === null) {
       // FR-54: the pane has an error state — a blank body is
       // indistinguishable from an empty document
@@ -164,7 +189,12 @@ export function useWorkspace(enabled: boolean) {
     const res = await authedFetch(
       `/documents?offset=${stateRef.current.docs.length}`,
     );
-    if (!res.ok) return;
+    if (!res.ok) {
+      // FR-54: a blip must not read as "there is nothing older"
+      setError("couldn't load older documents — try again");
+      return;
+    }
+    setError(null);
     const body = (await res.json()) as {
       documents: WorkspaceDoc[];
       total: number;
@@ -201,10 +231,10 @@ export function useWorkspace(enabled: boolean) {
         doc.char_count,
         "uploaded, but not attached — the attach set is at its character budget",
       );
-      // FR-54: uploads surface immediately; the list itself is server truth
-      await refresh();
+      // the batch's single refresh happens in the component's finally —
+      // re-walking the whole shown corpus per file was O(pages x files)
     },
-    [refresh, tryAttach],
+    [tryAttach],
   );
 
   const deleteDoc = useCallback(
@@ -273,7 +303,9 @@ export function useWorkspace(enabled: boolean) {
     total,
     loading,
     error,
+    budgetError,
     previewFailed,
+    refresh,
     loadMore,
     handleAnnounce,
     preview,

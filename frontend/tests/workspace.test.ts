@@ -34,7 +34,7 @@ describe("upsertFromAnnounce", () => {
       ...doc({ id: 42, source: "uploaded" }),
       content: "edited upload",
     };
-    const { state: next } = upsertFromAnnounce(state, announce);
+    const next = upsertFromAnnounce(state, announce);
     const uploaded = next.docs.filter((d) => d.source === "uploaded");
     expect(uploaded.map((d) => d.id)).toEqual([42]);
     expect(next.docs[0].id).toBe(42); // newest activity first
@@ -45,7 +45,7 @@ describe("upsertFromAnnounce", () => {
       doc({ id: 1 }),
       doc({ id: 2, title: "old title" }),
     ]);
-    const { state: next } = upsertFromAnnounce(state, {
+    const next = upsertFromAnnounce(state, {
       ...doc({ id: 2, title: "new title" }),
     });
     expect(next.docs.map((d) => d.id)).toEqual([2, 1]);
@@ -56,27 +56,28 @@ describe("upsertFromAnnounce", () => {
   it("re-renders the previewed document in place when content rides along", () => {
     let state = rehydrate(emptyWorkspace, [doc({ id: 7 })]);
     state = setPreview(state, 7, "before");
-    const { state: next, refetch } = upsertFromAnnounce(state, {
+    const next = upsertFromAnnounce(state, {
       ...doc({ id: 7 }),
       content: "after",
       content_omitted: false,
     });
     expect(next.previewContent).toBe("after");
-    expect(refetch).toBe(false); // no refetch while the payload carries it
+    expect(next.refetchId).toBeNull(); // no refetch while the payload carries it
   });
 
   it("asks for a refetch ONLY when content was omitted AND that doc is previewed", () => {
     let state = rehydrate(emptyWorkspace, [doc({ id: 7 }), doc({ id: 8 })]);
     state = setPreview(state, 7, "before");
 
-    // omitted + previewed -> refetch
+    // omitted + previewed -> the reducer flags the refetch the hook's
+    // effect consumes (state.refetchId IS the live path)
     const previewed = upsertFromAnnounce(state, {
       ...doc({ id: 7 }),
       content: null,
       content_omitted: true,
     });
-    expect(previewed.refetch).toBe(true);
-    expect(previewed.state.previewContent).toBe("before"); // kept until fetch
+    expect(previewed.refetchId).toBe(7);
+    expect(previewed.previewContent).toBe("before"); // kept until fetch
 
     // omitted + NOT previewed -> no refetch (the list updates from metadata)
     const background = upsertFromAnnounce(state, {
@@ -84,7 +85,10 @@ describe("upsertFromAnnounce", () => {
       content: null,
       content_omitted: true,
     });
-    expect(background.refetch).toBe(false);
+    expect(background.refetchId).toBeNull();
+
+    // switching documents invalidates a pending refetch
+    expect(setPreview(previewed, 8, null).refetchId).toBeNull();
   });
 
   it("ignores a tombstoned id — a late write must not resurrect the card", () => {
@@ -93,12 +97,12 @@ describe("upsertFromAnnounce", () => {
     // resurrection FR-50 forbids at the DB.
     let state = rehydrate(emptyWorkspace, [doc({ id: 5 })]);
     state = markDeleted(state, 5);
-    const { state: next, refetch } = upsertFromAnnounce(state, {
+    const next = upsertFromAnnounce(state, {
       ...doc({ id: 5 }),
       content: "zombie",
     });
     expect(next.docs).toHaveLength(0);
-    expect(refetch).toBe(false);
+    expect(next.refetchId).toBeNull();
   });
 });
 

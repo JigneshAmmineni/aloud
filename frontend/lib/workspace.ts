@@ -32,6 +32,11 @@ export type WorkspaceState = {
   deletedIds: number[]; // session tombstones (FR-55)
   previewId: number | null;
   previewContent: string | null;
+  // FR-55's refetch decision, OWNED BY THE REDUCER so the mandated test
+  // covers the path the hook actually consumes: set when an announce
+  // omitted oversized content for the previewed document; the hook's
+  // effect fetches and clears it.
+  refetchId: number | null;
 };
 
 export const emptyWorkspace: WorkspaceState = {
@@ -39,6 +44,7 @@ export const emptyWorkspace: WorkspaceState = {
   deletedIds: [],
   previewId: null,
   previewContent: null,
+  refetchId: null,
 };
 
 /** Refresh from server truth (FR-55). Tombstones SURVIVE and filter the
@@ -60,6 +66,7 @@ export function rehydrate(
     deletedIds: state.deletedIds,
     previewId: previewAlive ? state.previewId : null,
     previewContent: previewAlive ? state.previewContent : null,
+    refetchId: previewAlive ? state.refetchId : null,
   };
 }
 
@@ -74,22 +81,22 @@ export function rehydrate(
 export function upsertFromAnnounce(
   state: WorkspaceState,
   doc: AnnouncedDoc,
-): { state: WorkspaceState; refetch: boolean } {
+): WorkspaceState {
   if (state.deletedIds.includes(doc.id)) {
-    return { state, refetch: false };
+    return state;
   }
   const { content, content_omitted, ...meta } = doc;
   const docs = [meta, ...state.docs.filter((d) => d.id !== doc.id)];
   let previewContent = state.previewContent;
-  let refetch = false;
+  let refetchId = state.refetchId;
   if (state.previewId === doc.id) {
     if (content_omitted) {
-      refetch = true; // the client has no other way to refresh the pane
+      refetchId = doc.id; // the client has no other way to refresh the pane
     } else if (typeof content === "string") {
       previewContent = content; // re-render in place — no refetch needed
     }
   }
-  return { state: { ...state, docs, previewContent }, refetch };
+  return { ...state, docs, previewContent, refetchId };
 }
 
 /** A client-initiated hard delete (FR-52/55): the card goes, the id is
@@ -104,6 +111,7 @@ export function markDeleted(
     deletedIds: [...state.deletedIds, id],
     previewId: state.previewId === id ? null : state.previewId,
     previewContent: state.previewId === id ? null : state.previewContent,
+    refetchId: state.refetchId === id ? null : state.refetchId,
   };
 }
 
@@ -112,15 +120,8 @@ export function setPreview(
   id: number | null,
   content: string | null = null,
 ): WorkspaceState {
-  return { ...state, previewId: id, previewContent: content };
-}
-
-/** The visible attach budget (FR-51): sum of attached char counts against
- * MAX_TOTAL_CHARS. The toggle refuses additions that would cross it. */
-export function attachTotal(docs: WorkspaceDoc[], attachedIds: number[]): number {
-  return docs
-    .filter((d) => attachedIds.includes(d.id))
-    .reduce((sum, d) => sum + d.char_count, 0);
+  // switching documents invalidates any pending refetch for the old one
+  return { ...state, previewId: id, previewContent: content, refetchId: null };
 }
 
 /** FR-52's download filename: derives from an untrusted 🔒 title — path

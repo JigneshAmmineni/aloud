@@ -34,6 +34,9 @@ def _fake_verify(monkeypatch, claims=None, error=None):
 
 PROTECTED = [
     ("post", "/documents"),
+    ("get", "/documents"),
+    ("get", "/documents/1"),
+    ("delete", "/documents/1"),
     ("post", "/start"),
     ("post", "/sessions/any/api/offer"),
     ("patch", "/sessions/any/api/offer"),

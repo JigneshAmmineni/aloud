@@ -19,6 +19,7 @@ from db.documents_repo import (
     READ_DOCUMENT_MAX_CHARS,
     DocumentQuotaError,
     EditDiagnosis,
+    PageOutOfRange,
     append_document_content,
     create_document_row,
     diagnose_edit_failure,
@@ -204,10 +205,10 @@ async def _read_document(args: dict, ctx: ToolContext) -> dict:
             event="tool.read_document_failed"
         ).error(f"document read failed: {type(e).__name__}")
         return {"status": "error", "error": "could not read the document"}
-    if result == "not_found":
+    if result is None:
         return {"status": "not_found", "document_id": document_id}
-    if isinstance(result, str):  # page_out_of_range:{total}
-        total = result.rsplit(":", 1)[1]
+    if isinstance(result, PageOutOfRange):
+        total = result.total_pages
         return {
             "status": "error",
             "error": (

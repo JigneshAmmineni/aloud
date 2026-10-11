@@ -11,6 +11,7 @@ from sqlalchemy import select
 
 from db.documents_repo import (
     EDITABLE_FORMATS,
+    PageOutOfRange,
     append_document_content,
     diagnose_edit_failure,
     fold_pages,
@@ -93,13 +94,11 @@ def test_read_document_page_resolves_page_line_and_steers(db_url):
         by_line = await read_document_page("uid-a", row.id, line=2)
         assert by_line.page == 1
 
-        assert await read_document_page("uid-a", row.id, page=5) == (
-            "page_out_of_range:1"
-        )
-        assert await read_document_page("uid-a", row.id, line=99) == (
-            "page_out_of_range:1"
-        )
-        assert await read_document_page("uid-b", row.id) == "not_found"
+        oob = await read_document_page("uid-a", row.id, page=5)
+        assert isinstance(oob, PageOutOfRange) and oob.total_pages == 1
+        oob = await read_document_page("uid-a", row.id, line=99)
+        assert isinstance(oob, PageOutOfRange) and oob.total_pages == 1
+        assert await read_document_page("uid-b", row.id) is None
 
     asyncio.run(run())
 

@@ -309,7 +309,7 @@ bridge networking can't forward:
 
 | Container | Image | Role |
 |---|---|---|
-| caddy | caddy:2-alpine | :80/:443 — TLS, path routing (`/api/*,/start,/sessions/*,/documents*,/healthz` → backend, rest → frontend). The old site-wide `basic_auth` gate is removed — per-user auth lives in the backend |
+| caddy | caddy:2-alpine | :80/:443 — TLS, path routing (`/api/*,/start,/sessions/*,/documents*,/healthz` → backend, rest → frontend); request bodies capped at 10MB at the edge (FR-51 — the upload route also bounds its own read). The old site-wide `basic_auth` gate is removed — per-user auth lives in the backend |
 | frontend | built from `frontend/Dockerfile` | compiled Next.js on :3000 (loopback-only in practice — not firewalled open) |
 | backend | built from `backend/Dockerfile` | FastAPI + Pipecat on :7860 + UDP media on host interface |
 | db | postgres:16-alpine | :5432, `listen_addresses=127.0.0.1` (loopback only) |

@@ -146,9 +146,11 @@ export function Workspace({
   total,
   loading,
   error,
+  budgetError,
   previewFailed,
   onClose,
   onLoadMore,
+  onUploadsSettled,
   onPreview,
   onClosePreview,
   onDownload,
@@ -159,8 +161,10 @@ export function Workspace({
   onClose: () => void;
   total: number;
   attachedChars: number;
+  budgetError: string | null;
   previewFailed: boolean;
   onLoadMore: () => void;
+  onUploadsSettled: () => Promise<void>;
   state: WorkspaceState;
   idle: boolean;
   attachedIds: number[];
@@ -199,6 +203,9 @@ export function Workspace({
     } catch (e) {
       setUploadError(e instanceof Error ? e.message : "couldn't read that file");
     } finally {
+      // one refresh for the whole batch (uploads surface immediately;
+      // the list itself stays server truth)
+      await onUploadsSettled().catch(() => {});
       setBusy(false);
       if (inputRef.current) inputRef.current.value = "";
     }
@@ -316,6 +323,7 @@ export function Workspace({
           attached: {formatChars(attachedChars)} / {formatChars(MAX_TOTAL_CHARS)} chars
         </p>
       )}
+      {budgetError && <p className="doc-error">{budgetError}</p>}
       {error && <p className="doc-error">{error}</p>}
 
       {previewDoc && (

@@ -100,7 +100,9 @@ export default function Home() {
         onClose={() => setDocsOpen(false)}
         attachedIds={workspace.attachedIds}
         attachedChars={workspace.attachedChars}
+        budgetError={workspace.budgetError}
         previewFailed={workspace.previewFailed}
+        onUploadsSettled={() => workspace.refresh()}
         total={workspace.total}
         onLoadMore={workspace.loadMore}
         loading={workspace.loading}
