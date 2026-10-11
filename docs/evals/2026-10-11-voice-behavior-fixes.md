@@ -34,6 +34,7 @@ verbatim, for each.
 | 5 | a small instant edit ("remove X from that list") | NO filler phrase; just the short confirmation, with a natural gap if anything precedes it |
 | 6 | a slower operation (e.g., a search across documents) | filler IS spoken once the wait is real (~0.8s+), then the result |
 | 7 | an edit that will fail (e.g., referencing text not in the doc) | one short sentence about what couldn't be done — no tool names, no internal mechanics, no apology chain |
+| 8 | let a garbled fragment draw a "Hmm.", then immediately ask a clear follow-up question | the follow-up gets a real answer — never a second "Hmm." in a row (live fail 2026-10-11, session c47e28af) |
 
 ## Acceptance bar
 

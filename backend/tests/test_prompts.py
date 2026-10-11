@@ -55,6 +55,9 @@ def test_prompt_keeps_document_instructions():
     # the question-beats-hmm overrides, both halves (clean and garbled)
     assert "is never a brain-dump turn" in prompt
     assert "a question is still a question" in prompt
+    # 2026-10-11 live: a garble-Hmm followed by a real question got a
+    # second Hmm — the momentum invariant is pinned
+    assert 'never reply "hmm." twice in a row' in prompt
 
 
 def test_prompt_pins_the_assistant_not_leader_character():
