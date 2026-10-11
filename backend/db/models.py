@@ -130,6 +130,51 @@ class LLMTrace(Base):
     output: Mapped[str] = mapped_column(Text)  # 🔒 sensitive
 
 
+class Document(Base):
+    """§4.11 FR-50: one table for uploaded and agent-created documents.
+    Metadata columns stay separable from the 🔒 content columns (title,
+    content) per NFR-6. Replaces `artifacts`, which survives read-only
+    (plus FR-52's paired delete) until its stated drop release."""
+
+    __tablename__ = "documents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # indexed: list/search/attach queries and every RLS predicate filter on it
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    # Nullable: uploads precede any session (FR-51); migrated agent rows
+    # keep their originating session.
+    session_id: Mapped[str | None] = mapped_column(
+        ForeignKey("sessions.id"), index=True
+    )
+    source: Mapped[str] = mapped_column(String(16))  # uploaded|agent
+    format: Mapped[str] = mapped_column(String(16))  # markdown|text|pdf
+    # Agent documents keep FR-12's kinds; uploads have none.
+    kind: Mapped[str | None] = mapped_column(String(24))
+    # FR-50: the migration's idempotency/join key back to the retained
+    # artifacts row (FR-52's paired delete); dropped with the drop release.
+    legacy_artifact_id: Mapped[int | None] = mapped_column(Integer, unique=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    # FR-52/53 activity ordering: COALESCE(updated_at, created_at) DESC, id DESC
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    title: Mapped[str] = mapped_column(Text)  # 🔒 sensitive
+    content: Mapped[str] = mapped_column(Text)  # 🔒 sensitive
+
+
+class SchemaMigration(Base):
+    """FR-50: run-once migration markers — a key, a completion timestamp,
+    and a watermark. Metadata only, never content; written exclusively by
+    the bootstrap engine (the app role holds no grant on it)."""
+
+    __tablename__ = "schema_migrations"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Max migrated artifacts.id; later boots copy only rows above it.
+    watermark: Mapped[int | None] = mapped_column(Integer)
+
+
 class Artifact(Base):
     __tablename__ = "artifacts"
 

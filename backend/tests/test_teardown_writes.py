@@ -13,9 +13,9 @@ from sqlalchemy import select
 
 import agent.companion as companion
 from agent.companion import _await_writes
-from db.artifacts_repo import create_artifact_row
+from db.documents_repo import create_document_row
 from db.engine import init_db, session_factory
-from db.models import Artifact, UsageEvent
+from db.models import Document, UsageEvent
 from db.sessions_repo import create_session_row
 from db.users_repo import provision_user
 
@@ -26,7 +26,7 @@ def test_end_tap_mid_write_lands_row_and_usage_event(tmp_path):
 
     async def slow_create():
         await asyncio.sleep(0.1)  # the "in-flight" part
-        return await create_artifact_row(
+        return await create_document_row(
             "uid-a", "s-1", "summary", "T", "body", turn_id=3
         )
 
@@ -42,7 +42,7 @@ def test_end_tap_mid_write_lands_row_and_usage_event(tmp_path):
         )
 
         async with session_factory()() as db:
-            artifacts = (await db.execute(select(Artifact))).scalars().all()
+            artifacts = (await db.execute(select(Document))).scalars().all()
             events = (
                 (
                     await db.execute(

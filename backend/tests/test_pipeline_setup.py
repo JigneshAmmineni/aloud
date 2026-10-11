@@ -4,6 +4,7 @@ These pin the invariants that future features (context engine, memory)
 are most likely to break when they touch the per-session setup.
 """
 
+import pytest
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.flux.stt import DeepgramFluxSTTService
 from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
@@ -26,9 +27,9 @@ def test_context_starts_with_exactly_one_system_message(make_settings):
 def test_attached_documents_are_injected_into_context(make_settings):
     """Document upload feature: attached docs ride in alongside the base prompt
     (and only then). The base identity prompt stays intact."""
-    from app.documents import Document
+    from db.documents_repo import AttachedDocument
 
-    docs = [Document("d1", "arch.md", "text/markdown", "cascade pipeline", 16)]
+    docs = [AttachedDocument(1, "arch.md", "markdown", "cascade pipeline")]
     *_, provider, _scratch, _ua = build_pipeline_parts(make_settings(), docs)
     combined = " ".join(
         m["content"] for m in provider.build() if isinstance(m.get("content"), str)
@@ -198,3 +199,59 @@ def test_greeting_name_lookup_is_time_bounded(monkeypatch):
     assert time.monotonic() - t0 < 5  # the wait_for bound, not the hang
 
     asyncio.run(asyncio.sleep(0))  # nothing pending leaks
+
+
+def test_run_registers_provider_and_unregisters_in_finally(
+    make_settings, monkeypatch, tmp_path
+):
+    """FR-52: the provider registers at pipeline construction and is
+    removed in the SAME finally as the live-task pop — a provider left
+    registered pins the session's full conversation in process memory for
+    the container's life. Covers the error path: even a crashing run
+    unregisters."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    import agent.companion as companion
+    import agent.registry as registry_mod
+    from db.engine import init_db
+    from db.users_repo import provision_user
+
+    seen: dict = {}
+
+    class StubRunner:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def run(self, task):
+            seen["registered_during_run"] = "s-reg-test" in registry_mod._providers
+            raise RuntimeError("pipeline crashed")
+
+    stub_transport = MagicMock()
+    stub_transport.input.return_value = MagicMock()
+    stub_transport.output.return_value = MagicMock()
+    stub_transport.event_handler.return_value = lambda fn: fn
+
+    stub_task = MagicMock()
+    stub_task.turn_tracking_observer = None
+    stub_task.queue_frames = AsyncMock()
+
+    monkeypatch.setattr(companion, "SmallWebRTCTransport", lambda **kw: stub_transport)
+    monkeypatch.setattr(companion, "Pipeline", lambda *a, **kw: MagicMock())
+    monkeypatch.setattr(companion, "PipelineTask", lambda *a, **kw: stub_task)
+    monkeypatch.setattr(companion, "PipelineRunner", StubRunner)
+
+    async def run():
+        await init_db(f"sqlite+aiosqlite:///{tmp_path}/reg.db")
+        await provision_user("uid-reg", None)
+        agent = companion.CompanionAgent(
+            make_settings(), None, user_id="uid-reg", session_id="s-reg-test"
+        )
+        conn = MagicMock()
+        conn.pc_id = "pc-reg"
+        with pytest.raises(RuntimeError):
+            await agent.run(conn)
+
+    asyncio.run(run())
+    assert seen["registered_during_run"] is True
+    assert "s-reg-test" not in registry_mod._providers  # the finally held

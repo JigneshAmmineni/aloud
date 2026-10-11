@@ -547,6 +547,15 @@ exit        # leaves the SSH session; containers keep running (restart: unless-s
 
 ## 13. Updating the app after a code change
 
+**Before a deploy that runs a DB migration** (FR-50's rule — first one:
+the §4.11 artifacts→documents copy): take a manual dump and note it in
+the deploy notes. With no automated backups and rollback not reversing
+migrations, the dump is the only recovery path for irreplaceable rows:
+```bash
+gcloud compute ssh aloud --zone=us-west1-b --tunnel-through-iap \
+  --command="docker exec aloud-db-1 pg_dump -U aloud aloud | gzip > ~/aloud/pre-migration-$(date +%Y%m%d).sql.gz"
+```
+
 Push your change to GitHub from your laptop as usual, then on the VM:
 ```bash
 cd ~/aloud

@@ -295,10 +295,13 @@ principles govern every FR below:
   stays session-level. The recorded units: LLM prompt and completion tokens per inference,
   TTS characters per utterance, and an `artifact_created` event
   (`stage = 'artifact'`, `unit = 'count'`, `quantity = 1`, `detail` = the
-  document's `kind`, or its `format` for uploaded documents, which
-  have none — never title/content) whenever the create_artifact
+  document's `kind` — never title/content; creates always carry one) whenever the create_artifact
   tool succeeds — and, once §4.10 lands, an `artifact_edited` event
   whenever the `edit_artifact` tool succeeds, with **`unit = 'edits'`**
+  and `detail` = the document's `kind`, **or its `format` for
+  uploaded documents, which have none** (edits are the one path that
+  could otherwise write the NULL `detail` FR-50 names as a bug
+  symptom; uploads themselves emit no event)
   (creates keep `unit = 'count'`): the stage.unit aggregation §4.9's
   views are built on then separates the two for free, so one create plus
   three edits can never render as four artifacts — so admin views can
@@ -1312,7 +1315,10 @@ asking to delete by voice.
   (nothing was spent; the existing `document.uploaded` structured log —
   char count, never filename — remains the operational record).
   Migration: implementation ships a **run-once pre-serve migration**
-  (the RLS-bootstrap / boot-sweep slot) carrying every existing
+  in the RLS-bootstrap slot — one slot, named precisely, because the
+  choice decides the test lane: `_bootstrap_rls` is Postgres-only
+  (unlike the FR-32 boot sweep), so **the migration's mandated tests
+  below run in the Postgres-only lane** carrying every existing
   `artifacts` row into `documents` with `source='agent'`,
   `format='markdown'`, and **every surviving field**: `user_id`,
   `session_id`, `kind`, `title`, `content`, `created_at`,
@@ -1440,7 +1446,13 @@ asking to delete by voice.
   every live pipeline's frames on 2 shared vCPUs — and
   `DOCUMENTS_RATE_LIMIT` would make that 20 *permitted* stalls a
   minute, stalling sessions that did nothing wrong while FR-54's
-  idle-gating protects only the uploader's own. The mandated test
+  idle-gating protects only the uploader's own. The threadpool move is
+  paired with a **small semaphore (default 2 concurrent
+  extractions)**: pypdf is pure Python and holds the GIL, so the
+  threadpool protects the event loop but not the CPUs — 20/min of
+  permitted uploads would otherwise parse concurrently on 2 shared
+  vCPUs, more contention for the same work; excess uploads queue on
+  the semaphore. The mandated test
   asserts structure, not timing (a timing test flakes): the route's
   extraction call site goes through the threadpool wrapper. The
   response becomes `{id, title, format, char_count}` — `mime_type`
@@ -1463,8 +1475,11 @@ asking to delete by voice.
   route declares** (`get_current_user_checked` here) — FastAPI's
   per-request dependency cache then resolves it once; a limiter
   reaching for the plain `get_current_user_id` is a *different*
-  callable, a cache miss, and pays the `check_revoked` network round
-  trip twice. And sitting behind
+  callable and a cache miss — the real cost is a second verify that
+  is local and ~a millisecond (`get_current_user_id` is
+  `check_revoked=False`, no network), so the rule is kept for
+  coherence (one identity resolution per request), not for a Firebase
+  round trip it never doubles. And sitting behind
   verification it bounds storage abuse, not Firebase-lookup cost —
   the pre-auth flood cost is the same as every other authed route,
   accepted. And a **per-user
@@ -1538,10 +1553,13 @@ asking to delete by voice.
   silently skipped exactly like an unknown one, never handed to the
   DB to raise a type error out of session establishment. The same
   coercion step **dedupes (first occurrence wins) and caps the list
-  at `MAX_DOCUMENTS_PER_USER`** — the hand-rolled-request reasoning
-  above applies to the list as much as to the budget (nothing above
-  200 distinct ids can ever resolve, and a 50,000-element array has
-  no business reaching the lengths query), and duplicates are worse
+  at `MAX_DOCUMENTS_PER_USER`** — a list-length bound, not an
+  ownership claim: a quota-exempt migrated corpus can legitimately
+  hold more rows (FR-52's own list caveat), but 200 ids already
+  exceeds what `MAX_TOTAL_CHARS` can carry by an order of magnitude
+  (400k over 200 documents is 2k chars each), so the cap costs
+  nothing real — and a 50,000-element array has
+  no business reaching the lengths query, and duplicates are worse
   than slow: they double-count a document against `MAX_TOTAL_CHARS`
   and collide in FR-52/53's id-keyed per-document sections, so
   reconciliation would fix one copy and leave the other shipping
@@ -1659,7 +1677,17 @@ asking to delete by voice.
   the same single-worker property that already makes
   `update_tool_result` safe from a detached write task; an `async`
   mutation with an interior `await` could interleave with the loop's
-  `build()` and ship a half-reconciled block. Mandated
+  `build()` and ship a half-reconciled block. And the registry is
+  module-level, therefore **same-process only — stated as an
+  assumption, not discovered under scaling**: deployment today is one
+  uvicorn worker (CURRENT-ARCHITECTURE.md), where every live session
+  is reachable; a second worker silently breaks the guarantee (a
+  destroyed document's 🔒 content keeps shipping to sessions on the
+  other worker). Single-*thread* is what makes the synchronous
+  mutation atomic; single-*process* is what makes the registry
+  reachable at all — scaling past one worker is the revisit trigger,
+  and the replacement is a cross-process channel (e.g. Postgres
+  LISTEN/NOTIFY), not a bigger dict. Mandated
   test, symmetric with the edit one: delete an
   attached document → the next built context carries no section for
   it.
@@ -1684,9 +1712,12 @@ asking to delete by voice.
   response never serializes `content`; a title carrying path
   separators or control characters never reaches a download filename
   (the sanitization has its test, like FR-54's markdown rule);
-  the list continuation — `offset` pages through a corpus larger than
-  the cap with a stable `total` and no row repeated or skipped (the
-  one new path whose failure is silent);
+  the list continuation — `offset` pages through a **quiescent**
+  corpus larger than the cap with a stable `total` and no row
+  repeated or skipped (the one new path whose failure is silent;
+  activity between pages legitimately re-orders rows — the same
+  accepted drift `list_documents` states — so the test certifies the
+  tiebreaker, not immunity to concurrent writes);
   delete → the row is gone — for a migrated document the
   paired `artifacts` row too, in the same transaction — and a
   subsequent `read_document` of that id steers not-found.
@@ -1751,7 +1782,12 @@ asking to delete by voice.
     decoration genuinely bounded: without it, a document of
     one-character lines carries a prefix per line and the rendered
     page reaches several times the char knob, re-sent on every
-    remaining step as a tool result. Page-slicing happens in the repo over **one** owned
+    remaining step as a tool result. Stated arithmetic: under ~40
+    chars/line — every bullet list, so the `action_items` kind by
+    construction — the line cap binds first and a 200k-char document
+    is ~67 pages, each a tool round against MAX_STEPS' five; that is
+    the same arithmetic that justifies `search_documents` existing —
+    paging reads context around a known location, search finds it. Page-slicing happens in the repo over **one** owned
     row's content, itself bounded by `MAX_DOC_CHARS` — a single
     bounded fetch, the fold over newline snaps, line caps, and hard
     cuts running **in-process, never in SQL** (the engine choice is
@@ -1921,7 +1957,11 @@ asking to delete by voice.
     data-loss class the over-cap `replace` refusal exists to prevent,
     and the Agent SDK precedent does not transfer — its Edit reads
     whole files, our reads are capped), it **requires
-    `expected_occurrences`**: the counting predicate refuses unless
+    `expected_occurrences`, validated `>= 1`** like every
+    hand-checked argument (`0` would pass a zero-count predicate as a
+    no-op write that still bumps `updated_at`, re-orders every
+    activity list, announces, records an `artifact_edited` event, and
+    gets voiced as success): the counting predicate refuses unless
     the actual count equals the model's stated expectation, and the
     mismatch steering names the actual count and lines (the
     multi-match steering is where the model typically learned the
@@ -2137,13 +2177,17 @@ asking to delete by voice.
   end-to-end; and the NFR-8 negative (user A's search never returns
   user B's rows).
 - **FR-54** The workspace UI replaces the fixed artifact drawer and the
-  bare upload list on the session console: a workspace region with
-  **two side-by-side scrollable lists** — **Uploaded**
-  (`source='uploaded'`) and **Created** (`source='agent'`) — populated
-  from `GET /documents` when a signed-in user loads the page. Each item
-  shows title, kind/format badge, and timestamp (uploads add char
-  count), with per-item **preview** and **download** affordances
-  (memory.md §11's decided UI). Selecting an item opens the **single
+  bare upload list on the session console: a workspace panel behind a
+  **Documents toggle** (opens from the top nav, closes from the panel),
+  holding **one flat, column-structured list of both sources** —
+  columns Name, Type (the plain file type for every source: md/txt/pdf),
+  Source, Created, Updated, Size (chars — the attach budget's unit) —
+  populated from `GET /documents` when a signed-in user loads the page,
+  newest activity first, with a **sort control** over those columns
+  (picking a column sorts by it, picking the active one reverses —
+  never idempotent) and the FR-52 continuation surfaced as "show
+  older" whenever `total` exceeds the rendered rows. Per-item
+  **preview** and **download** affordances ride each row. Selecting an item opens the **single
   preview pane** — one document at a time, whichever was selected last:
   `markdown` renders as markdown, `text` and `pdf` (extracted text)
   render preformatted. **Sanitization is a requirement, not a style
@@ -2154,9 +2198,16 @@ asking to delete by voice.
   `http`/`https`/`mailto`** — `javascript:` and `data:` URLs survive
   every HTML-disabled renderer, and the preview pane runs on the
   origin holding the Firebase session; the renderer itself is chosen
-  in the implementation PR, so the constraint has to live here. The
+  in the implementation PR, so the constraint has to live here.
+  **Images do not render at all** — an `![](…)` shows as its alt
+  text/link, never a fetch: images are a separate node type the link
+  allowlist does not touch, and they fetch automatically on render,
+  so an external image source beacons on preview — with roadmap item
+  9's injection surface, an exfiltration channel; re-enabling images
+  waits for a proxy or trusted-origin story. The
   mandated sanitization test includes a `[x](javascript:…)` link
-  rendering inert — **and the lane it runs in is specced, because
+  rendering inert and an `![x](https://…)` image rendering without a
+  network fetch — **and the lane it runs in is specced, because
   today none exists**: the frontend gains a minimal test step (vitest,
   or an equivalent the implementation PR may substitute) wired into
   CI's existing frontend job, scoped to the renderer-config cases this
@@ -2186,15 +2237,24 @@ asking to delete by voice.
   polling, and no refetch while the payload carries the content — on a
   `content_omitted` announce (FR-53's size threshold) the client
   refetches `GET /documents/{id}` — only when that document is open in
-  the pane; the list updates from the announce's metadata either way. The upsert's insert half stays load-bearing even with
+  the pane; the list updates from the announce's metadata either way.
+  One staleness is accepted and stated rather than implied: the
+  announce is session-local (the data channel belongs to one session)
+  while FR-53.8's context block reconciles cross-session — so a
+  second tab's open preview can lag an edit made elsewhere until its
+  next refetch or reload (the workspace rehydrates from
+  `GET /documents`); bounded, visible-only staleness is not worth a
+  cross-session transport registry the feature doesn't otherwise
+  need. The upsert's insert half stays load-bearing even with
   FR-54's fetch: an edited document can be absent from the client's
-  capped list. **And the insert half routes by `source`** — the
-  announce's metadata carries it, and an unknown-id upsert lands in
-  the matching list (uploaded → Uploaded, agent → Created): FR-53's
-  format gate made uploads editable, and inserting an edited upload
-  under Created would break FR-54's organizing idea. The client test
+  capped list. **And the insert half carries `source` intact** — the
+  announce's metadata has it, an unknown-id upsert lands in the single
+  activity-ordered list, and the Source column (plus any future
+  source-grouped view) depends on the upserted row keeping it: FR-53's
+  format gate made uploads editable, and an edited upload rendering as
+  agent-made would misattribute it. The client test
   gains the case: an update for an unknown **uploaded** id inserts
-  into the Uploaded list. **Deleted ids are tombstoned for the
+  carrying `source: "uploaded"`. **Deleted ids are tombstoned for the
   session**: FR-46 lets a write outlive its turn, so a
   `document.updated` can land after the user deleted that document —
   and the insert half would faithfully resurrect the card, the
@@ -2207,10 +2267,17 @@ asking to delete by voice.
   unexpected session death" rule is subsumed: the lists are
   server-backed truth. Mandated tests: backend — the `document.updated`
   payload carries the post-edit content below FR-53's threshold and
-  `content_omitted` with no content above it; client behavior notes —
-  an upsert for an unknown id inserts, an update for the previewed
-  document re-renders it (refetching when content was omitted), and a
-  reload shows server truth.
+  `content_omitted` with no content above it; client — **mandated
+  tests in FR-54's vitest lane, not behavior notes**: the upsert,
+  tombstone, and refetch rules are a pure reducer over announce
+  payloads, the cheapest tests in the feature, and each rule's
+  failure is invisible in manual use — an upsert for an unknown id
+  inserts into the source-matched list (the uploaded-id case
+  included), an update for the previewed document re-renders it,
+  the refetch fires only when content was omitted **and** that
+  document is previewed, a `document.updated` for a tombstoned id
+  is ignored, deleting the previewed document closes the pane, and
+  a reload shows server truth.
 
 **Amendments this feature makes** (recorded here; the amended FRs stay
 authoritative for everything not named): FR-45 — tool and knob renames,
@@ -2253,7 +2320,7 @@ This block remains as the index of what changed.
 | `MAX_FILE_BYTES` (per uploaded file) | 5 MB | unchanged (upload/extraction module) |
 | `MAX_DOC_CHARS` (per document, post-extraction) | 200,000 | unchanged |
 | `MAX_TOTAL_CHARS` (per-session injected block, FR-21) | 400,000 | unchanged |
-| Editable formats (`edit_document` gate) | `markdown`, `text` | `agent/tools.py` |
+| Editable formats (`edit_document` gate) | `markdown`, `text` | `db/` documents repo (the gate is `AND format` in the UPDATE predicate; the tool owns the steering message) |
 
 ---
 

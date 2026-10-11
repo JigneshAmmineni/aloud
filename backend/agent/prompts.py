@@ -47,17 +47,18 @@ natural, conversational sentences. Do not use markdown, headings, bullet \
 points, numbered lists, or emoji. Keep replies brief; this is a \
 conversation, not a lecture.
 
-Artifacts are created only when the user explicitly asks for a write-up — \
+Documents are created only when the user explicitly asks for a write-up — \
 "write that up", "make a summary", "put that in a doc". Never volunteer \
 one, and never answer a question by creating one. When the user asks for a \
-write-up, use the create_artifact tool; when they refer to an earlier \
-write-up, from this session or a past one, use list_artifacts to find it, \
-read_artifact to see its content, and edit_artifact to change or extend \
-it. Before you invoke any tool, say one short natural acknowledgment out \
-loud first, like "let me write that up" — then call the tool. Artifacts \
-appear on the user's screen, so after creating or editing one, confirm in \
-a few words ("Done — it's on your screen."); never read an artifact's \
-content aloud.
+write-up, use the create_document tool; when they refer to an earlier \
+write-up or an uploaded file, from this session or a past one, use \
+list_documents to find it — or search_documents when they remember words, \
+not names — then read_document to see its content and edit_document to \
+change or extend it. Before you invoke any tool, say one short natural \
+acknowledgment out loud first, like "let me write that up" — then call \
+the tool. Documents appear on the user's screen, so after creating or \
+editing one, confirm in a few words ("Done — it's on your screen."); \
+never read a document's content aloud.
 
 When the conversation starts, greet the user with a few words at most — \
 "Hey.", "Hey, what's up?", or "Hey {name}." when you know their name — \
@@ -129,27 +130,49 @@ def build_system_prompt() -> str:
     return _SYSTEM_PROMPT
 
 
-def build_document_context_block(documents) -> str:
-    """Format attached documents into a single system message (SDD §2.5).
+# The attach block's preamble (FR-21/51). Module-level so the provider can
+# re-render sections without re-deriving it.
+DOCUMENTS_PREAMBLE = (
+    "The user has attached the following document(s) to work through with "
+    "you. Read them, and fold a few words into your greeting so they know "
+    'you have them — "Hey. Got your doc." — still a few words, never a '
+    "sentence of commentary. Refer to a document by its name when it "
+    "comes up. Do not read a document aloud verbatim or summarize it "
+    "unasked; discuss it as the conversation calls for it."
+)
 
-    Kept separate from the base prompt so the identity/style prompt stays pure.
-    `documents` is a list of app.documents.Document. The combined block is
-    trimmed to MAX_TOTAL_CHARS so a multi-document session can't blow the
-    latency budget.
-    """
+
+def render_document_section(doc_id: int, title: str, content: str) -> str:
+    """One document's section. The header carries the id (FR-53.8): without
+    it, addressing an attached document costs a list_documents round plus
+    title matching that two `notes.md` make ambiguous."""
+    return f"--- DOCUMENT id={doc_id}: {title} ---\n{content}\n--- END ---"
+
+
+def render_documents_block(entries: dict[int, tuple[str, str]]) -> str | None:
+    """The attach block from per-document sections — id -> (title, content).
+    None when empty: the preamble drops with the last section (FR-53.8 — an
+    empty block renders as no block, not a header over nothing). Re-applies
+    MAX_TOTAL_CHARS on EVERY render: the block is mutable now, and both
+    older enforcement points (the client's attach-time refusal, the repo's
+    bounded fetch) run before any edit exists. Named consequence, accepted:
+    an attached document's section can truncate after its own edit."""
     from app.documents import _TRUNCATION_MARKER, MAX_TOTAL_CHARS
 
-    parts = [
-        "The user has attached the following document(s) to work through with "
-        "you. Read them, and fold a few words into your greeting so they know "
-        'you have them — "Hey. Got your doc." — still a few words, never a '
-        "sentence of commentary. Refer to a document by its name when it "
-        "comes up. Do not read a document aloud verbatim or summarize it "
-        "unasked; discuss it as the conversation calls for it."
-    ]
-    for doc in documents:
-        parts.append(f"--- DOCUMENT: {doc.filename} ---\n{doc.content}\n--- END ---")
+    if not entries:
+        return None
+    parts = [DOCUMENTS_PREAMBLE]
+    for doc_id, (title, content) in entries.items():
+        parts.append(render_document_section(doc_id, title, content))
     block = "\n\n".join(parts)
     if len(block) > MAX_TOTAL_CHARS:
         block = block[:MAX_TOTAL_CHARS] + _TRUNCATION_MARKER
     return block
+
+
+def build_document_context_block(documents) -> str:
+    """The block for a list of db.documents_repo.AttachedDocument (the repo
+    already bounded the fetch to the budget — FR-51)."""
+    return render_documents_block(
+        {d.id: (d.title, d.content) for d in documents}
+    ) or ""

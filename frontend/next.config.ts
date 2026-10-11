@@ -11,7 +11,10 @@ const nextConfig: NextConfig = {
       { source: "/api/admin/:path*", destination: `${BACKEND}/api/admin/:path*` },
       { source: "/api/auth/:path*", destination: `${BACKEND}/api/auth/:path*` },
       { source: "/start", destination: `${BACKEND}/start` },
+      // FR-52: the workspace surface — the id routes must be explicit, the
+      // literal /documents alone covered only uploads
       { source: "/documents", destination: `${BACKEND}/documents` },
+      { source: "/documents/:path*", destination: `${BACKEND}/documents/:path*` },
       { source: "/sessions/:path*", destination: `${BACKEND}/sessions/:path*` },
     ];
   },

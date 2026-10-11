@@ -36,6 +36,22 @@ EXPECTED_SCHEMA = {
         "title",
         "content",
     },
+    # §4.11 FR-50: the unified document workspace (metadata + two 🔒 columns)
+    "documents": {
+        "id",
+        "user_id",
+        "session_id",
+        "source",
+        "format",
+        "kind",
+        "legacy_artifact_id",
+        "created_at",
+        "updated_at",
+        "title",
+        "content",
+    },
+    # FR-50: run-once migration markers — metadata only, NO sensitive columns
+    "schema_migrations": {"key", "completed_at", "watermark"},
     # FR-49: per-call LLM traces — metadata plus two 🔒 content columns
     "llm_traces": {
         "id",
@@ -83,6 +99,9 @@ SENSITIVE_COLUMNS = {
     ("transcript_events", "text"),
     ("artifacts", "title"),
     ("artifacts", "content"),
+    # §4.11 FR-50: documents is the artifacts shape under the new name
+    ("documents", "title"),
+    ("documents", "content"),
     # FR-49: a trace IS content — full text sent to and received from the
     # LLM; excluded from every admin surface, prunable without ceremony.
     ("llm_traces", "input_messages"),
