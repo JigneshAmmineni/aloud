@@ -166,6 +166,9 @@ backend/
               tools.py (FR-53 registry: create/list/read/search/
               edit_document — paged reads, two-scope search, str_replace/
               insert/append/replace, announce payload cap),
+              gate.py (FR-60 create gate: a bounded yes/no judge call
+              through the FR-48 client in front of gated writes —
+              explicit-request check, fails closed),
               registry.py (FR-52/53 session-provider registry: HTTP-side
               deletes and cross-session edits reach live attach blocks;
               same-process by stated assumption — one uvicorn worker),
