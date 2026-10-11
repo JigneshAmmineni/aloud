@@ -25,7 +25,7 @@ import {
   emptyWorkspace,
   markDeleted,
   rehydrate,
-  setPreview,
+  updateDocMeta,
   upsertFromAnnounce,
   type AnnouncedDoc,
   type WorkspaceDoc,
@@ -50,7 +50,6 @@ export function useWorkspace(enabled: boolean) {
   // `error`, and round 3's blocker was exactly that wiping the refusal a
   // breath after tryAttach raised it
   const [budgetError, setBudgetError] = useState<string | null>(null);
-  const [previewFailed, setPreviewFailed] = useState(false);
 
   // The single source of attach truth: id -> char_count. Synchronous, so
   // batched uploads and budget math never race React's render cycle.
@@ -124,9 +123,9 @@ export function useWorkspace(enabled: boolean) {
     if (enabled) void refresh();
   }, [enabled, refresh]);
 
-  /** Wired into the session's onServerMessage: FR-55's upsert rules. The
-   * refetch decision is the REDUCER's (state.refetchId) — the effect below
-   * consumes it, so the mandated test covers the live path. */
+  /** Wired into the session's onServerMessage: FR-55's upsert rules for
+   * the LIST; the editor hook handles open tabs (content/merge/refetch —
+   * §4.12 extends the pane rules to editor tabs). */
   const handleAnnounce = useCallback(
     (type: string, doc: AnnouncedDoc) => {
       if (type !== "document.created" && type !== "document.updated") return;
@@ -142,47 +141,19 @@ export function useWorkspace(enabled: boolean) {
     [syncAttached],
   );
 
-  // the refetch half: consumes the reducer's decision
-  useEffect(() => {
-    const id = state.refetchId;
-    if (id === null) return;
-    setState((s) => ({ ...s, refetchId: null }));
-    void fetchContent(id).then((content) => {
-      if (stateRef.current.previewId !== id) return; // moved on: stale
-      if (content === null) {
-        // a failed oversized-announce refetch must not leave the pane
-        // silently on pre-edit content
-        setPreviewFailed(true);
-        return;
+  /** FR-56: the user's own save moves the row, the attach accounting,
+   * and the budget — the announce path only covers agent edits. */
+  const noteSaved = useCallback(
+    (meta: { id: number; title: string; char_count: number }) => {
+      const m = attachedRef.current;
+      if (m.has(meta.id)) {
+        m.set(meta.id, meta.char_count);
+        syncAttached();
       }
-      setState((prev) =>
-        prev.previewId === id ? { ...prev, previewContent: content } : prev,
-      );
-    });
-  }, [state.refetchId]);
-
-  const preview = useCallback(async (doc: WorkspaceDoc) => {
-    setPreviewFailed(false);
-    setState((s) => setPreview(s, doc.id, null));
-    const content = await fetchContent(doc.id);
-    if (stateRef.current.previewId !== doc.id) {
-      return; // a stale response must not paint over the current document
-    }
-    if (content === null) {
-      // FR-54: the pane has an error state — a blank body is
-      // indistinguishable from an empty document
-      setPreviewFailed(true);
-      return;
-    }
-    setState((s) =>
-      s.previewId === doc.id ? { ...s, previewContent: content } : s,
-    );
-  }, []);
-
-  const closePreview = useCallback(() => {
-    setPreviewFailed(false);
-    setState((s) => setPreview(s, null));
-  }, []);
+      setState((s) => updateDocMeta(s, meta.id, meta.title, meta.char_count));
+    },
+    [syncAttached],
+  );
 
   /** FR-52's continuation: "show older" appends the next offset page. */
   const loadMore = useCallback(async () => {
@@ -306,12 +277,10 @@ export function useWorkspace(enabled: boolean) {
     loading,
     error,
     budgetError,
-    previewFailed,
     refresh,
     loadMore,
     handleAnnounce,
-    preview,
-    closePreview,
+    noteSaved,
     upload,
     deleteDoc,
     toggleAttach,

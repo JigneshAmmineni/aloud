@@ -30,21 +30,11 @@ export type AnnouncedDoc = WorkspaceDoc & {
 export type WorkspaceState = {
   docs: WorkspaceDoc[]; // activity order, newest first
   deletedIds: number[]; // session tombstones (FR-55)
-  previewId: number | null;
-  previewContent: string | null;
-  // FR-55's refetch decision, OWNED BY THE REDUCER so the mandated test
-  // covers the path the hook actually consumes: set when an announce
-  // omitted oversized content for the previewed document; the hook's
-  // effect fetches and clears it.
-  refetchId: number | null;
 };
 
 export const emptyWorkspace: WorkspaceState = {
   docs: [],
   deletedIds: [],
-  previewId: null,
-  previewContent: null,
-  refetchId: null,
 };
 
 /** Refresh from server truth (FR-55). Tombstones SURVIVE and filter the
@@ -58,15 +48,9 @@ export function rehydrate(
   state: WorkspaceState,
   docs: WorkspaceDoc[],
 ): WorkspaceState {
-  const kept = docs.filter((d) => !state.deletedIds.includes(d.id));
-  const previewAlive =
-    state.previewId !== null && kept.some((d) => d.id === state.previewId);
   return {
-    docs: kept,
+    docs: docs.filter((d) => !state.deletedIds.includes(d.id)),
     deletedIds: state.deletedIds,
-    previewId: previewAlive ? state.previewId : null,
-    previewContent: previewAlive ? state.previewContent : null,
-    refetchId: previewAlive ? state.refetchId : null,
   };
 }
 
@@ -85,18 +69,9 @@ export function upsertFromAnnounce(
   if (state.deletedIds.includes(doc.id)) {
     return state;
   }
-  const { content, content_omitted, ...meta } = doc;
+  const { content: _content, content_omitted: _omitted, ...meta } = doc;
   const docs = [meta, ...state.docs.filter((d) => d.id !== doc.id)];
-  let previewContent = state.previewContent;
-  let refetchId = state.refetchId;
-  if (state.previewId === doc.id) {
-    if (content_omitted) {
-      refetchId = doc.id; // the client has no other way to refresh the pane
-    } else if (typeof content === "string") {
-      previewContent = content; // re-render in place — no refetch needed
-    }
-  }
-  return { ...state, docs, previewContent, refetchId };
+  return { ...state, docs };
 }
 
 /** A client-initiated hard delete (FR-52/55): the card goes, the id is
@@ -109,19 +84,26 @@ export function markDeleted(
   return {
     docs: state.docs.filter((d) => d.id !== id),
     deletedIds: [...state.deletedIds, id],
-    previewId: state.previewId === id ? null : state.previewId,
-    previewContent: state.previewId === id ? null : state.previewContent,
-    refetchId: state.refetchId === id ? null : state.refetchId,
   };
 }
 
-export function setPreview(
+/** FR-56: the user's own save moves the list row (char_count, title)
+ * and re-sorts by activity — the announce path only covers agent edits. */
+export function updateDocMeta(
   state: WorkspaceState,
-  id: number | null,
-  content: string | null = null,
+  id: number,
+  title: string,
+  charCount: number,
 ): WorkspaceState {
-  // switching documents invalidates any pending refetch for the old one
-  return { ...state, previewId: id, previewContent: content, refetchId: null };
+  const doc = state.docs.find((d) => d.id === id);
+  if (!doc) return state;
+  const updated = {
+    ...doc,
+    title,
+    char_count: charCount,
+    updated_at: new Date().toISOString(),
+  };
+  return { ...state, docs: [updated, ...state.docs.filter((d) => d.id !== id)] };
 }
 
 /** FR-52's download filename: derives from an untrusted 🔒 title — path
