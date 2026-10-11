@@ -42,6 +42,7 @@ from pipecat.frames.frames import (
 )
 from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.transports.base_output import BaseOutputTransport
 
 from agent.context import ContextProvider
 from agent.gate import GATE_REFUSAL, GATED_TOOLS, judge_allows
@@ -177,6 +178,11 @@ class AgentLoopProcessor(FrameProcessor):
         self._live_reads: set[asyncio.Task] = set()
         self._filler_cycle = itertools.cycle(FILLER_LINES)
         self._filler_task: asyncio.Task | None = None
+        # FR-61: sentences that actually PLAYED (TTSTextFrames released by
+        # the output transport after their preceding audio was sent).
+        # Reset at turn START, never at turn end - the buffer must span
+        # the previous turn's playback tail, where the cut can land.
+        self._uttered: list[str] = []
         self._fallback_cycle = itertools.cycle(FALLBACK_LINES)
         self._greeting_fallback_cycle = itertools.cycle(FALLBACK_GREETING_LINES)
 
@@ -264,9 +270,16 @@ class AgentLoopProcessor(FrameProcessor):
         if self._state is not None:
             self._state.spoken.append(text)
 
+    def note_uttered_sentence(self, text: str) -> None:
+        """FR-61: a sentence whose audio actually reached the speaker —
+        the transport releases its text frame only after the preceding
+        audio was sent, and an interruption discards unplayed ones."""
+        self._uttered.append(text)
+
     # ---- the loop --------------------------------------------------------
 
     async def _run_turn(self, user_text: str | None):
+        self._uttered = []  # FR-61: the previous turn's tail is settled
         purpose = "greeting" if user_text is None else "turn"
         state = self._state = _TurnState(self._recorder.current_turn, purpose)
         log = self._log.bind(turn_id=state.turn_id)
@@ -838,6 +851,12 @@ class AgentLoopProcessor(FrameProcessor):
             self._turn_task = None
             await self.cancel_task(task)
             self._finalize_interrupted_turn()
+        else:
+            # FR-61: no live turn means this barge-in (or ordinary speech
+            # start) landed during the LAST turn's playback tail — if the
+            # cut left context text the user never heard, mark it now,
+            # before the new user turn appends.
+            self._context.amend_unspoken_tail(" ".join(self._uttered))
         await super()._start_interruption()
 
     async def cleanup(self):
@@ -1004,6 +1023,20 @@ class AgentLoopObserver(BaseObserver):
             if self._already_seen(frame.id):
                 return
             self._loop.note_bot_speaking(isinstance(frame, BotStartedSpeakingFrame))
+        elif isinstance(frame, TTSTextFrame):
+            # FR-61: only the OUTPUT TRANSPORT's release counts — it holds
+            # text frames behind their preceding audio and discards them
+            # on interruption, so this push means "actually played" (the
+            # same frame's earlier TTS->transport hops have other sources
+            # and are ignored, unmarked, so the release is never deduped
+            # away).
+            if data.direction != FrameDirection.DOWNSTREAM:
+                return
+            if not isinstance(data.source, BaseOutputTransport):
+                return
+            if self._already_seen(frame.id):
+                return
+            self._loop.note_uttered_sentence(frame.text)
         elif isinstance(frame, AggregatedTextFrame) and not isinstance(
             frame, TTSTextFrame
         ):

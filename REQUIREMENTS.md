@@ -2668,6 +2668,31 @@ deliberately unchanged (FR-56 states local verification and why).
 | `JUDGE_TIMEOUT_S` (judge call ceiling; on breach the gate refuses) | 4s | `agent/gate.py` |
 | Judge evidence window (user turns / chars per turn) | 4 / 600 | `agent/gate.py` |
 
+### 4.14 Playback-aware interruption context
+
+- **FR-61** **A barge-in during playback of a COMPLETED turn amends the
+  context to what the user actually heard.** FR-46's cut-off mark covers
+  turns interrupted mid-generation; this closes the other half (observed
+  live 2026-10-11: the agent named two documents, playback was cut after
+  the first, and the context recorded both as said — "continue" would
+  have been a no-op). Mechanism:
+  - The output transport releases a sentence's TTSTextFrame downstream
+    only after the preceding audio was sent, and discards queued frames
+    on interruption — so a transport-released text frame means
+    "actually played". The loop's observer feeds these to a per-turn
+    uttered buffer that resets at the NEXT turn's start (it must span
+    the playback tail, where the cut lands).
+  - An interruption arriving with NO live turn compares the last
+    assistant entry against the uttered stream: fully heard is a strict
+    no-op (every ordinary speech start broadcasts an interruption);
+    otherwise the entry truncates to the longest word-prefix the
+    uttered stream ends with, plus FR-46's cut-off suffix (or a
+    nothing-was-heard marker).
+  - Accepted over-approximation, same direction as FR-46: the sentence
+    mid-play when the cut lands counts as heard.
+  - A context whose last message is no longer the assistant's, or whose
+    entry already carries the mid-generation mark, is never amended.
+
 ---
 
 ## 5. Non-Functional Requirements

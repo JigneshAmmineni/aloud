@@ -180,6 +180,44 @@ class ContextProvider:
         )
         return False
 
+    def amend_unspoken_tail(self, uttered: str) -> bool:
+        """FR-61 (the playback-cut gap): a barge-in during playback of a
+        COMPLETED turn used to leave this context claiming the whole reply
+        was heard. Called on every post-turn interruption; compares the
+        LAST assistant entry against the sentences that actually reached
+        the speaker and, when playback was cut, truncates the entry to the
+        longest word-prefix the uttered stream ends with, marked with the
+        same cut-off suffix mid-generation interruptions use. Fully-heard
+        entries (every ordinary user turn - Pipecat broadcasts an
+        interruption on each speech start) are a no-op, as is a context
+        whose last message is no longer the assistant's."""
+        last = self._messages[-1] if self._messages else None
+        if not last or last.get("role") != "assistant" or last.get("tool_calls"):
+            return False
+        content = last.get("content") or ""
+        if content.endswith(INTERRUPTED_SUFFIX):
+            return False  # already marked by the mid-generation path
+        norm = " ".join(content.split())
+        heard = " ".join(uttered.split())
+        if not norm or norm in heard:
+            return False  # fully heard (or nothing to amend)
+        words = norm.split()
+        kept = 0
+        for k in range(len(words), 0, -1):
+            if heard.endswith(" ".join(words[:k])):
+                kept = k
+                break
+        prefix = " ".join(words[:kept])
+        amended = (prefix + INTERRUPTED_SUFFIX) if prefix else (
+            "[the user cut this off before any of it was heard]"
+        )
+        self._approx_chars += len(amended) - len(content)
+        last["content"] = amended
+        self._log.bind(
+            event="context.playback_cut", kept_words=kept, total_words=len(words)
+        ).info("post-turn barge-in: assistant entry amended to spoken prefix")
+        return True
+
     def append_assistant(self, text: str, *, interrupted: bool = False) -> None:
         """The turn's closing text-only assistant entry (also FR-43's
         filler-alone path and FR-46's spoken-prefix capture)."""

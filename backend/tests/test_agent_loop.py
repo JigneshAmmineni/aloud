@@ -1285,3 +1285,88 @@ def test_filler_dies_with_its_tool_round(monkeypatch):
     text = _pushed_text(h)
     assert "Done." in text
     assert not any(f in text for f in FILLER_LINES)
+
+
+# ---------------- FR-61: playback-aware interruption context ----------------
+
+
+def test_post_turn_barge_in_amends_unheard_tail():
+    """FR-61: the turn COMPLETED, playback was cut after one sentence — the
+    context entry truncates to the uttered prefix with the cut-off mark."""
+    scripts = [[LLMTextDelta("The first point. And the second point."), _done()]]
+    h = make_loop(scripts)
+    asyncio.run(h.loop._run_turn("go"))
+    # playback delivered only the first sentence before the barge-in
+    h.loop.note_uttered_sentence("The first point.")
+
+    asyncio.run(h.loop._start_interruption())
+
+    last = h.ctx.build()[-1]
+    assert last["role"] == "assistant"
+    assert last["content"] == "The first point." + INTERRUPTED_SUFFIX
+    assert "second" not in last["content"]
+
+
+def test_fully_heard_playback_is_never_amended():
+    """Pipecat broadcasts an interruption on EVERY user speech start, so the
+    everything-played case (every ordinary turn) must be a strict no-op."""
+    scripts = [[LLMTextDelta("Short answer."), _done()]]
+    h = make_loop(scripts)
+    asyncio.run(h.loop._run_turn("go"))
+    h.loop.note_uttered_sentence("Short answer.")
+
+    asyncio.run(h.loop._start_interruption())
+
+    last = h.ctx.build()[-1]
+    assert last["content"] == "Short answer."
+    assert INTERRUPTED_SUFFIX not in last["content"]
+
+
+def test_nothing_heard_replaces_entry_with_the_cut_marker():
+    scripts = [[LLMTextDelta("Never played at all."), _done()]]
+    h = make_loop(scripts)
+    asyncio.run(h.loop._run_turn("go"))
+    # no uttered sentences: the barge-in landed before any audio
+
+    asyncio.run(h.loop._start_interruption())
+
+    last = h.ctx.build()[-1]
+    assert "cut this off" in last["content"]
+    assert "Never played" not in last["content"]
+
+
+def test_uttered_buffer_resets_at_the_next_turn():
+    """The buffer spans one turn plus its playback tail — sentences from an
+    older turn must not vouch for a newer entry."""
+    scripts = [
+        [LLMTextDelta("Old turn text."), _done()],
+        [LLMTextDelta("New turn text."), _done()],
+    ]
+    h = make_loop(scripts)
+    asyncio.run(h.loop._run_turn("one"))
+    h.loop.note_uttered_sentence("Old turn text.")
+    asyncio.run(h.loop._run_turn("two"))  # resets the buffer
+    # nothing of the new turn played yet
+    asyncio.run(h.loop._start_interruption())
+
+    last = h.ctx.build()[-1]
+    assert "cut this off" in last["content"]
+
+
+def test_mid_generation_interruption_path_is_untouched():
+    """A LIVE turn still takes the FR-46 finalize path (spoken prefix +
+    suffix), never the post-turn amend."""
+    scripts = [[LLMTextDelta("Started saying this "), 30.0, LLMTextDelta("x"), _done()]]
+    h = make_loop(scripts)
+
+    async def run():
+        turn = asyncio.create_task(h.loop._run_turn("go"))
+        h.loop._turn_task = turn  # as _on_context_frame registers it
+        await asyncio.sleep(0.05)
+        h.loop.note_spoken_sentence("Started saying this")
+        await h.loop._start_interruption()
+        await asyncio.gather(turn, return_exceptions=True)
+
+    asyncio.run(run())
+    last = h.ctx.build()[-1]
+    assert last["content"].endswith(INTERRUPTED_SUFFIX)

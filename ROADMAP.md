@@ -197,18 +197,14 @@ tool):
   shape: a capture mode the user toggles by voice ("take notes while I
   talk"), scoped to one target document.
 
-### 3.4 Playback-aware interruption context
+### 3.4 Playback-aware interruption context — shipped as FR-61 (§4.14)
 
-A barge-in DURING TTS playback of an already-completed turn leaves the
-context believing the whole reply was heard — the spoken-prefix capture
-and the "[cut off by the user here]" mark cover only turns interrupted
-while still generating (observed 2026-10-11, session c47e28af: the
-agent named two documents, playback was cut after the first, and the
-context recorded both as said; a "continue" would be a no-op). Fix
-shape: on a post-turn barge-in, compare the sentences the observer saw
-reach TTS against the appended assistant text and amend the context
-entry with the cut mark. Needs care with the FR-47 flush-or-clear
-bookkeeping; not a tweak, so deferred to its own small spec.
+A barge-in during TTS playback of an already-completed turn left the
+context believing the whole reply was heard (observed 2026-10-11,
+session c47e28af). Shipped same day: the output transport's
+audio-synced text-frame release is the played/discarded signal; a
+post-turn interruption truncates the last assistant entry to the
+uttered prefix with FR-46's cut-off mark.
 
 ### 4. Documents & artifacts rework
 
