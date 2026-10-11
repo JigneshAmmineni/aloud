@@ -109,16 +109,20 @@ export function EditorPane({
                 <button
                   type="button"
                   className={active.view === "preview" ? "on" : ""}
+                  title="Preview"
+                  aria-label="Preview"
                   onClick={() => onSetView(active.id, "preview")}
                 >
-                  preview
+                  👁
                 </button>
                 <button
                   type="button"
                   className={active.view === "source" ? "on" : ""}
+                  title="Source"
+                  aria-label="Source"
                   onClick={() => onSetView(active.id, "source")}
                 >
-                  source
+                  {"</>"}
                 </button>
               </span>
             )}
