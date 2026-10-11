@@ -2342,9 +2342,22 @@ that needs it; steering/refusals visible, never silent; pure logic in
 testable modules; the FR-54 sanitization rules are untouched and apply
 to every rendered view this section adds.
 
-- **FR-56** The user can save a document's content over HTTP:
-  `PUT /documents/{id}` replaces the stored content, owner-scoped via
-  `get_current_user_id` like every workspace route. Mechanics:
+- **FR-56** The user can save a document's content (and optionally
+  rename it) over HTTP: `PUT /documents/{id}` replaces the stored
+  content, owner-scoped via `get_current_user_id` like every workspace
+  route. Mechanics:
+  - **The success response is the client's next base**: `200` returns
+    `{updated_at, char_count}` — without the fresh `updated_at` the
+    editor's next save would 409 against its own previous one, and
+    `char_count` is what updates the list row and the attach
+    accounting after the user's own save (the announce path only
+    covers agent edits; a user growing an attached document must move
+    the budget line and the refusal threshold too).
+  - An optional `title` renames in the same statement (same CAS, same
+    sanitization rules as every stored 🔒 title; length-capped like
+    FR-30's inputs). Rename is part of this FR because an editor UI
+    makes it a baseline expectation — the list reflects it on the
+    response, other sessions through the registry's re-render.
   - The save carries **compare-and-swap**: the request body is
     `{content, base_updated_at}` (null for a never-edited row), and the
     UPDATE's own WHERE requires the stored `updated_at` to equal the
@@ -2367,9 +2380,12 @@ to every rendered view this section adds.
     browser tab's open *editor* learns of it through its own next save's
     409 or reload (the FR-55 staleness note extends to v2 unchanged).
   - Mandated tests: a stale `base_updated_at` → 409 carrying the
-    current content, and the row is untouched; a fresh base saves and
-    bumps `updated_at`; NULL base on a never-edited row saves (the
-    NULL-safe comparison is the test's point); pdf → 4xx refusal;
+    current content, and the row is untouched; a fresh base saves,
+    bumps `updated_at`, and returns it (saving twice in a row with
+    each response's base succeeds — the self-409 regression); NULL
+    base on a never-edited row saves (the
+    NULL-safe comparison is the test's point); a rename lands with
+    content intact; pdf → 4xx refusal;
     over-ceiling growth refuses while an over-ceiling shrink saves; the
     NFR-8 negative (user B's save on user A's id is not-found and
     writes nothing); a registered provider's section carries the saved
@@ -2396,16 +2412,28 @@ to every rendered view this section adds.
     highlighting); markdown gets a **preview/source toggle** whose
     preview is FR-54's sanitized renderer verbatim — the editing
     surface never introduces a second render path. `pdf` opens
-    read-only (its FR-53.7 rationale).
+    read-only (its FR-53.7 rationale). **Editing is NOT idle-gated**
+    — talking while editing is the point; only upload and the attach
+    toggles keep FR-54's idle gate. The editor pane has loading and
+    error states like FR-54 mandates for the preview (a failed
+    content fetch names itself — never a blank editable buffer that
+    could be "saved" over a document that failed to load), and
+    deleting a document closes its tab the way FR-55 closes the
+    preview pane.
   - **FR-57.4** While the workspace is open, the session console
     **docks into the bottom of the list pane** (~30% of its height):
     Talk/End control, waveform, and status stay fully live — talking
     while editing is the product's signature moment, so the console
     shrinks rather than competes. Closing the workspace restores the
     full console.
-  - Folders are deliberately absent from this slice (a nullable
-    `folder` column is the cheap future shape; ROADMAP). PDF *output*
-    ("make it a pdf") is its own follow-up, not here.
+  - Deliberately absent from this slice, stated not overlooked:
+    **folders** (a nullable `folder` column is the cheap future
+    shape; ROADMAP), **PDF output** ("make it a pdf" — its own
+    follow-up), and **user-created blank documents** — in a
+    voice-first product the user's documents arrive by upload or by
+    asking the agent to write; a "new document" button is cheap to
+    add later (create via FR-56's machinery) if dogfooding shows
+    people reaching for it.
   - Mandated client tests (the FR-54 vitest lane): one-tab-per-document
     (re-open focuses); the preview toggle renders through the same
     sanitized component the existing renderer tests pin; pdf opens
@@ -2418,7 +2446,15 @@ to every rendered view this section adds.
     close, and before `/start` — the agent must see the live state
     when the session begins, and the dirty window (the only period
     the server lags the user's buffer) stays at most one debounce
-    plus a round trip.
+    plus a round trip. **Save state is visible**: the pane shows a
+    quiet saved/saving/unsaved indicator, and a FAILED autosave
+    (network blip, expired token) keeps the buffer, retries on the
+    next debounce, and shows the unsaved state plainly — silence
+    here is a data-loss path, the budget-refusal lesson again. While
+    unsaved changes exist, closing the page gets the browser's
+    beforeunload warning; closing just the tab/pane flushes first
+    (above) and only discards on a failed flush after telling the
+    user.
   - **FR-58.2** An agent edit arriving while the buffer is **clean**
     re-renders the open editor in place (the FR-55 announce path,
     refetch-on-omitted included). Arriving while the buffer is
