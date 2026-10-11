@@ -34,9 +34,10 @@ def test_prompt_keeps_greeting_instruction():
 
 
 def test_prompt_keeps_document_instructions():
-    """FR-12/FR-53: tools named, on-request only, never read aloud, and the
-    FR-43 speak-first acknowledgment is directed (the prompt is guidance;
-    the loop's backstop is the guarantee)."""
+    """FR-12/FR-53: tools named, on-request only, never read aloud — and
+    tool work is SILENT (2026-10-11 live sessions: the model narrated
+    every internal step and closed every edit with "it's on your
+    screen"); the loop's filler backstop owns the dead air."""
     prompt = build_system_prompt().lower()
     for tool in (
         "create_document",
@@ -47,7 +48,13 @@ def test_prompt_keeps_document_instructions():
     ):
         assert tool in prompt
     assert "never read a document" in prompt
-    assert "acknowledgment" in prompt
+    assert "work silently" in prompt
+    assert "never narrate" in prompt
+    assert "never mention the screen" in prompt
+    assert "decide small details yourself" in prompt
+    # the question-beats-hmm overrides, both halves (clean and garbled)
+    assert "is never a brain-dump turn" in prompt
+    assert "a question is still a question" in prompt
 
 
 def test_prompt_pins_the_assistant_not_leader_character():

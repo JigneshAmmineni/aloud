@@ -63,6 +63,11 @@ from agent.tools import Tool, ToolContext, registry_schemas
 # cap triggers one forced final call with tool selection forbidden.
 MAX_STEPS = 5
 TOOL_TIMEOUT_S = 10.0
+
+# FR-43 amended (2026-10-11 live sessions): the filler SPEAKS only after
+# this much dead air since the step began — an instant edit must not open
+# "One moment." and land "Done" in the same breath.
+FILLER_DELAY_MS = 800
 # FR-43's named lever for the atomic-delivery branch, deliberately
 # DISENGAGED: the FR-48 spike measured ~1.0s of pre-call dead air for a
 # typical create_document — inside NFR-1's 3s — so no blind deadline runs
@@ -170,6 +175,7 @@ class AgentLoopProcessor(FrameProcessor):
         # them so a wedged read never becomes destroyed-task noise.
         self._live_reads: set[asyncio.Task] = set()
         self._filler_cycle = itertools.cycle(FILLER_LINES)
+        self._filler_task: asyncio.Task | None = None
         self._fallback_cycle = itertools.cycle(FALLBACK_LINES)
         self._greeting_fallback_cycle = itertools.cycle(FALLBACK_GREETING_LINES)
 
@@ -464,14 +470,41 @@ class AgentLoopProcessor(FrameProcessor):
         return True
 
     async def _maybe_filler(self, state: _TurnState, elapsed_ms: int) -> None:
-        """FR-43, atomic branch (spike-selected): the backstop fires at the
-        completed call's ARRIVAL, before any handler runs — and the
-        condition is state-based: filler is owed whenever a tool round is
-        beginning and no speech is playing or queued (a tool-only step 3
-        after step 1's sentence finished playing is the same dead air as a
+        """FR-43 with a latency threshold (2026-10-11 live sessions): the
+        backstop ARMS at the tool round's first call but SPEAKS only once
+        FILLER_DELAY_MS of dead air has passed since the step began and
+        nothing has reached the speaker — an instant edit must not get
+        "One moment." welded to its "Done". The condition re-checks at
+        fire time; audio that arrived during the delay (the next step's
+        text) is the threshold doing its job. The state-based condition
+        is unchanged: filler is owed whenever a tool round is running
+        and no speech is playing or queued (a tool-only step 3 after
+        step 1's sentence finished playing is the same dead air as a
         silent step 1)."""
         if self._bot_speaking or self._audio_pending or state.step_text:
             return
+        remaining_ms = FILLER_DELAY_MS - elapsed_ms
+        if remaining_ms <= 0:
+            await self._speak_filler(state, elapsed_ms)
+            return
+        if self._filler_task is not None and not self._filler_task.done():
+            return  # one pending filler at a time
+
+        async def fire_later() -> None:
+            await asyncio.sleep(remaining_ms / 1000)
+            if self._state is not state:
+                return  # the turn ended or was interrupted meanwhile
+            if self._bot_speaking or self._audio_pending or state.step_text:
+                return  # something real reached the speaker in time
+            await self._speak_filler(
+                state, round((time.monotonic() - state.t0) * 1000)
+            )
+
+        # plain asyncio task (like tool tasks): guarded by the state
+        # identity check above; cleanup() cancels a pending one.
+        self._filler_task = asyncio.create_task(fire_later())
+
+    async def _speak_filler(self, state: _TurnState, elapsed_ms: int) -> None:
         filler = next(self._filler_cycle)
         state.step_filler = filler + " "
         state.filler_spoken.append(filler)
@@ -814,6 +847,8 @@ class AgentLoopProcessor(FrameProcessor):
         # destroyed-task noise (round 4); _read_done swallows the cancel.
         for read_task in list(self._live_reads):
             read_task.cancel()
+        if self._filler_task is not None:
+            self._filler_task.cancel()
         await super().cleanup()
 
     def _finalize_interrupted_turn(self) -> None:

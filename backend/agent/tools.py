@@ -139,7 +139,7 @@ async def _create_document(args: dict, ctx: ToolContext) -> dict:
         "status": "created",
         "document_id": row.id,
         "title": title,
-        "note": "Document is now visible on the user's screen.",
+        "note": "Created.",
     }
 
 
@@ -562,7 +562,7 @@ async def _edit_document(args: dict, ctx: ToolContext) -> dict:
         "document_id": row.id,
         "mode": mode,
         "title": row.title,
-        "note": "The updated document is visible on the user's screen.",
+        "note": "Saved.",
     }
 
 

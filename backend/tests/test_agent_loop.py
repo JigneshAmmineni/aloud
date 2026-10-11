@@ -335,10 +335,11 @@ def test_f_empty_step_speaks_fallback_appends_nothing_from_model():
 # ---------------- FR-43 ----------------
 
 
-def test_filler_fires_at_call_arrival_before_any_handler():
-    """Atomic branch: a silent tool round gets a FILLER_LINES entry at the
-    call's arrival, before any handler runs; it prefixes the step's
-    context entry and stamps step.N.filler."""
+def test_filler_fires_at_call_arrival_before_any_handler(monkeypatch):
+    """Atomic branch, threshold crossed: a silent tool round gets a
+    FILLER_LINES entry at the call's arrival, before any handler runs; it
+    prefixes the step's context entry and stamps step.N.filler."""
+    monkeypatch.setattr(loop_mod, "FILLER_DELAY_MS", 0)
     order: list[str] = []
 
     async def slow_handler(args, ctx):
@@ -938,7 +939,8 @@ def test_wrap_up_call_returning_tools_never_executes_them():
     assert any(line in _pushed_text(h) for line in FALLBACK_LINES)  # never silence
 
 
-def test_audio_pending_does_not_latch_across_turns():
+def test_audio_pending_does_not_latch_across_turns(monkeypatch):
+    monkeypatch.setattr(loop_mod, "FILLER_DELAY_MS", 0)
     """Round-3 should-fix 3: a barge-in after text was forwarded but
     before playback started leaves no BotStoppedSpeakingFrame — the next
     turn's silent tool round must still get its filler."""
@@ -1212,3 +1214,55 @@ def test_ungated_tools_never_consult_the_judge():
 
     # exactly two LLM calls: the step and the final — no judge between
     assert len(h.llm.calls) == 2
+
+
+# ---------------- FR-43 amended: the filler latency threshold ----------------
+
+
+def test_no_filler_for_an_instant_tool_round(monkeypatch):
+    """2026-10-11 live sessions: an instant edit spoke "One moment." welded
+    to "Done". Under the threshold, a round that finishes and speaks before
+    the delay elapses gets NO filler at all."""
+    monkeypatch.setattr(loop_mod, "FILLER_DELAY_MS", 120)
+    scripts = [
+        [LLMToolCall(name="echo", arguments={}, id="c1"), _done()],
+        [LLMTextDelta("Done."), _done()],
+    ]
+    h = make_loop(scripts, tools=[read_tool()])
+
+    async def run():
+        await h.loop._run_turn("remove that line")
+        # sit past the delay: the armed task must see the ended turn /
+        # queued audio and stay silent, not fire late into the next turn
+        await asyncio.sleep(0.2)
+
+    asyncio.run(run())
+    text = _pushed_text(h)
+    assert "Done." in text
+    assert not any(f in text for f in FILLER_LINES)
+    rows = _queued(h.recorder, TurnMetric)
+    assert not any("filler" in k for r in rows for k in r.stages_ms)
+
+
+def test_filler_fires_once_dead_air_crosses_the_threshold(monkeypatch):
+    """The other half: a round still silent past the delay gets the filler
+    (the backstop still exists — the threshold only prices it)."""
+    monkeypatch.setattr(loop_mod, "FILLER_DELAY_MS", 50)
+    scripts = [
+        [LLMToolCall(name="echo", arguments={}, id="c1"), _done()],
+        [LLMTextDelta("Here it is."), _done()],
+    ]
+    h = make_loop(scripts, tools=[read_tool(delay=0.25)])
+
+    async def run():
+        turn = asyncio.create_task(h.loop._run_turn("find that"))
+        await asyncio.sleep(0.12)  # past the 50ms delay: filler spoken
+        h.recorder.record_measurement(700)  # first audio: the filler itself
+        await turn
+
+    asyncio.run(run())
+    text = _pushed_text(h)
+    assert any(f in text for f in FILLER_LINES)
+    # and the filler-led turn is still marked, never laundered as healthy
+    rows = _queued(h.recorder, TurnMetric)
+    assert rows and any("filler" in k for k in rows[0].stages_ms)
