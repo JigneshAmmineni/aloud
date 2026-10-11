@@ -331,3 +331,68 @@ These generalize to any tool-calling agent implementation:
 - Two spikes before any loop code: (1) custom processor in the LLM slot
   with TTS streaming + barge-in intact; (2) Gemini streaming + native
   function calling + usage metadata through our own provider-seam client.
+
+## 2026-10-11 — create-document boundary: enforcement options + the Jev model
+
+Live-test result: mid-discussion "note that down" produced a NEW doc
+instead of editing the one under discussion — the tool-description fix
+(docs/evals/2026-10-10-create-document-boundary.md) did not hold on its
+own. Prompt/description enforcement is not enough; the gate has to be
+code. We own the tool dispatch (Pipecat hands us the function call), so
+"agent hooks" are just our own interceptor layer — no framework needed.
+
+Options, weakest to strongest:
+1. **Confirmation state machine (recommended now).** First
+   `create_document` in a window doesn't execute — returns a tool result
+   telling the agent to confirm "new doc vs. add to the open one"; the
+   create runs only if the previous user turn confirmed. Deterministic,
+   no new deps; cost = one extra voice turn, only on creates.
+2. **Judge on the create path.** Intercept and classify the last user
+   turns ("did they explicitly ask for a new document?"); proceed on
+   yes. No extra turn; still probabilistic.
+3. **Tool-schema shaping.** Don't expose `create_document` while a doc
+   is attached/open; expose a `request_new_document` stub that always
+   routes through the user. Strongest (can't call what isn't in the
+   schema) but taxes the legitimate new-doc-mid-discussion flow.
+4. **Soften blast radius:** one-step undo (already roadmapped) + easy
+   delete make a wrong create a two-second fix. Complement, not fix.
+
+**Jev (TypeSafe AI)** — looked up 2026-10-11: non-generative "System
+One" decision model; returns typed answers (Choice / Score / calibrated
+0-1 yes-no) with a probability, built for pre-execution tool gates.
+Would slot into option 2 and its calibrated confidence enables a hybrid:
+high-confidence yes skips the confirmation turn, low confidence falls
+back to option 1's ask. Vendor claims ~200x faster / ~400x cheaper than
+LLM judges (unverified; ecosystem is mostly blog posts + experimental
+middleware). Decision: NOT for this one gate — still probabilistic, and
+it would be a 4th content-processing provider (privacy-policy amendment,
+new account, new providers.py factory) for one rare code path. Revisit
+as a shared decision layer when features 5-6 add more judgment points
+(tool routing, risk gates, retrieval triggering) to amortize it across.
+Sources: arxiv.org/pdf/2609.30216 (pi-jev risk gate), langchain.com/blog/
+building-a-harness-with-jev, blogs.perficient.com/agent-trajectory-
+evaluation-llm-as-judge-vs-jev-as-judge.
+
+## 2026-10-11 — Claude Agent SDK: evaluated, not a fit
+
+Looked up for "can we extract its file tools?" Answer: no on all three
+counts (feasible / helpful / cheap).
+- It's a harness around Claude Code (runs the Claude Code binary as a
+  subprocess), not a provider-neutral framework: documented model paths
+  are Anthropic API / Bedrock / Vertex / Foundry only. No Gemini.
+- Its Read/Write/Edit/Grep tools execute inside that binary against the
+  REAL filesystem — no virtual-FS or custom-storage seam, not importable
+  as library components, and Claude Code's license is all-rights-
+  reserved Commercial Terms (SDK wrapper is MIT, the harness is not).
+  Extraction is a licensing and practical dead end.
+- Its PreToolUse hooks CAN deterministically deny/modify tool calls —
+  but only over its own harness's calls, so they don't help our loop.
+  Our own interceptor (we dispatch the tool calls) remains the
+  mechanism, as in the create-document gate note above.
+- The one useful artifact: Anthropic's public text-editor tool contract
+  (str_replace_based_edit_tool: view w/ line ranges + char cap,
+  str_replace, create, insert) — a design REFERENCE for our own
+  Postgres-backed tools, which feature 4 already mirrors (paged reads,
+  str_replace/insert/append). Nothing to adopt beyond cross-checking
+  command semantics. Docs: code.claude.com/docs/en/agent-sdk/overview.md,
+  platform.claude.com/docs/en/agents-and-tools/tool-use/text-editor-tool.md.
