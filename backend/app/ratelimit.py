@@ -27,6 +27,11 @@ _SWEEP_THRESHOLD = 1024  # drop stale buckets once the dict grows past this
 # §4.11 FR-51: POST /documents per-user limit (requests per minute).
 DOCUMENTS_RATE_LIMIT = 20
 
+# §4.12 FR-56: PUT /documents/{id} per-user limit — sized above FR-58.1's
+# autosave cadence (max-wait saves are ~20-30/min per open document); a
+# 429 lands in the client's retryable class.
+DOCUMENT_SAVE_RATE_LIMIT = 120
+
 
 def _caller_key(request: Request) -> str:
     forwarded = request.headers.get("x-forwarded-for")
@@ -80,8 +85,11 @@ def user_rate_limited(max_requests: int, window_s: float, auth_dep):
     buckets: dict[str, deque] = {}
 
     async def dependency(
-        request: Request, user: AuthedUser = Depends(auth_dep)
+        request: Request, user: AuthedUser | str = Depends(auth_dep)
     ) -> None:
-        _check(buckets, user.user_id, max_requests, window_s, request.url.path)
+        # the dep may yield AuthedUser (checked routes) or the plain uid
+        # (get_current_user_id routes) — key on the uid either way
+        key = getattr(user, "user_id", user)
+        _check(buckets, key, max_requests, window_s, request.url.path)
 
     return dependency

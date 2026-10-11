@@ -1082,3 +1082,105 @@ async def diagnose_edit_failure(
         return EditDiagnosis(
             reason="unknown", format=format, total_lines=total_lines
         )
+
+
+# ---------------------------------------------------------------------------
+# §4.12 FR-56: the user's save — CAS + the transferred gates, no usage event.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SaveCurrent:
+    """What a stale save gets back for the client merge (FR-58.3)."""
+
+    content: str
+    updated_at: datetime | None
+    title: str
+    char_count: int
+
+
+@dataclass
+class SaveOutcome:
+    """One of: row (saved), or reason — "not_found" | "not_editable" |
+    "stale" (with current) | "over_ceiling" — in FR-56's stated
+    precedence."""
+
+    row: Document | None = None
+    reason: str | None = None
+    current: SaveCurrent | None = None
+
+
+async def save_document_content(
+    user_id: str,
+    document_id: int,
+    content: str,
+    *,
+    base_updated_at: datetime | None,
+    title: str | None,
+    ceiling: int,
+) -> SaveOutcome:
+    """FR-56: one UPDATE whose WHERE carries ownership, the format gate,
+    the NULL-safe CAS (IS NOT DISTINCT FROM — a never-edited row has NULL
+    updated_at), and the growth ceiling; an optional title renames in the
+    same statement. No usage event (nothing was spent). A zero rowcount
+    resolves through the diagnostic read in the stated precedence:
+    not-found → format → stale (carrying the current row) → ceiling."""
+    values: dict = {"content": content, "updated_at": datetime.now(timezone.utc)}
+    if title is not None:
+        values["title"] = title
+    stmt = (
+        update(Document)
+        .where(
+            Document.id == document_id,
+            Document.user_id == user_id,
+            Document.format.in_(EDITABLE_FORMATS),
+            ~Document.updated_at.is_distinct_from(base_updated_at),
+            len(content) <= _growth_cap(ceiling),
+        )
+        .values(**values)
+        .returning(Document)
+    )
+    async with user_scoped_session(user_id) as db:
+        row = (await db.execute(stmt)).scalar_one_or_none()
+        if row is not None:
+            await db.commit()
+            return SaveOutcome(row=row)
+
+        # read-only diagnostic after the refused write (FR-53.4's rule)
+        cur = (
+            await db.execute(
+                select(
+                    Document.format.label("format"),
+                    Document.updated_at.label("updated_at"),
+                    Document.title.label("title"),
+                    Document.content.label("content"),
+                ).where(Document.id == document_id, Document.user_id == user_id)
+            )
+        ).first()
+    if cur is None:
+        return SaveOutcome(reason="not_found")
+    if cur.format not in EDITABLE_FORMATS:
+        return SaveOutcome(reason="not_editable")
+    if cur.updated_at != base_updated_at:
+        return SaveOutcome(
+            reason="stale",
+            current=SaveCurrent(
+                content=cur.content,
+                updated_at=cur.updated_at,
+                title=cur.title,
+                char_count=len(cur.content),
+            ),
+        )
+    if len(content) > max(ceiling, len(cur.content)):
+        return SaveOutcome(reason="over_ceiling")
+    # the state moved between the UPDATE and the diagnostic — report it
+    # as stale so the client merges against fresh truth and retries
+    return SaveOutcome(
+        reason="stale",
+        current=SaveCurrent(
+            content=cur.content,
+            updated_at=cur.updated_at,
+            title=cur.title,
+            char_count=len(cur.content),
+        ),
+    )

@@ -21,6 +21,7 @@ import signal
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 from obs.logging import setup_logging
 
@@ -36,6 +37,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse
 from loguru import logger
 from pipecat.transports.smallwebrtc.connection import IceServer, SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.request_handler import (
@@ -45,18 +47,24 @@ from pipecat.transports.smallwebrtc.request_handler import (
 )
 
 from agent.companion import CompanionAgent, drain_live_sessions
-from agent.registry import notify_document_deleted
+from agent.registry import notify_document_deleted, notify_document_updated
 from app import admin, auth
 from app.auth import AuthedUser, get_current_user_checked, get_current_user_id
 from app.config import load_settings
 from app.documents import (
     EXTRACT_SEMAPHORE,
+    MAX_DOC_CHARS,
     MAX_FILE_BYTES,
     MAX_TOTAL_CHARS,
     DocumentError,
     extract_text,
 )
-from app.ratelimit import DOCUMENTS_RATE_LIMIT, rate_limited, user_rate_limited
+from app.ratelimit import (
+    DOCUMENT_SAVE_RATE_LIMIT,
+    DOCUMENTS_RATE_LIMIT,
+    rate_limited,
+    user_rate_limited,
+)
 from db.documents_repo import (
     MAX_DOCUMENTS_PER_USER,
     DocumentQuotaError,
@@ -65,6 +73,7 @@ from db.documents_repo import (
     insert_upload_row,
     list_workspace_rows,
     resolve_attach_rows,
+    save_document_content,
 )
 from db.engine import init_db, retire_bootstrap_engine
 from db.migrations import migrate_artifacts_to_documents
@@ -292,6 +301,110 @@ async def get_document_route(
         "char_count": len(doc.content),
         "created_at": doc.created_at,
         "updated_at": doc.updated_at,
+    }
+
+
+# §4.12 FR-56: the editor's autosave target. TITLE_MAX_CHARS caps a
+# rename — uploads are bounded incidentally by filenames, a rename by
+# nothing. Verification is local (get_current_user_id), a stated choice:
+# a save writes only rows the account already owns, quota-bounded — a
+# disabled account can overwrite its own documents for its residual token
+# hour exactly as its live session's edit tools allow, and cannot grow
+# anything (FR-29 deliberately unchanged).
+TITLE_MAX_CHARS = 200
+
+_saves_limiter = user_rate_limited(
+    DOCUMENT_SAVE_RATE_LIMIT, 60.0, get_current_user_id
+)
+
+
+@app.put("/documents/{document_id}", dependencies=[Depends(_saves_limiter)])
+async def save_document_route(
+    document_id: int,
+    request: Request,
+    user_id: str = Depends(get_current_user_id),
+):
+    """FR-56: save (and optionally rename) a document — the NULL-safe CAS
+    is the concurrency seam the whole §4.12 editor rides. The base token
+    is OPAQUE to the client (echoed byte-for-byte); the server parses it
+    at full precision."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict) or not isinstance(body.get("content"), str):
+        raise HTTPException(status_code=400, detail="content (string) is required")
+    content = body["content"]
+
+    title = body.get("title")
+    if title is not None:
+        if not isinstance(title, str) or not title.strip():
+            # the one field FR-57.1 leaves on screen must identify the row
+            raise HTTPException(status_code=400, detail="title can't be empty")
+        if len(title) > TITLE_MAX_CHARS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"title is too long (limit {TITLE_MAX_CHARS} characters)",
+            )
+
+    raw_base = body.get("base_updated_at")
+    base = None
+    if raw_base is not None:
+        try:
+            base = datetime.fromisoformat(raw_base)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "base_updated_at must be the exact updated_at string "
+                    "from the last response"
+                ),
+            )
+
+    outcome = await save_document_content(
+        user_id,
+        document_id,
+        content,
+        base_updated_at=base,
+        title=title,
+        ceiling=MAX_DOC_CHARS,
+    )
+    if outcome.reason == "not_found":
+        raise HTTPException(status_code=404, detail="document not found")
+    if outcome.reason == "not_editable":
+        raise HTTPException(
+            status_code=400,
+            detail="this document is a PDF (extracted text) and is read-only",
+        )
+    if outcome.reason == "over_ceiling":
+        raise HTTPException(
+            status_code=400,
+            detail=f"this document is at its size limit ({MAX_DOC_CHARS} characters)",
+        )
+    if outcome.reason == "stale":
+        cur = outcome.current
+        return JSONResponse(
+            status_code=409,
+            content={
+                "content": cur.content,
+                "updated_at": cur.updated_at.isoformat() if cur.updated_at else None,
+                "title": cur.title,
+                "char_count": cur.char_count,
+            },
+        )
+    row = outcome.row
+    # live attach blocks reconcile exactly like agent edits — content AND
+    # title (FR-53.8's header names the file)
+    notify_document_updated(user_id, row.id, row.title, row.content)
+    logger.bind(
+        component="app.documents",
+        event="document.saved",
+        document_id=row.id,
+        char_count=len(row.content),
+    ).info(f"document saved ({len(row.content)} chars)")
+    return {
+        "updated_at": row.updated_at.isoformat(),
+        "char_count": len(row.content),
     }
 
 
