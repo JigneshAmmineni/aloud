@@ -30,21 +30,11 @@ export type AnnouncedDoc = WorkspaceDoc & {
 export type WorkspaceState = {
   docs: WorkspaceDoc[]; // activity order, newest first
   deletedIds: number[]; // session tombstones (FR-55)
-  previewId: number | null;
-  previewContent: string | null;
-  // FR-55's refetch decision, OWNED BY THE REDUCER so the mandated test
-  // covers the path the hook actually consumes: set when an announce
-  // omitted oversized content for the previewed document; the hook's
-  // effect fetches and clears it.
-  refetchId: number | null;
 };
 
 export const emptyWorkspace: WorkspaceState = {
   docs: [],
   deletedIds: [],
-  previewId: null,
-  previewContent: null,
-  refetchId: null,
 };
 
 /** Refresh from server truth (FR-55). Tombstones SURVIVE and filter the
@@ -58,15 +48,9 @@ export function rehydrate(
   state: WorkspaceState,
   docs: WorkspaceDoc[],
 ): WorkspaceState {
-  const kept = docs.filter((d) => !state.deletedIds.includes(d.id));
-  const previewAlive =
-    state.previewId !== null && kept.some((d) => d.id === state.previewId);
   return {
-    docs: kept,
+    docs: docs.filter((d) => !state.deletedIds.includes(d.id)),
     deletedIds: state.deletedIds,
-    previewId: previewAlive ? state.previewId : null,
-    previewContent: previewAlive ? state.previewContent : null,
-    refetchId: previewAlive ? state.refetchId : null,
   };
 }
 
@@ -85,18 +69,9 @@ export function upsertFromAnnounce(
   if (state.deletedIds.includes(doc.id)) {
     return state;
   }
-  const { content, content_omitted, ...meta } = doc;
+  const { content: _content, content_omitted: _omitted, ...meta } = doc;
   const docs = [meta, ...state.docs.filter((d) => d.id !== doc.id)];
-  let previewContent = state.previewContent;
-  let refetchId = state.refetchId;
-  if (state.previewId === doc.id) {
-    if (content_omitted) {
-      refetchId = doc.id; // the client has no other way to refresh the pane
-    } else if (typeof content === "string") {
-      previewContent = content; // re-render in place — no refetch needed
-    }
-  }
-  return { ...state, docs, previewContent, refetchId };
+  return { ...state, docs };
 }
 
 /** A client-initiated hard delete (FR-52/55): the card goes, the id is
@@ -109,19 +84,67 @@ export function markDeleted(
   return {
     docs: state.docs.filter((d) => d.id !== id),
     deletedIds: [...state.deletedIds, id],
-    previewId: state.previewId === id ? null : state.previewId,
-    previewContent: state.previewId === id ? null : state.previewContent,
-    refetchId: state.refetchId === id ? null : state.refetchId,
   };
 }
 
-export function setPreview(
+/** FR-56: the user's own save moves the list row (char_count, title)
+ * and re-sorts by activity — the announce path only covers agent edits. */
+export function updateDocMeta(
   state: WorkspaceState,
-  id: number | null,
-  content: string | null = null,
+  id: number,
+  title: string,
+  charCount: number,
+  updatedAt?: string,
 ): WorkspaceState {
-  // switching documents invalidates any pending refetch for the old one
-  return { ...state, previewId: id, previewContent: content, refetchId: null };
+  const doc = state.docs.find((d) => d.id === id);
+  if (!doc) return state;
+  const updated = {
+    ...doc,
+    title,
+    char_count: charCount,
+    // the 200 carries the server's clock; the client's is the fallback
+    updated_at: updatedAt ?? new Date().toISOString(),
+  };
+  return { ...state, docs: [updated, ...state.docs.filter((d) => d.id !== id)] };
+}
+
+/** FR-58.1's Talk gate, extracted so the WIRING is testable: Talk
+ * refuses when the flush could not land every dirty buffer — starting
+ * anyway would hand the agent superseded text with only a quiet
+ * indicator as the clue. */
+export async function guardTalk(
+  flushAll: () => Promise<boolean>,
+  talk: (ids: number[]) => Promise<void> | void,
+  attachedIds: number[],
+  onRefused: (message: string) => void,
+): Promise<boolean> {
+  const ok = await flushAll();
+  if (!ok) {
+    onRefused(
+      "your latest edits haven't saved — fix or discard them, then tap Talk",
+    );
+    return false;
+  }
+  await talk(attachedIds);
+  return true;
+}
+
+/** FR-56's rename cap — mirrors the server's TITLE_MAX_CHARS (main.py);
+ * the title input and the rename guard both read this one, so raising the
+ * knob is a two-place change (server + here), not a hunt. */
+export const TITLE_MAX_CHARS = 200;
+
+/** FR-57.3's delete wiring, extracted so the data-loss half is
+ * testable: only a SUCCESSFUL delete closes the tab — a failed one must
+ * not drop the only copy of an unsaved buffer. */
+export async function deleteAndCloseTab(
+  deleteDoc: (doc: WorkspaceDoc) => Promise<boolean>,
+  closeTab: (id: number) => void,
+  doc: WorkspaceDoc,
+): Promise<boolean> {
+  const ok = await deleteDoc(doc);
+  if (ok) closeTab(doc.id);
+  return ok;
 }
 
 /** FR-52's download filename: derives from an untrusted 🔒 title — path

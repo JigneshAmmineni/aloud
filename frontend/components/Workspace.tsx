@@ -2,10 +2,9 @@
 
 import { useRef, useState } from "react";
 
-import { MarkdownView } from "@/components/MarkdownView";
+import { EditorPane } from "@/components/EditorPane";
 import {
   MAX_TOTAL_CHARS,
-  formatLabel,
   nextSort,
   sortDocs,
   type SortColumn,
@@ -13,21 +12,10 @@ import {
   type WorkspaceDoc,
   type WorkspaceState,
 } from "@/lib/workspace";
+import type { EditorTab } from "@/lib/useEditor";
 
 function formatChars(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
-}
-
-function formatDate(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return "—";
-  // short form (10/9/26) so the column tracks stay narrow
-  return d.toLocaleDateString(undefined, {
-    month: "numeric",
-    day: "numeric",
-    year: "2-digit",
-  });
 }
 
 const SORT_LABELS: Record<SortColumn, string> = {
@@ -43,8 +31,8 @@ function DocRow({
   doc,
   idle,
   attached,
-  previewed,
-  onPreview,
+  open,
+  onOpen,
   onDownload,
   onDelete,
   onToggleAttach,
@@ -52,34 +40,27 @@ function DocRow({
   doc: WorkspaceDoc;
   idle: boolean;
   attached: boolean;
-  previewed: boolean;
-  onPreview: () => void;
+  open: boolean;
+  onOpen: () => void;
   onDownload: () => void;
   onDelete: () => void;
   onToggleAttach: () => void;
 }) {
   // FR-54: delete is behind an explicit confirmation, visually distinct
-  // from the attach toggle — removing-from-session and destroying-the-row
-  // must never be mistaken for each other.
+  // from the attach toggle.
   const [confirming, setConfirming] = useState(false);
   return (
-    <li className={`ws-row${previewed ? " previewed" : ""}`}>
+    <li className={`ws-row${open ? " previewed" : ""}`}>
       <button
         type="button"
         className="ws-cell ws-cell-name"
         title={doc.title}
-        onClick={onPreview}
+        onClick={onOpen}
       >
         {doc.title}
       </button>
-      <span className="ws-cell ws-cell-type">{formatLabel(doc.format)}</span>
-      <span className="ws-cell ws-cell-source">
-        {doc.source === "agent" ? "agent" : "upload"}
-      </span>
-      <span className="ws-cell ws-cell-date">{formatDate(doc.created_at)}</span>
-      <span className="ws-cell ws-cell-date">
-        {formatDate(doc.updated_at ?? doc.created_at)}
-      </span>
+      {/* FR-57.1: char_count stays on the row — the budget's unit; a
+          refusal must let the user see WHICH document to drop */}
       <span className="ws-cell ws-cell-size">{formatChars(doc.char_count)}</span>
       <span className="ws-cell ws-actions">
         {idle && (
@@ -130,13 +111,10 @@ function DocRow({
 }
 
 /**
- * The document workspace (FR-54): ONE flat, column-structured list of the
- * user's documents (both sources), sortable by any column via the Sort
- * dropdown — each pick sorts by that column, picking it again reverses.
- * Per-row preview (row click), download, attach toggle (idle only), and
- * delete-behind-confirm; one preview pane, one document at a time.
- * Available while idle AND during a session; only upload and the attach
- * toggle are idle-gated.
+ * FR-57: the workspace — names + size list in the left pane (with the
+ * console docked beneath it, FR-57.4), and the tabbed editor pane beside
+ * it. The sort control is a field picker (FR-54's click-a-column
+ * affordance retired with the columns).
  */
 export function Workspace({
   state,
@@ -147,50 +125,90 @@ export function Workspace({
   loading,
   error,
   budgetError,
-  previewFailed,
+  flushError,
+  console: consoleSlot,
+  editor,
   onClose,
   onLoadMore,
-  onUploadsSettled,
-  onPreview,
-  onClosePreview,
+  onOpen,
   onDownload,
   onDelete,
   onToggleAttach,
   onUpload,
+  onUploadsSettled,
 }: {
-  onClose: () => void;
-  total: number;
-  attachedChars: number;
-  budgetError: string | null;
-  previewFailed: boolean;
-  onLoadMore: () => void;
-  onUploadsSettled: () => Promise<void>;
   state: WorkspaceState;
   idle: boolean;
   attachedIds: number[];
+  attachedChars: number;
+  total: number;
   loading: boolean;
   error: string | null;
-  onPreview: (d: WorkspaceDoc) => void;
-  onClosePreview: () => void;
+  budgetError: string | null;
+  /** FR-58.1's visible refusal — workspace-scoped, full size (the docked
+   * console is scaled down; a refusal rendered there is unreadable) */
+  flushError: string | null;
+  /** FR-57.4: the session console docks into the list pane's bottom */
+  console: React.ReactNode;
+  editor: {
+    tabs: EditorTab[];
+    activeId: number | null;
+    onActivate: (id: number) => void;
+    onClose: (id: number, force?: boolean) => void;
+    onEdit: (id: number, text: string, fromDoc?: string) => void;
+    onSetView: (id: number, view: "source" | "preview") => void;
+    onApplyTheirs: (id: number) => void;
+    onDismissConflict: (id: number) => void;
+    onRename: (id: number, title: string) => void;
+    onRetryStalled: (id: number) => void;
+    onDiscard: (id: number) => void;
+  };
+  onClose: () => void;
+  onLoadMore: () => void;
+  onOpen: (d: WorkspaceDoc) => void;
   onDownload: (d: WorkspaceDoc) => void;
   onDelete: (d: WorkspaceDoc) => void;
   onToggleAttach: (d: WorkspaceDoc) => void;
   onUpload: (file: File) => Promise<void>;
+  onUploadsSettled: () => Promise<void>;
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [busy, setBusy] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [sort, setSort] = useState<{ col: SortColumn; dir: SortDir }>({
     col: "updated",
-    dir: "desc", // newest activity first — matches the agent's own ordering
+    dir: "desc",
   });
   const [sortOpen, setSortOpen] = useState(false);
+  // FR-57.2: the list/editor divider drags to resize
+  const [leftWidth, setLeftWidth] = useState(320);
+
+  const startDrag = (e: React.PointerEvent) => {
+    e.preventDefault();
+    // pointer capture + listeners on the ELEMENT, not window: an unmount
+    // mid-drag (workspace closed with the pointer down) used to leak
+    // window listeners that kept setting state on a dead component
+    // (round 6)
+    const el = e.currentTarget as HTMLElement;
+    el.setPointerCapture(e.pointerId);
+    const startX = e.clientX;
+    const startW = leftWidth;
+    const move = (ev: PointerEvent) => {
+      const w = startW + (ev.clientX - startX);
+      setLeftWidth(Math.min(560, Math.max(220, w)));
+    };
+    const up = () => {
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+      el.removeEventListener("pointercancel", up);
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
+  };
 
   const docs = sortDocs(state.docs, sort.col, sort.dir);
-  const previewDoc =
-    state.previewId === null
-      ? null
-      : (state.docs.find((d) => d.id === state.previewId) ?? null);
+  const openIds = new Set(editor.tabs.map((t) => t.id));
 
   const handleFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
@@ -203,8 +221,6 @@ export function Workspace({
     } catch (e) {
       setUploadError(e instanceof Error ? e.message : "couldn't read that file");
     } finally {
-      // one refresh for the whole batch (uploads surface immediately;
-      // the list itself stays server truth)
       await onUploadsSettled().catch(() => {});
       setBusy(false);
       if (inputRef.current) inputRef.current.value = "";
@@ -217,141 +233,149 @@ export function Workspace({
   };
 
   return (
-    <aside className="workspace" aria-label="Documents">
-      <div className="ws-bar">
-        <h3 className="ws-heading">Documents</h3>
-        <div className="ws-bar-right">
-        <div className="ws-sort">
-          <button
-            type="button"
-            className="ws-sort-btn"
-            aria-haspopup="menu"
-            aria-expanded={sortOpen}
-            onClick={() => setSortOpen((o) => !o)}
-          >
-            sort: {SORT_LABELS[sort.col].toLowerCase()}{" "}
-            {sort.dir === "asc" ? "↑" : "↓"}
-          </button>
-          {sortOpen && (
-            <ul className="ws-sort-menu" role="menu">
-              {(Object.keys(SORT_LABELS) as SortColumn[]).map((col) => (
-                <li key={col}>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className={`ws-sort-item${sort.col === col ? " active" : ""}`}
-                    onClick={() => pickSort(col)}
-                  >
-                    {SORT_LABELS[col]}
-                    {sort.col === col ? (sort.dir === "asc" ? " ↑" : " ↓") : ""}
-                  </button>
-                </li>
+    <aside
+      className={`workspace ws-v2${editor.tabs.length ? " has-tabs" : ""}`}
+      aria-label="Documents"
+    >
+      {/* a CSS variable, not an inline width: the 720px media query's
+          width:100% must win on phones (NFR-3) */}
+      <div
+        className="ws-left"
+        style={{ "--ws-left-w": `${leftWidth}px` } as React.CSSProperties}
+      >
+        <div className="ws-bar">
+          <h3 className="ws-heading">Documents</h3>
+          <div className="ws-bar-right">
+            <div className="ws-sort">
+              <button
+                type="button"
+                className="ws-sort-btn"
+                aria-haspopup="menu"
+                aria-expanded={sortOpen}
+                onClick={() => setSortOpen((o) => !o)}
+              >
+                sort: {SORT_LABELS[sort.col].toLowerCase()}{" "}
+                {sort.dir === "asc" ? "↑" : "↓"}
+              </button>
+              {sortOpen && (
+                <ul className="ws-sort-menu" role="menu">
+                  {(Object.keys(SORT_LABELS) as SortColumn[]).map((col) => (
+                    <li key={col}>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className={`ws-sort-item${sort.col === col ? " active" : ""}`}
+                        onClick={() => pickSort(col)}
+                      >
+                        {SORT_LABELS[col]}
+                        {sort.col === col
+                          ? sort.dir === "asc"
+                            ? " ↑"
+                            : " ↓"
+                          : ""}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <button
+              type="button"
+              className="ws-close"
+              aria-label="Close documents"
+              onClick={onClose}
+            >
+              ×
+            </button>
+          </div>
+        </div>
+
+        <div className="ws-list-scroll">
+          {docs.length === 0 ? (
+            <p className="ws-empty">{loading ? "loading…" : "no documents yet"}</p>
+          ) : (
+            <ul className="ws-table">
+              {docs.map((d) => (
+                <DocRow
+                  key={d.id}
+                  doc={d}
+                  idle={idle}
+                  attached={attachedIds.includes(d.id)}
+                  open={openIds.has(d.id)}
+                  onOpen={() => onOpen(d)}
+                  onDownload={() => onDownload(d)}
+                  onDelete={() => onDelete(d)}
+                  onToggleAttach={() => onToggleAttach(d)}
+                />
               ))}
             </ul>
           )}
-        </div>
-        <button
-          type="button"
-          className="ws-close"
-          aria-label="Close documents"
-          onClick={onClose}
-        >
-          ×
-        </button>
-        </div>
-      </div>
-
-      {docs.length === 0 ? (
-        <p className="ws-empty">{loading ? "loading…" : "no documents yet"}</p>
-      ) : (
-        <>
-          <div className="ws-head ws-grid" aria-hidden>
-            <span>Name</span>
-            <span>Type</span>
-            <span>Source</span>
-            <span>Created</span>
-            <span>Updated</span>
-            <span>Size</span>
-            <span />
-          </div>
-          <ul className="ws-table">
-            {docs.map((d) => (
-              <DocRow
-                key={d.id}
-                doc={d}
-                idle={idle}
-                attached={attachedIds.includes(d.id)}
-                previewed={state.previewId === d.id}
-                onPreview={() => onPreview(d)}
-                onDownload={() => onDownload(d)}
-                onDelete={() => onDelete(d)}
-                onToggleAttach={() => onToggleAttach(d)}
-              />
-            ))}
-          </ul>
           {state.docs.length < total && (
             <button type="button" className="ws-more" onClick={onLoadMore}>
               show older ({total - state.docs.length} more)
             </button>
           )}
-        </>
-      )}
+        </div>
 
-      {idle && (
-        <>
-          <button
-            type="button"
-            className="doc-attach"
-            disabled={busy}
-            onClick={() => inputRef.current?.click()}
-          >
-            {busy ? "reading…" : "+ upload a document"}
-          </button>
-          <input
-            ref={inputRef}
-            type="file"
-            accept=".txt,.md,.markdown,.pdf,text/plain,text/markdown,application/pdf"
-            multiple
-            hidden
-            onChange={(e) => handleFiles(e.target.files)}
-          />
-          {uploadError && <p className="doc-error">{uploadError}</p>}
-        </>
-      )}
-      {idle && attachedIds.length > 0 && (
-        <p className="ws-budget">
-          attached: {formatChars(attachedChars)} / {formatChars(MAX_TOTAL_CHARS)} chars
-        </p>
-      )}
-      {budgetError && <p className="doc-error">{budgetError}</p>}
-      {error && <p className="doc-error">{error}</p>}
-
-      {previewDoc && (
-        <section className="ws-preview" aria-label={`Preview: ${previewDoc.title}`}>
-          <header className="ws-preview-head">
-            <span className="ws-title">{previewDoc.title}</span>
+        {idle && (
+          <>
             <button
               type="button"
-              className="ws-preview-close"
-              aria-label="Close preview"
-              onClick={onClosePreview}
+              className="doc-attach"
+              disabled={busy}
+              onClick={() => inputRef.current?.click()}
             >
-              ×
+              {busy ? "reading…" : "+ upload a document"}
             </button>
-          </header>
-          {previewFailed ? (
-            <p className="doc-error">
-              couldn't load this document — close and try again
-            </p>
-          ) : state.previewContent === null ? (
-            <p className="ws-empty">loading…</p>
-          ) : previewDoc.format === "markdown" ? (
-            <MarkdownView content={state.previewContent} />
-          ) : (
-            <pre className="ws-pre">{state.previewContent}</pre>
-          )}
-        </section>
-      )}
+            <input
+              ref={inputRef}
+              type="file"
+              accept=".txt,.md,.markdown,.pdf,text/plain,text/markdown,application/pdf"
+              multiple
+              hidden
+              onChange={(e) => handleFiles(e.target.files)}
+            />
+            {uploadError && <p className="doc-error">{uploadError}</p>}
+          </>
+        )}
+        {idle && attachedIds.length > 0 && (
+          <p className="ws-budget">
+            attached: {formatChars(attachedChars)} /{" "}
+            {formatChars(MAX_TOTAL_CHARS)} chars
+          </p>
+        )}
+        {budgetError && <p className="doc-error">{budgetError}</p>}
+        {flushError && <p className="doc-error">{flushError}</p>}
+        {error && <p className="doc-error">{error}</p>}
+
+        {/* FR-57.4: the console docks here — Talk/End, waveform, status,
+            fully live while the user edits */}
+        <div className="ws-console">{consoleSlot}</div>
+      </div>
+
+      {/* presentational chrome, not role="separator": that role
+          announces an adjustable control a screen reader can't adjust
+          (no keyboard path) — the split works at its default width */}
+      <div
+        className="ws-divider"
+        aria-hidden
+        title="Drag to resize"
+        onPointerDown={startDrag}
+      />
+
+      <EditorPane
+        tabs={editor.tabs}
+        activeId={editor.activeId}
+        onActivate={editor.onActivate}
+        onClose={editor.onClose}
+        onEdit={editor.onEdit}
+        onSetView={editor.onSetView}
+        onApplyTheirs={editor.onApplyTheirs}
+        onDismissConflict={editor.onDismissConflict}
+        onRename={editor.onRename}
+        onRetryStalled={editor.onRetryStalled}
+        onDiscard={editor.onDiscard}
+      />
     </aside>
   );
 }

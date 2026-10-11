@@ -1,0 +1,798 @@
+/**
+ * FR-57/58 editor-hook tests — the mandated cases that moved here from
+ * the preview pane (§4.12 extends FR-55's rules to editor tabs): one tab
+ * per document, the blank-buffer data-loss guard, clean-buffer announce
+ * re-render (race case 2), dirty-buffer merge with the refetched
+ * `theirs` on omitted content, the opaque CAS token chain at the client
+ * boundary, and terminal-save handling.
+ */
+import { act, renderHook, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { useEditor } from "@/lib/useEditor";
+import type { WorkspaceDoc } from "@/lib/workspace";
+
+const { authedFetch } = vi.hoisted(() => ({ authedFetch: vi.fn() }));
+vi.mock("@/lib/auth", () => ({ authedFetch }));
+
+const doc = (id: number, over: Partial<WorkspaceDoc> = {}): WorkspaceDoc => ({
+  id,
+  title: `d${id}.md`,
+  kind: null,
+  format: "markdown",
+  source: "uploaded",
+  char_count: 10,
+  ...over,
+});
+
+function jsonResponse(status: number, body: unknown): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body,
+  } as unknown as Response;
+}
+
+beforeEach(() => {
+  authedFetch.mockReset();
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+const GET_BODY = {
+  content: "line one\nline two\n",
+  updated_at: "2026-10-10T12:00:00.123456+00:00",
+  title: "d1.md",
+  format: "markdown",
+};
+
+describe("useEditor", () => {
+  it("one tab per document — re-open focuses, never duplicates", async () => {
+    authedFetch.mockResolvedValue(jsonResponse(200, GET_BODY));
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    await act(async () => {
+      result.current.activate(null as unknown as number);
+      await result.current.open(doc(1));
+    });
+    expect(result.current.tabs).toHaveLength(1);
+    expect(result.current.activeId).toBe(1);
+  });
+
+  it("a failed content fetch yields the error state with NO editable buffer", async () => {
+    // FR-57.3's guard: a blank buffer autosaving over a document that
+    // failed to load is the worst outcome in the feature
+    authedFetch.mockRejectedValue(new Error("network"));
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    const tab = result.current.tabs[0];
+    expect(tab.loadFailed).toBe(true);
+    expect(tab.buffer).toBe("");
+    // and a save never fires for it, even if marked dirty by accident
+    expect(
+      authedFetch.mock.calls.filter(([, init]) => init?.method === "PUT"),
+    ).toHaveLength(0);
+  });
+
+  it("race case 2: a clean-buffer announce re-renders the open editor", async () => {
+    authedFetch.mockResolvedValue(jsonResponse(200, GET_BODY));
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.handleAnnounce("document.updated", {
+        ...doc(1),
+        content: "agent rewrote this\n",
+        content_omitted: false,
+        updated_at: "TOK-NEW",
+      } as never);
+    });
+    const tab = result.current.tabs[0];
+    expect(tab.buffer).toBe("agent rewrote this\n");
+    expect(tab.base).toBe("agent rewrote this\n");
+    expect(tab.dirty).toBe(false);
+  });
+
+  it("dirty buffer + omitted announce: refetches theirs and MERGES (never blind-ignore)", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "line one MINE\nline two\n"); // dirty
+    });
+    // the announce omitted content; the refetch returns the agent's edit
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        content: "line one\nline two AGENT\n",
+        updated_at: "TOK-2",
+      }),
+    );
+    await act(async () => {
+      result.current.handleAnnounce("document.updated", {
+        ...doc(1),
+        content: null,
+        content_omitted: true,
+      } as never);
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      const tab = result.current.tabs[0];
+      expect(tab.buffer).toBe("line one MINE\nline two AGENT\n");
+    });
+    const tab = result.current.tabs[0];
+    expect(tab.conflict).toBe(false); // disjoint lines: both survive
+    expect(tab.baseToken).toBe("TOK-2");
+  });
+
+  it("the CAS token round-trips byte-for-byte: GET string -> PUT base -> 200 string -> next PUT", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { updated_at: "TOK-AFTER-SAVE-1", char_count: 5 }),
+    );
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { updated_at: "TOK-AFTER-SAVE-2", char_count: 6 }),
+    );
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "edit1");
+    });
+    await act(async () => {
+      await result.current.flushAll();
+    });
+    const put1 = authedFetch.mock.calls.find(([, i]) => i?.method === "PUT");
+    expect(JSON.parse(put1![1].body).base_updated_at).toBe(
+      GET_BODY.updated_at, // the exact string, never parsed/reformatted
+    );
+    act(() => {
+      result.current.edit(1, "edit2!");
+    });
+    await act(async () => {
+      await result.current.flushAll();
+    });
+    const puts = authedFetch.mock.calls.filter(([, i]) => i?.method === "PUT");
+    expect(JSON.parse(puts[1][1].body).base_updated_at).toBe("TOK-AFTER-SAVE-1");
+  });
+
+  it("a 409 merges against the current row and flags overlap (user's lines kept)", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(409, {
+        content: "line one THEIRS\nline two\n",
+        updated_at: "TOK-409",
+        title: "d1.md",
+      }),
+    );
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "line one MINE\nline two\n");
+    });
+    await act(async () => {
+      await result.current.flushAll();
+    });
+    const tab = result.current.tabs[0];
+    expect(tab.buffer).toContain("line one MINE"); // user precedence
+    expect(tab.conflict).toBe(true);
+    expect(tab.baseToken).toBe("TOK-409");
+  });
+
+  it("terminal 404 stops the retry loop, names it, keeps the buffer; flushAll blocks Talk", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(404, { detail: "document not found" }),
+    );
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "only copy of my words");
+    });
+    let ok = true;
+    await act(async () => {
+      ok = await result.current.flushAll();
+    });
+    const tab = result.current.tabs[0];
+    expect(tab.terminal).toContain("deleted elsewhere");
+    expect(tab.buffer).toBe("only copy of my words"); // exportable
+    expect(ok).toBe(false); // the pre-/start flush refuses Talk
+    // no further PUTs after terminal, even on another edit
+    const putsBefore = authedFetch.mock.calls.filter(
+      ([, i]) => i?.method === "PUT",
+    ).length;
+    await act(async () => {
+      result.current.edit(1, "more typing");
+      await result.current.flushAll();
+    });
+    const putsAfter = authedFetch.mock.calls.filter(
+      ([, i]) => i?.method === "PUT",
+    ).length;
+    expect(putsAfter).toBe(putsBefore);
+  });
+});
+
+describe("useEditor round-2 fixes", () => {
+  it("flushAll returns TRUE after a successful flush — Talk must not refuse a 200", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { updated_at: "TOK-OK", char_count: 5 }),
+    );
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "fresh words");
+    });
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.flushAll();
+    });
+    expect(ok).toBe(true); // the round-1 root-cause bug, pinned
+    expect(result.current.tabs[0].dirty).toBe(false);
+    expect(result.current.tabs[0].saveState).toBe("saved");
+  });
+
+  it("the first close on a cleanly-flushed dirty tab closes it", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY));
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { updated_at: "TOK-OK", char_count: 5 }),
+    );
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "fresh words");
+    });
+    await act(async () => {
+      await result.current.close(1);
+    });
+    expect(result.current.tabs).toHaveLength(0);
+  });
+
+  it("applyTheirs flips ONLY the conflicted region — clean merges and later typing survive", async () => {
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { ...GET_BODY, content: "alpha\nbravo\ncharlie\n" }),
+    );
+    // the save 409s with the agent having edited alpha AND charlie
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(409, {
+        content: "alpha THEIRS\nbravo\ncharlie AGENT\n",
+        updated_at: "TOK-409",
+        title: "d1.md",
+      }),
+    );
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      // the user edited alpha (conflicts) — bravo/charlie untouched
+      result.current.edit(1, "alpha MINE\nbravo\ncharlie\n");
+    });
+    await act(async () => {
+      await result.current.flushAll();
+    });
+    let tab = result.current.tabs[0];
+    expect(tab.conflict).toBe(true);
+    expect(tab.buffer).toContain("alpha MINE"); // user precedence held
+    expect(tab.buffer).toContain("charlie AGENT"); // clean hunk merged in
+
+    act(() => {
+      result.current.applyTheirs(1);
+    });
+    tab = result.current.tabs[0];
+    expect(tab.buffer).toContain("alpha THEIRS"); // the flip
+    expect(tab.buffer).toContain("charlie AGENT"); // clean merge KEPT
+    expect(tab.conflict).toBe(false);
+  });
+
+  it("retryable failures back off instead of hammering at 1 Hz", async () => {
+    vi.useFakeTimers();
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    authedFetch.mockResolvedValue(jsonResponse(500, {})); // every save 500s
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "v2");
+    });
+    const puts = () =>
+      authedFetch.mock.calls.filter(([, i]) => i?.method === "PUT").length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000); // debounce -> save 1 fails
+    });
+    expect(puts()).toBe(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000); // flat 1 Hz would re-PUT here
+    });
+    expect(puts()).toBe(1); // backoff holds (first retry at ~2s + debounce)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    expect(puts()).toBeGreaterThanOrEqual(2); // it does retry
+    expect(puts()).toBeLessThan(8); // and never at 1 Hz (30s of hammering = 30)
+  });
+});
+
+describe("useEditor round-2 blockers", () => {
+  it("flushAll issues a PUT for a tab whose previous save FAILED — Talk recovers", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    authedFetch.mockResolvedValueOnce(jsonResponse(500, {})); // save 1 fails
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { updated_at: "TOK-RECOVERED", char_count: 2 }),
+    );
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "v2");
+    });
+    await act(async () => {
+      await result.current.flushAll(); // hits the 500
+    });
+    expect(result.current.tabs[0].dirty).toBe(true);
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.flushAll(); // must PUT again, not no-op
+    });
+    expect(ok).toBe(true);
+    expect(result.current.tabs[0].saveState).toBe("saved");
+  });
+
+  it("401 is retryable: the editor never goes read-only over a token blip", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY));
+    authedFetch.mockResolvedValueOnce(jsonResponse(401, {}));
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "v2");
+    });
+    await act(async () => {
+      await result.current.flushAll();
+    });
+    const tab = result.current.tabs[0];
+    expect(tab.terminal).toBeNull(); // not terminal
+    expect(tab.saveState).toBe("unsaved"); // retryable, buffer kept
+  });
+
+  it("discard reverts to the last synced content and unblocks flushAll", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY));
+    authedFetch.mockResolvedValue(jsonResponse(500, {})); // saves keep failing
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "doomed edit");
+    });
+    await act(async () => {
+      await result.current.flushAll();
+    });
+    expect(result.current.tabs[0].dirty).toBe(true);
+    act(() => {
+      result.current.discard(1);
+    });
+    const tab = result.current.tabs[0];
+    expect(tab.buffer).toBe(GET_BODY.content); // back to synced truth
+    expect(tab.dirty).toBe(false);
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.flushAll();
+    });
+    expect(ok).toBe(true); // Talk unblocked by the user's explicit choice
+  });
+});
+
+describe("useEditor round-3 blockers", () => {
+  it("a no-op edit (the CodeMirror echo) never re-dirties — discard stays clean", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    authedFetch.mockResolvedValue(jsonResponse(500, {})); // saves fail
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "doomed");
+    });
+    await act(async () => {
+      await result.current.flushAll();
+    });
+    act(() => {
+      result.current.discard(1);
+    });
+    expect(result.current.tabs[0].dirty).toBe(false);
+    act(() => {
+      // the editor's onChange echo after the discard dispatch: same text
+      result.current.edit(1, GET_BODY.content);
+    });
+    expect(result.current.tabs[0].dirty).toBe(false); // still clean
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.flushAll();
+    });
+    expect(ok).toBe(true); // Talk stays unblocked
+  });
+
+  it("a rename during an in-flight save stays dirty and lands next save", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    let resolveSave: (r: Response) => void = () => {};
+    authedFetch.mockImplementationOnce(
+      () => new Promise<Response>((r) => (resolveSave = r)),
+    );
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { updated_at: "TOK-2", char_count: 2 }),
+    );
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "v2");
+    });
+    let flush1: Promise<boolean>;
+    await act(async () => {
+      flush1 = result.current.flushAll(); // save 1 in flight
+      await Promise.resolve();
+      result.current.rename(1, "renamed-mid-save.md"); // during the save
+      resolveSave(jsonResponse(200, { updated_at: "TOK-1", char_count: 2 }));
+      await flush1;
+    });
+    // the rename was NOT silently dropped
+    expect(result.current.tabs[0].dirty).toBe(true);
+    await act(async () => {
+      await result.current.flushAll();
+    });
+    const puts = authedFetch.mock.calls.filter(([, i]) => i?.method === "PUT");
+    const last = JSON.parse(puts[puts.length - 1][1].body);
+    expect(last.title).toBe("renamed-mid-save.md");
+    expect(result.current.tabs[0].dirty).toBe(false);
+  });
+
+  it("an unchanged title is never sent — legacy over-cap titles keep saving", async () => {
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { ...GET_BODY, title: "x".repeat(500) }),
+    );
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { updated_at: "TOK-1", char_count: 2 }),
+    );
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "v2");
+    });
+    await act(async () => {
+      await result.current.flushAll();
+    });
+    const put = authedFetch.mock.calls.find(([, i]) => i?.method === "PUT");
+    expect("title" in JSON.parse(put![1].body)).toBe(false);
+    expect(result.current.tabs[0].saveState).toBe("saved");
+  });
+
+  it("a local rename survives a 409 (user precedence covers titles)", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(409, {
+        content: GET_BODY.content,
+        updated_at: "TOK-409",
+        title: "server-renamed.md",
+      }),
+    );
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.rename(1, "my-rename.md");
+    });
+    await act(async () => {
+      await result.current.flushAll();
+    });
+    expect(result.current.tabs[0].title).toBe("my-rename.md");
+    expect(result.current.tabs[0].baseTitle).toBe("server-renamed.md");
+  });
+});
+
+describe("useEditor round-4", () => {
+  it("three clustered 409s stall; retryStalled resets and saves again", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    const conflict = () =>
+      jsonResponse(409, {
+        content: "server\n",
+        updated_at: "TOK-C",
+        title: "d1.md",
+      });
+    authedFetch.mockResolvedValueOnce(conflict());
+    authedFetch.mockResolvedValueOnce(conflict());
+    authedFetch.mockResolvedValueOnce(conflict());
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { updated_at: "TOK-WIN", char_count: 4 }),
+    );
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "mine\n");
+    });
+    for (let i = 0; i < 3; i++) {
+      await act(async () => {
+        await result.current.flushAll();
+      });
+      act(() => {
+        result.current.edit(1, `mine v${i}\n`); // keep conflicting
+      });
+    }
+    expect(result.current.tabs[0].stalled).toBe(true);
+    // stalled: no further PUTs even when dirty
+    const putsAtStall = authedFetch.mock.calls.filter(
+      ([, i]) => i?.method === "PUT",
+    ).length;
+    await act(async () => {
+      await result.current.flushAll();
+    });
+    expect(
+      authedFetch.mock.calls.filter(([, i]) => i?.method === "PUT"),
+    ).toHaveLength(putsAtStall);
+
+    act(() => {
+      result.current.retryStalled(1);
+    });
+    await act(async () => {
+      await result.current.flushAll();
+    });
+    expect(result.current.tabs[0].stalled).toBe(false);
+    expect(result.current.tabs[0].saveState).toBe("saved");
+  });
+
+  it("a 200 arriving after an announce moved the base does not roll truth back", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    let resolvePut: (r: Response) => void = () => {};
+    authedFetch.mockImplementationOnce(
+      () => new Promise<Response>((r) => (resolvePut = r)),
+    );
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "mine\n");
+    });
+    let flushP: Promise<boolean>;
+    await act(async () => {
+      flushP = result.current.flushAll(); // PUT in flight
+      await Promise.resolve();
+      // an announce lands mid-flight and moves the base forward
+      result.current.handleAnnounce("document.updated", {
+        ...doc(1),
+        content: "agent newer\n",
+        content_omitted: false,
+        updated_at: "TOK-ANNOUNCE-NEWER",
+      } as never);
+      resolvePut(jsonResponse(200, { updated_at: "TOK-MINE-OLDER", char_count: 5 }));
+      await flushP;
+    });
+    const tab = result.current.tabs[0];
+    expect(tab.baseToken).toBe("TOK-ANNOUNCE-NEWER"); // never rolled back
+  });
+
+  it("a title-validation 400 reverts the rename and keeps saving content", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(400, {
+        detail: "title is too long (limit 200 characters)",
+        code: "title_invalid",
+      }),
+    );
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { updated_at: "TOK-OK", char_count: 7 }),
+    );
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "content");
+      // simulate a pre-cap client letting a long title through
+      result.current.rename(1, "t".repeat(199));
+    });
+    await act(async () => {
+      await result.current.flushAll(); // 400: title reverts, NOT terminal
+    });
+    expect(result.current.tabs[0].terminal).toBeNull();
+    expect(result.current.tabs[0].title).toBe("d1.md"); // reverted
+    await act(async () => {
+      await result.current.flushAll();
+    });
+    expect(result.current.tabs[0].saveState).toBe("saved"); // content landed
+  });
+});
+
+describe("useEditor round-6", () => {
+  it("closing a dirty terminal tab is refused without force, closes with it", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    authedFetch.mockResolvedValueOnce(jsonResponse(404, { detail: "gone" }));
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "the only copy\n");
+    });
+    await act(async () => {
+      await result.current.flushAll(); // 404 -> terminal, buffer kept
+    });
+    expect(result.current.tabs[0].terminalKind).toBe("gone");
+    expect(result.current.tabs[0].dirty).toBe(true);
+
+    await act(async () => {
+      await result.current.close(1); // bare x: refused
+    });
+    expect(result.current.tabs).toHaveLength(1);
+
+    await act(async () => {
+      await result.current.close(1, true); // confirmed: closes
+    });
+    expect(result.current.tabs).toHaveLength(0);
+  });
+
+  it("closeDeleted falls back to a surviving tab, not null-under-tabs", async () => {
+    authedFetch.mockResolvedValue(jsonResponse(200, GET_BODY));
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+      await result.current.open(doc(2));
+      await result.current.open(doc(3));
+    });
+    act(() => {
+      result.current.activate(3);
+    });
+    act(() => {
+      result.current.closeDeleted(3);
+    });
+    expect(result.current.tabs.map((t) => t.id)).toEqual([1, 2]);
+    expect(result.current.activeId).toBe(2);
+  });
+
+  it("a keystroke whose pre-change doc is not the buffer is dropped", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    // an announce merges while CodeMirror still shows the old doc
+    act(() => {
+      result.current.handleAnnounce("document.updated", {
+        ...doc(1),
+        content: "merged by announce\n",
+        content_omitted: false,
+        updated_at: "TOK-MERGE",
+      } as never);
+    });
+    // the raced keystroke: CM's doc was still the PRE-merge text
+    act(() => {
+      result.current.edit(1, GET_BODY.content + "x", GET_BODY.content);
+    });
+    expect(result.current.tabs[0].buffer).toBe("merged by announce\n");
+    // an ordinary keystroke (fromDoc === buffer) still lands
+    act(() => {
+      result.current.edit(1, "merged by announce\nx", "merged by announce\n");
+    });
+    expect(result.current.tabs[0].buffer).toBe("merged by announce\nx");
+  });
+
+  it("a ceiling-class terminal clears on the next keystroke and saves", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(400, { detail: "this document is at its size limit" }),
+    );
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { updated_at: "TOK-SHRUNK", char_count: 5 }),
+    );
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "too big\n");
+    });
+    await act(async () => {
+      await result.current.flushAll(); // 400 gate -> terminal "other"
+    });
+    expect(result.current.tabs[0].terminalKind).toBe("other");
+
+    act(() => {
+      result.current.edit(1, "tiny\n"); // the in-place fix: shrink
+    });
+    expect(result.current.tabs[0].terminal).toBeNull();
+    await act(async () => {
+      await result.current.flushAll();
+    });
+    expect(result.current.tabs[0].saveState).toBe("saved");
+    expect(result.current.tabs[0].baseToken).toBe("TOK-SHRUNK");
+  });
+
+  it("an announce during the initial load is replayed, not dropped", async () => {
+    let resolveGet: (r: Response) => void = () => {};
+    authedFetch.mockImplementationOnce(
+      () => new Promise<Response>((r) => (resolveGet = r)),
+    );
+    const { result } = renderHook(() => useEditor());
+    let openP: Promise<void>;
+    act(() => {
+      openP = result.current.open(doc(1));
+    });
+    // the agent's edit lands while the GET is still in flight
+    act(() => {
+      result.current.handleAnnounce("document.updated", {
+        ...doc(1),
+        content: "agent edit, newer than the GET\n",
+        content_omitted: false,
+        updated_at: "TOK-NEWER",
+      } as never);
+    });
+    await act(async () => {
+      resolveGet(jsonResponse(200, GET_BODY)); // pre-edit content
+      await openP;
+    });
+    const tab = result.current.tabs[0];
+    expect(tab.buffer).toBe("agent edit, newer than the GET\n");
+    expect(tab.baseToken).toBe("TOK-NEWER");
+  });
+
+  it("apply-theirs on a BAILED merge takes theirs wholesale, never a no-op", async () => {
+    const lines = (p: string) =>
+      Array.from({ length: 3000 }, (_, i) => `${p} ${i}`).join("\n") + "\n";
+    const base = lines("base");
+    const mine = lines("mine");
+    const theirs = lines("theirs");
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { ...GET_BODY, content: base }),
+    );
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, mine);
+    });
+    act(() => {
+      result.current.handleAnnounce("document.updated", {
+        ...doc(1),
+        content: theirs,
+        content_omitted: false,
+        updated_at: "TOK-THEIRS",
+      } as never);
+    });
+    const afterMerge = result.current.tabs[0];
+    expect(afterMerge.conflict).toBe(true);
+    expect(afterMerge.buffer).toBe(mine); // the bail kept mine wholesale
+
+    act(() => {
+      result.current.applyTheirs(1);
+    });
+    const applied = result.current.tabs[0];
+    expect(applied.buffer).toBe(theirs); // the explicit click flips it
+    expect(applied.conflict).toBe(false);
+  });
+});

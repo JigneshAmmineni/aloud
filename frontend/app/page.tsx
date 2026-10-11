@@ -1,7 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import Link from "next/link";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { signOut } from "firebase/auth";
 
@@ -11,10 +10,17 @@ import { Workspace } from "@/components/Workspace";
 import { useAuth } from "@/lib/auth";
 import { auth } from "@/lib/firebase";
 import { useAloudSession } from "@/lib/useAloudSession";
+import { useEditor } from "@/lib/useEditor";
 import { useWorkspace } from "@/lib/useWorkspace";
+import {
+  deleteAndCloseTab,
+  guardTalk,
+  type AnnouncedDoc,
+  type WorkspaceDoc,
+} from "@/lib/workspace";
 
 const STATUS: Record<string, string> = {
-  idle: "tap to start thinking out loud",
+  idle: "",
   connecting: "warming up…",
   ending: "wrapping up…",
   listening: "listening",
@@ -26,25 +32,102 @@ export default function Home() {
   const router = useRouter();
   const { user, loading, isAdmin } = useAuth();
   const workspace = useWorkspace(!loading && !!user);
+  const editor = useEditor({ onSaved: workspace.noteSaved });
   const [docsOpen, setDocsOpen] = useState(false);
-  const {
-    state,
-    mode,
-    error,
-    localTrack,
-    botTrack,
-    talk,
-    end,
-  } = useAloudSession({ onDocumentAnnounce: workspace.handleAnnounce });
+  const [flushError, setFlushError] = useState<string | null>(null);
+
+  const workspaceAnnounce = workspace.handleAnnounce;
+  const editorAnnounce = editor.handleAnnounce;
+  // FR-55/58.2: announces reach the list AND any open editor tab
+  const onDocumentAnnounce = useCallback(
+    (type: string, doc: AnnouncedDoc) => {
+      workspaceAnnounce(type, doc);
+      editorAnnounce(type, doc);
+    },
+    [workspaceAnnounce, editorAnnounce],
+  );
+
+  const { state, mode, error, localTrack, botTrack, talk, end } =
+    useAloudSession({ onDocumentAnnounce });
 
   // FR-30: unauthenticated visits land on /login.
   useEffect(() => {
     if (!loading && !user) router.replace("/login");
   }, [loading, user, router]);
 
+  // FR-58.1: while unsaved changes exist, leaving the page warns
+  const anyDirty = editor.tabs.some((t) => t.dirty);
+  useEffect(() => {
+    if (!anyDirty) return;
+    const warn = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = ""; // WebKit needs it — NFR-3 names mobile first
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [anyDirty]);
+
+  // FR-58.1: the pre-/start flush — Talk refuses on a failed flush
+  // rather than opening the session on superseded text
+  const flushAll = editor.flushAll;
+  const attachedIds = workspace.attachedIds;
+  const guardedTalk = useCallback(async () => {
+    setFlushError(null);
+    await guardTalk(flushAll, talk, attachedIds, setFlushError);
+  }, [flushAll, talk, attachedIds]);
+
+  // in-app navigation is a flush point too (client-side transitions
+  // never fire beforeunload)
+  const flushThen = useCallback(
+    (navigate: () => void) => async () => {
+      // same contract as Talk: navigation must not quietly destroy the
+      // buffer Talk refuses to proceed past (round-4 nit — asymmetry)
+      if (!(await flushAll())) {
+        setFlushError(
+          "your latest edits haven't saved — fix or discard them first",
+        );
+        return;
+      }
+      navigate();
+    },
+    [flushAll],
+  );
+
+  // FR-58.1: closing the workspace is a flush point — BOTH closers (the
+  // nav toggle and the pane's ×) go through here; the toggle used to skip
+  // it. Fire-and-forget by design, unlike flushThen: the buffers stay
+  // mounted in this component, so a failed flush destroys nothing.
+  const closeWorkspace = useCallback(() => {
+    void flushAll();
+    setDocsOpen(false);
+  }, [flushAll]);
+
+  const deleteDoc = workspace.deleteDoc;
+  const closeDeleted = editor.closeDeleted;
+  const handleDelete = useCallback(
+    async (doc: WorkspaceDoc) => {
+      await deleteAndCloseTab(deleteDoc, closeDeleted, doc);
+    },
+    [deleteDoc, closeDeleted],
+  );
+
   const status = state === "active" ? STATUS[mode] : STATUS[state];
 
   if (loading || !user) return null;
+
+  const consoleUI = () => (
+    <>
+      <SessionButton state={state} onTalk={guardedTalk} onEnd={end} />
+      <WaveformBar
+        active={state === "active"}
+        mode={mode}
+        localTrack={localTrack}
+        botTrack={botTrack}
+      />
+      <p className={`status ${state === "active" ? mode : state}`}>{status}</p>
+      {error && <p className="error">{error}</p>}
+    </>
+  );
 
   return (
     <main className="stage">
@@ -53,19 +136,23 @@ export default function Home() {
           type="button"
           className="login-link"
           aria-expanded={docsOpen}
-          onClick={() => setDocsOpen((o) => !o)}
+          onClick={() => (docsOpen ? closeWorkspace() : setDocsOpen(true))}
         >
           Documents
         </button>
         {isAdmin && (
-          <Link className="login-link" href="/admin">
+          <button
+            type="button"
+            className="login-link"
+            onClick={flushThen(() => router.push("/admin"))}
+          >
             Admin
-          </Link>
+          </button>
         )}
         <button
           type="button"
           className="login-link"
-          onClick={() => signOut(auth)}
+          onClick={flushThen(() => void signOut(auth))}
         >
           Sign out
         </button>
@@ -75,45 +162,49 @@ export default function Home() {
         <p className="tagline">a place to work out loud</p>
       </header>
 
-      <div className="core">
-        <SessionButton
-          state={state}
-          onTalk={() => talk(workspace.attachedIds)}
-          onEnd={end}
-        />
-        <WaveformBar
-          active={state === "active"}
-          mode={mode}
-          localTrack={localTrack}
-          botTrack={botTrack}
-        />
-        <p className={`status ${state === "active" ? mode : state}`}>{status}</p>
-        {error && <p className="error">{error}</p>}
-      </div>
+      {/* FR-57.4: with the workspace open the console docks into it;
+          closed, the full-size console owns the stage */}
+      {!docsOpen && (
+        <div className="core">
+          {consoleUI()}
+          {flushError && <p className="error">{flushError}</p>}
+        </div>
+      )}
 
-      {/* FR-54: the workspace and preview are available while idle AND
-          during a session; only upload and the attach toggle are idle-gated. */}
       {docsOpen && (
-      <Workspace
-        state={workspace.state}
-        idle={state === "idle"}
-        onClose={() => setDocsOpen(false)}
-        attachedIds={workspace.attachedIds}
-        attachedChars={workspace.attachedChars}
-        budgetError={workspace.budgetError}
-        previewFailed={workspace.previewFailed}
-        onUploadsSettled={() => workspace.refresh()}
-        total={workspace.total}
-        onLoadMore={workspace.loadMore}
-        loading={workspace.loading}
-        error={workspace.error}
-        onPreview={workspace.preview}
-        onClosePreview={workspace.closePreview}
-        onDownload={workspace.download}
-        onDelete={workspace.deleteDoc}
-        onToggleAttach={workspace.toggleAttach}
-        onUpload={workspace.upload}
-      />
+        <Workspace
+          state={workspace.state}
+          idle={state === "idle"}
+          attachedIds={workspace.attachedIds}
+          attachedChars={workspace.attachedChars}
+          total={workspace.total}
+          loading={workspace.loading}
+          error={workspace.error}
+          budgetError={workspace.budgetError}
+          flushError={flushError}
+          console={consoleUI()}
+          editor={{
+            tabs: editor.tabs,
+            activeId: editor.activeId,
+            onActivate: editor.activate,
+            onClose: editor.close,
+            onEdit: editor.edit,
+            onSetView: editor.setView,
+            onApplyTheirs: editor.applyTheirs,
+            onDismissConflict: editor.dismissConflict,
+            onRename: editor.rename,
+            onRetryStalled: editor.retryStalled,
+            onDiscard: editor.discard,
+          }}
+          onClose={closeWorkspace}
+          onLoadMore={workspace.loadMore}
+          onOpen={editor.open}
+          onDownload={workspace.download}
+          onDelete={handleDelete}
+          onToggleAttach={workspace.toggleAttach}
+          onUpload={workspace.upload}
+          onUploadsSettled={() => workspace.refresh()}
+        />
       )}
 
       <footer className="foot" aria-hidden>

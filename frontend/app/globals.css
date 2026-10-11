@@ -289,17 +289,56 @@ body::after {
   top: 0;
   right: 0;
   height: 100dvh;
-  width: min(620px, 92vw);
+  width: 100vw;
   overflow-x: hidden;
+  display: flex;
+  flex-direction: row;
+  gap: 0;
   padding: 28px 24px 40px;
   overflow-y: auto;
   background: linear-gradient(180deg, #1c1916, #171411);
   border-left: 1px solid rgba(233, 226, 214, 0.08);
   box-shadow: -24px 0 60px rgba(0, 0, 0, 0.45);
   animation: slide-in 0.45s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+.ws-left {
+  width: var(--ws-left-w, 320px);
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 12px;
+  padding: 0 14px 10px 0;
+  border-right: 1px solid rgba(233, 226, 214, 0.1);
+  min-height: 0;
+}
+
+.ws-list-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* FR-57.4: the docked console — Talk/End, waveform, status, live */
+.ws-console {
+  flex: 0 0 auto;
+  border-top: 1px solid rgba(233, 226, 214, 0.1);
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  zoom: 0.55;
+}
+
+/* the docked orb must stay round — no flex squish — and the idle
+   tagline is noise in a pane this small (the active states still show) */
+.ws-console > * {
+  flex: 0 0 auto;
+}
+
+.ws-console .status.idle {
+  display: none;
 }
 
 @keyframes slide-in {
@@ -410,38 +449,14 @@ body::after {
   color: var(--ink-faint);
 }
 
-/* one flat, column-structured list (no cards) */
-.ws-grid {
-  display: grid;
-  grid-template-columns: minmax(120px, 1fr) 32px 52px 62px 62px 42px 118px;
-  gap: 8px;
-  align-items: center;
-}
-
-.ws-head span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ws-head {
-  padding: 6px 4px;
-  border-bottom: 1px solid rgba(233, 226, 214, 0.14);
-  font-size: 9px;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: var(--ink-faint);
-}
-
+/* FR-57.1: names + size, flat rows (file-explorer style) */
 .ws-table {
   list-style: none;
-  overflow-y: auto;
-  max-height: 38dvh;
 }
 
 .ws-row {
   display: grid;
-  grid-template-columns: minmax(120px, 1fr) 32px 52px 62px 62px 42px 118px;
+  grid-template-columns: minmax(0, 1fr) 44px 118px;
   gap: 8px;
   align-items: center;
   padding: 7px 4px;
@@ -590,30 +605,204 @@ body::after {
   color: var(--ink-dim);
 }
 
-.ws-preview {
-  border: 1px solid rgba(233, 226, 214, 0.12);
-  border-radius: 10px;
-  padding: 14px 16px;
-  background: linear-gradient(180deg, rgba(233, 226, 214, 0.04), rgba(233, 226, 214, 0.01));
-  overflow-y: auto;
-  min-height: 120px;
-  flex: 1;
+/* FR-57.2: the draggable list/editor divider */
+.ws-divider {
+  flex: 0 0 6px;
+  cursor: col-resize;
+  background: transparent;
+  border-left: 1px solid rgba(233, 226, 214, 0.08);
+  transition: background 0.2s;
 }
 
-.ws-preview-head {
+.ws-divider:hover {
+  background: rgba(233, 226, 214, 0.08);
+}
+
+/* ---- the editor pane (FR-57/58) ---- */
+
+.ed-pane {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 10px;
+  flex-direction: column;
+  padding: 0 0 0 14px;
 }
 
-.ws-preview-close {
+.ed-empty {
+  margin-top: 40px;
+  text-align: center;
+}
+
+.ed-tabs {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid rgba(233, 226, 214, 0.12);
+  padding-bottom: 6px;
+}
+
+.ed-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid rgba(233, 226, 214, 0.12);
+  border-radius: 7px 7px 0 0;
+  padding: 3px 6px;
+  background: rgba(233, 226, 214, 0.03);
+}
+
+.ed-tab.active {
+  background: rgba(233, 226, 214, 0.09);
+  border-color: rgba(227, 164, 79, 0.45);
+}
+
+.ed-tab-name {
+  border: none;
+  background: none;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ed-tab-alert {
+  color: #e0a23f; /* conflict/stalled/terminal on a BACKGROUND tab — the
+                     dirty dot alone carried three meanings (round 6) */
+  font-weight: 700;
+}
+
+.ed-tab-close {
   border: none;
   background: none;
   color: var(--ink-dim);
   cursor: pointer;
-  font-size: 16px;
+  font-size: 13px;
+  padding: 0 2px;
+}
+
+.ed-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 2px;
+}
+
+.ed-toggle button {
+  border: 1px solid rgba(233, 226, 214, 0.14);
+  background: none;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 9px;
+  cursor: pointer;
+}
+
+.ed-toggle button:first-child {
+  border-radius: 6px 0 0 6px;
+}
+
+.ed-toggle button:last-child {
+  border-radius: 0 6px 6px 0;
+}
+
+.ed-toggle button.on {
+  color: var(--ink);
+  background: rgba(233, 226, 214, 0.09);
+}
+
+.ed-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 3px 6px;
+}
+
+.ed-title:hover:not(:disabled),
+.ed-title:focus {
+  border-color: rgba(233, 226, 214, 0.16);
+  outline: none;
+}
+
+.ed-meta {
+  font-size: 10px;
+  color: var(--ink-faint);
+  letter-spacing: 0.1em;
+}
+
+.ed-save {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--ink-faint);
+}
+
+.ed-save-unsaved {
+  color: rgba(227, 164, 79, 0.9);
+}
+
+.ed-save-error {
+  color: rgba(var(--end), 0.95);
+}
+
+.ed-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--ink);
+  background: rgba(227, 164, 79, 0.1);
+  border: 1px solid rgba(227, 164, 79, 0.4);
+  border-radius: 8px;
+  padding: 7px 10px;
+  margin: 6px 0;
+}
+
+.ed-banner button {
+  border: 1px solid rgba(233, 226, 214, 0.25);
+  background: none;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.ed-banner.ed-terminal {
+  background: rgba(214, 106, 92, 0.1);
+  border-color: rgba(var(--end), 0.5);
+}
+
+.ed-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.ed-body .cm-editor {
+  height: 100%;
+  font-size: 12.5px;
+  background: transparent;
+}
+
+.ed-body .cm-gutters {
+  background: transparent;
+  border-right: 1px solid rgba(233, 226, 214, 0.08);
+}
+
+.ed-preview {
+  padding: 8px 4px;
+  cursor: text;
 }
 
 .ws-pre {
@@ -668,26 +857,54 @@ body::after {
   font-style: italic;
 }
 
-/* phone widths (NFR-3): the panel overlays full-width; dense columns hide */
+/* phone widths (NFR-3, FR-57.4): the editor overlays full-width, and the
+   console survives as a pinned bar OUTSIDE the overlay — End/status stay
+   reachable during the signature talking-while-editing moment */
 @media (max-width: 720px) {
   .workspace {
-    width: 100vw;
     border-left: none;
+    flex-direction: column;
   }
-  .ws-grid,
-  .ws-row {
-    grid-template-columns: minmax(0, 1fr) 62px 42px 118px;
+  .ws-left {
+    width: 100%;
+    border-right: none;
+    padding-right: 0;
   }
-  .ws-cell-type,
-  .ws-cell-source,
-  span.ws-cell-date:nth-of-type(3) {
-    /* created hides; updated (the activity column) stays */
-    display: none;
+  .ws-v2.has-tabs .ed-pane {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 72px;
+    z-index: 20;
+    background: var(--bg);
+    padding: 10px 12px 0;
   }
-  .ws-head span:nth-child(2),
-  .ws-head span:nth-child(3),
-  .ws-head span:nth-child(4) {
-    display: none;
+  .ws-v2.has-tabs .ws-console {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 72px;
+    z-index: 30;
+    background: #17141166;
+    backdrop-filter: blur(6px);
+    border-top: 1px solid rgba(233, 226, 214, 0.12);
+    flex-direction: row;
+    justify-content: center;
+    align-items: center;
+    max-height: none;
+    /* zoom on the CHILDREN, not transform: zoom shrinks the laid-out
+       box as well as the paint, so 172px of button + 320px of waveform
+       fit the bar instead of overflowing the viewport (transform scales
+       only the paint — round 5); zoom on .ws-console ITSELF is what
+       rescaled the left:0;right:0 bar to ~45vw (round 4) */
+    zoom: normal;
+    overflow: visible;
+  }
+
+  .ws-v2.has-tabs .ws-console > * {
+    zoom: 0.45;
   }
 }
 
@@ -821,14 +1038,26 @@ body::after {
 
 .login-link {
   background: none;
-  border: none;
-  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 4px 12px;
   align-self: flex-end;
   color: var(--ink-dim);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  text-decoration: underline;
+  font-family: var(--font-display);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  text-decoration: none;
   cursor: pointer;
+  transition:
+    color 0.25s,
+    border-color 0.25s,
+    background 0.25s;
+}
+
+.login-link:hover {
+  color: var(--ink);
+  border-color: rgba(233, 226, 214, 0.16);
+  background: rgba(233, 226, 214, 0.04);
 }
 
 .login-link.centered {

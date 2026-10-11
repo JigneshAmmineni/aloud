@@ -17,10 +17,13 @@ disabled account cannot open or complete a new session.
 """
 
 import asyncio
+import json
 import signal
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime
+from typing import Annotated
 
 from obs.logging import setup_logging
 
@@ -32,10 +35,12 @@ from fastapi import (
     FastAPI,
     File,
     HTTPException,
+    Path,
     Request,
     UploadFile,
 )
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse
 from loguru import logger
 from pipecat.transports.smallwebrtc.connection import IceServer, SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.request_handler import (
@@ -45,18 +50,24 @@ from pipecat.transports.smallwebrtc.request_handler import (
 )
 
 from agent.companion import CompanionAgent, drain_live_sessions
-from agent.registry import notify_document_deleted
+from agent.registry import notify_document_deleted, notify_document_updated
 from app import admin, auth
 from app.auth import AuthedUser, get_current_user_checked, get_current_user_id
 from app.config import load_settings
 from app.documents import (
     EXTRACT_SEMAPHORE,
+    MAX_DOC_CHARS,
     MAX_FILE_BYTES,
     MAX_TOTAL_CHARS,
     DocumentError,
     extract_text,
 )
-from app.ratelimit import DOCUMENTS_RATE_LIMIT, rate_limited, user_rate_limited
+from app.ratelimit import (
+    DOCUMENT_SAVE_RATE_LIMIT,
+    DOCUMENTS_RATE_LIMIT,
+    rate_limited,
+    user_rate_limited,
+)
 from db.documents_repo import (
     MAX_DOCUMENTS_PER_USER,
     DocumentQuotaError,
@@ -65,6 +76,7 @@ from db.documents_repo import (
     insert_upload_row,
     list_workspace_rows,
     resolve_attach_rows,
+    save_document_content,
 )
 from db.engine import init_db, retire_bootstrap_engine
 from db.migrations import migrate_artifacts_to_documents
@@ -206,6 +218,44 @@ async def email_check(request: Request):
     return {"registered": registered}
 
 
+# FR-56: 2 MiB comfortably covers a MAX_DOC_CHARS document even in 4-byte
+# UTF-8 plus JSON escaping and the title. A legacy over-ceiling row larger
+# than this 413s and cannot be saved through this route — accepted: the
+# growth gate exists because over-ceiling rows exist, but one past ~500k
+# chars is not plausible. An unbounded request.json() would materialize an
+# authed 1 GB POST the same way the upload route's bounded read prevents.
+MAX_SAVE_BODY_BYTES = 2 * 1024 * 1024
+
+# documents.id is a SQLAlchemy Integer -> int32; a value beyond it is an
+# unencodable bind -> 500 where FR-56's precedence says not-found (the
+# same class FR-59 bounded for offset). Annotated, NOT a shared Path()
+# default: FastAPI writes back onto a FieldInfo handed in as a default,
+# so one instance shared across routes is a latent footgun (round 6).
+INT32_MAX = 2_147_483_647
+DocId = Annotated[int, Path(ge=1, le=INT32_MAX)]
+
+
+async def _bounded_json(
+    request: Request, cap: int
+) -> tuple[dict | None, str | None]:
+    """Read at most cap+1 bytes of body and parse JSON. Returns
+    (body, None) or (None, "too_large" | "malformed") — a typed refusal
+    like EditDiagnosis/SaveOutcome, not an in-band sentinel key a client
+    body could legitimately contain (round 6)."""
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > cap:
+            return None, "too_large"
+        chunks.append(chunk)
+    try:
+        body = json.loads(b"".join(chunks))
+    except Exception:
+        return None, "malformed"
+    return (body, None) if isinstance(body, dict) else (None, "malformed")
+
+
 # FR-51: per-USER limiter, declared with the route's own auth callable so
 # FastAPI's per-request dependency cache resolves identity once.
 _documents_limiter = user_rate_limited(
@@ -274,7 +324,7 @@ async def list_documents_route(
 
 @app.get("/documents/{document_id}")
 async def get_document_route(
-    document_id: int,
+    document_id: DocId,
     user_id: str = Depends(get_current_user_id),
 ):
     """FR-52: one owned document with full content — preview, download, and
@@ -295,9 +345,128 @@ async def get_document_route(
     }
 
 
+# §4.12 FR-56: the editor's autosave target. TITLE_MAX_CHARS caps a
+# rename — uploads are bounded incidentally by filenames, a rename by
+# nothing. Verification is local (get_current_user_id), a stated choice:
+# a save writes only rows the account already owns, quota-bounded — a
+# disabled account can overwrite its own documents for its residual token
+# hour exactly as its live session's edit tools allow, and cannot grow
+# anything (FR-29 deliberately unchanged).
+TITLE_MAX_CHARS = 200  # mirrored in frontend/lib/workspace.ts — change BOTH
+
+_saves_limiter = user_rate_limited(
+    DOCUMENT_SAVE_RATE_LIMIT, 60.0, get_current_user_id
+)
+
+
+@app.put("/documents/{document_id}", dependencies=[Depends(_saves_limiter)])
+async def save_document_route(
+    request: Request,
+    document_id: DocId,
+    user_id: str = Depends(get_current_user_id),
+):
+    """FR-56: save (and optionally rename) a document — the NULL-safe CAS
+    is the concurrency seam the whole §4.12 editor rides. The base token
+    is OPAQUE to the client (echoed byte-for-byte); the server parses it
+    at full precision."""
+    body, body_err = await _bounded_json(request, MAX_SAVE_BODY_BYTES)
+    if body_err == "too_large":
+        raise HTTPException(
+            status_code=413,
+            detail=f"save body too large (limit {MAX_SAVE_BODY_BYTES} bytes)",
+        )
+    if body is None:
+        # distinct from the content-validation 400: the client treats
+        # validation text literally when classifying failures
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+    if not isinstance(body.get("content"), str):
+        raise HTTPException(status_code=400, detail="content (string) is required")
+    content = body["content"]
+
+    title = body.get("title")
+    if title is not None:
+        # code, not prose: the client classifies this as the ONE
+        # recoverable 4xx (revert the rename, keep saving the content) —
+        # branching on the detail text would make a copy edit data loss
+        if not isinstance(title, str) or not title.strip():
+            # the one field FR-57.1 leaves on screen must identify the row
+            return JSONResponse(
+                status_code=400,
+                content={"detail": "title can't be empty", "code": "title_invalid"},
+            )
+        if len(title) > TITLE_MAX_CHARS:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": f"title is too long (limit {TITLE_MAX_CHARS} characters)",
+                    "code": "title_invalid",
+                },
+            )
+
+    raw_base = body.get("base_updated_at")
+    base = None
+    if raw_base is not None:
+        try:
+            base = datetime.fromisoformat(raw_base)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "base_updated_at must be the exact updated_at string "
+                    "from the last response"
+                ),
+            )
+
+    outcome = await save_document_content(
+        user_id,
+        document_id,
+        content,
+        base_updated_at=base,
+        title=title,
+        ceiling=MAX_DOC_CHARS,
+    )
+    if outcome.reason == "not_found":
+        raise HTTPException(status_code=404, detail="document not found")
+    if outcome.reason == "not_editable":
+        raise HTTPException(
+            status_code=400,
+            detail="this document is a PDF (extracted text) and is read-only",
+        )
+    if outcome.reason == "over_ceiling":
+        raise HTTPException(
+            status_code=400,
+            detail=f"this document is at its size limit ({MAX_DOC_CHARS} characters)",
+        )
+    if outcome.reason == "stale":
+        cur = outcome.current
+        return JSONResponse(
+            status_code=409,
+            content={
+                "content": cur.content,
+                "updated_at": cur.updated_at.isoformat() if cur.updated_at else None,
+                "title": cur.title,
+                "char_count": cur.char_count,
+            },
+        )
+    row = outcome.row
+    # live attach blocks reconcile exactly like agent edits — content AND
+    # title (FR-53.8's header names the file)
+    notify_document_updated(user_id, row.id, row.title, row.content)
+    logger.bind(
+        component="app.documents",
+        event="document.saved",
+        document_id=row.id,
+        char_count=len(row.content),
+    ).info(f"document saved ({len(row.content)} chars)")
+    return {
+        "updated_at": row.updated_at.isoformat(),
+        "char_count": len(row.content),
+    }
+
+
 @app.delete("/documents/{document_id}")
 async def delete_document_route(
-    document_id: int,
+    document_id: DocId,
     user_id: str = Depends(get_current_user_id),
 ):
     """FR-52: hard delete behind the client's confirming affordance; the
@@ -391,9 +560,25 @@ def _coerce_attach_ids(raw) -> list[int]:
     ids: list[int] = []
     seen: set[int] = set()
     for value in raw if isinstance(raw, list) else []:
-        try:
+        # FR-59: a NON-INTEGRAL id is skipped like an unknown one — int()
+        # would truncate 14.9 onto a NEIGHBORING document's id
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            doc_id = value
+        elif isinstance(value, float) and value.is_integer():
             doc_id = int(value)
-        except (TypeError, ValueError):
+        elif isinstance(value, str):
+            try:
+                doc_id = int(value)
+            except ValueError:
+                continue
+        else:
+            continue
+        if not (1 <= doc_id <= INT32_MAX):
+            # the offset/path-id bound, applied to the attach list too:
+            # 10**19 against an int4 column is an asyncpg DataError that
+            # 500s session establishment
             continue
         if doc_id in seen:
             continue

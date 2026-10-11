@@ -224,3 +224,52 @@ def test_workspace_search_never_returns_other_users_rows():
         assert res.hits == [] and res.documents_matched == 0
 
     asyncio.run(run())
+
+
+def test_offset_numeric_bound_survives_absurd_values():
+    """FR-59: ?offset=10**19 was an unencodable-bigint 500 on asyncpg —
+    the clamp bounds it numerically and keeps FR-52's empty-page rule."""
+    uid = _uid()
+
+    async def run():
+        await init_db(PG_URL)
+        await provision_user(uid, None)
+        await insert_upload_row(uid, "a.txt", "text", "x")
+        from db.documents_repo import list_workspace_rows
+
+        items, total = await list_workspace_rows(uid, offset=10**19)
+        assert items == [] and total >= 1  # empty page, same total, no 500
+
+    asyncio.run(run())
+
+
+def test_cas_chain_round_trips_timestamptz():
+    """The self-409 regression on the PROD shape: Postgres timestamptz
+    carries microseconds + offset; the serialized string must round-trip
+    through fromisoformat into a base that matches IS NOT DISTINCT FROM."""
+    uid = _uid()
+
+    async def run():
+        from datetime import datetime
+
+        from db.documents_repo import save_document_content
+
+        await init_db(PG_URL)
+        await provision_user(uid, None)
+        row = await insert_upload_row(uid, "t.md", "markdown", "v1")
+
+        out1 = await save_document_content(
+            uid, row.id, "v2", base_updated_at=None, title=None, ceiling=10_000
+        )
+        assert out1.row is not None
+        token = out1.row.updated_at.isoformat()  # what the route returns
+
+        out2 = await save_document_content(
+            uid, row.id, "v3",
+            base_updated_at=datetime.fromisoformat(token),  # the echoed base
+            title=None, ceiling=10_000,
+        )
+        assert out2.row is not None, f"self-409 on echoed token {token!r}"
+        assert out2.row.content == "v3"
+
+    asyncio.run(run())

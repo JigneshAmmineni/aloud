@@ -37,6 +37,7 @@ PROTECTED = [
     ("get", "/documents"),
     ("get", "/documents/1"),
     ("delete", "/documents/1"),
+    ("put", "/documents/1"),
     ("post", "/start"),
     ("post", "/sessions/any/api/offer"),
     ("patch", "/sessions/any/api/offer"),

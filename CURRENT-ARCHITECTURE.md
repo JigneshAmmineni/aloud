@@ -197,11 +197,18 @@ backend/
 frontend/     Next.js app: / (session console + document workspace), /login,
               /admin (overview), /admin/users (+ /[uid]),
               /admin/sessions/[id]; lib/firebase.ts + lib/auth.tsx (client
-              auth); lib/workspace.ts (FR-55 pure reducer) +
-              lib/useWorkspace.ts; components/Workspace.tsx +
-              MarkdownView.tsx (sanitized preview: HTML never renders,
+              auth); lib/workspace.ts (FR-55 list reducer) +
+              lib/useWorkspace.ts; §4.12 editing: lib/merge.ts (line-level
+              diff3, user precedence), lib/autosave.ts (debounce +
+              max-wait scheduler), lib/useEditor.ts (tabs, opaque CAS
+              token, bounded 409 merge-retries, failure classes),
+              components/EditorPane.tsx (CodeMirror 6; the sanitized
+              MarkdownView as markdown's preview toggle) +
+              Workspace.tsx (names+size list, docked console — a pinned
+              bar on phones) + MarkdownView.tsx (HTML never renders,
               link schemes allowlisted, images never render);
-              tests/ (vitest: the FR-54/55 renderer + reducer lane)
+              tests/ (vitest: renderer, reducer, merge, scheduler,
+              editor-hook lanes)
 .github/workflows/  ci.yml (ruff+pytest+Postgres service+vitest+build),
               claude.yml (@claude), claude-code-review.yml (auto-review)
 Caddyfile, docker-compose.yml (dev), docker-compose.prod.yml (prod)
@@ -235,7 +242,8 @@ Two architectural seams everything hangs on:
    → **AgentLoopProcessor** (the §4.10 agent loop, in the old LLM service's
    slot) → TTS → transport. The loop owns the conversation through the
    `ContextProvider` (which holds attached documents as per-document,
-   id-keyed sections — edits and HTTP-side deletes reconcile through
+   id-keyed sections — agent edits, the user's §4.12 editor saves, and
+   HTTP-side deletes all reconcile through
    `agent/registry.py` into every live session of the owner) and the tool
    registry; observers + writers ride along. Boot order, pre-serve:
    `init_db` (create_all + RLS bootstrap) → the FR-50 artifacts→documents
@@ -326,8 +334,10 @@ VM = single point of failure.
 ## 6. Pages & API surface
 
 **Frontend routes:** `/` — the app (Talk button, waveform states, and the
-document workspace: Uploaded/Created lists, sanitized preview pane,
-download, delete-with-confirm, idle-gated upload and attach toggles with
+document workspace: one flat sortable list (names + sizes) beside the
+§4.12 tabbed editor (CodeMirror; sanitized markdown preview toggle;
+autosave with CAS merge; docked console), download, delete-with-confirm,
+idle-gated upload and attach toggles with
 the visible 400k budget; redirects to /login when signed out) · `/login`
 (FR-30: one form for sign-in/sign-up + Google) · admin pages (FR-41, all
 URL-addressable, tab bar + breadcrumbs, admin claim required): `/admin`
@@ -346,7 +356,11 @@ per-user rate limit, quota; extraction via threadpool + semaphore) ·
 `GET /documents` (workspace list: metadata + title + char_count, never
 content; offset continuation) · `GET /documents/{id}` (full content:
 preview/download/refetch) · `DELETE /documents/{id}` (hard delete, paired
-legacy-row removal, live-session reconciliation) · `POST /start`
+legacy-row removal, live-session reconciliation) ·
+`PUT /documents/{id}` (§4.12 FR-56: the editor's CAS save — opaque
+base token, rename, format/growth gates, 409 carries the current row,
+per-user `DOCUMENT_SAVE_RATE_LIMIT`, local verification by stated
+choice, no usage event) · `POST /start`
 (provisions the users row, mints the
 session, `check_revoked`) ·
 `POST|PATCH /sessions/{id}/api/offer` (WebRTC signaling, `check_revoked`,
