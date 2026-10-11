@@ -22,6 +22,7 @@ vi.mock("@codemirror/lang-markdown", () => ({ markdown: () => [] }));
 const tab: EditorTab = {
   id: 1,
   title: "d1.md",
+  baseTitle: "d1.md",
   format: "markdown",
   base: "x",
   baseToken: "t",

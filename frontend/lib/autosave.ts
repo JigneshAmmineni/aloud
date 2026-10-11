@@ -82,13 +82,18 @@ export function createSaveScheduler(
       if (inflight) await inflight;
       // save UNCONDITIONALLY: the scheduler's flag clears before a save,
       // so after a FAILED save only the caller's state still knows the
-      // buffer is dirty — the saver no-ops when clean (round-2 blocker 1)
-      paused = false; // an explicit flush point overrides the hold
+      // buffer is dirty — the saver no-ops when clean (round-2 blocker 1).
+      // The hold is OVERRIDDEN for this save but RESTORED after: a flush
+      // point inside the omitted-content refetch window must not kill
+      // FR-58.2's hold for the tab's lifetime (round 3).
+      const wasPaused = paused;
+      paused = false;
       clearTimers();
       dirty = false;
       inflight = save().catch(() => {});
       await inflight;
       inflight = null;
+      paused = wasPaused;
     },
     dispose() {
       clearTimers();

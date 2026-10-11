@@ -3,7 +3,12 @@
 import { useEffect, useRef } from "react";
 
 import { markdown } from "@codemirror/lang-markdown";
+import { Annotation } from "@codemirror/state";
 import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
+
+// marks our own programmatic merges so onChange never echoes them back
+// into edit() as user keystrokes (round-3 blocker 2)
+const ExternalSync = Annotation.define<boolean>();
 
 import { MarkdownView } from "@/components/MarkdownView";
 import type { EditorTab } from "@/lib/useEditor";
@@ -43,6 +48,7 @@ function SourceEditor({
     }
     view.dispatch({
       changes: { from: p, to: endA, insert: b.slice(p, endB) },
+      annotations: ExternalSync.of(true),
     });
   }, [tab.buffer]);
 
@@ -50,7 +56,14 @@ function SourceEditor({
     <CodeMirror
       ref={cmRef}
       value={initial.current}
-      onChange={(value) => onEdit(tab.id, value)}
+      onChange={(value, viewUpdate) => {
+        if (
+          viewUpdate.transactions.some((tr) => tr.annotation(ExternalSync))
+        ) {
+          return; // our own sync, not a keystroke
+        }
+        onEdit(tab.id, value);
+      }}
       extensions={tab.format === "markdown" ? [markdown()] : []}
       theme="dark"
       basicSetup={{ lineNumbers: true, foldGutter: false }}

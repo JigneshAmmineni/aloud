@@ -33,6 +33,7 @@ from fastapi import (
     FastAPI,
     File,
     HTTPException,
+    Path,
     Request,
     UploadFile,
 )
@@ -215,6 +216,35 @@ async def email_check(request: Request):
     return {"registered": registered}
 
 
+# FR-56: content is at most MAX_DOC_CHARS characters; multibyte UTF-8 plus
+# JSON escaping and the title stay well inside this. An unbounded
+# request.json() would materialize an authed 1 GB POST the same way the
+# upload route's bounded read exists to prevent.
+MAX_SAVE_BODY_BYTES = 2 * 1024 * 1024
+
+# a path id beyond int32 is an unencodable bind -> 500 where FR-56's
+# precedence says not-found; the same class FR-59 bounded for offset
+_DOC_ID = Path(ge=1, le=2_147_483_647)
+
+
+async def _bounded_json(request: Request, cap: int) -> dict | None:
+    """Read at most cap+1 bytes of body and parse JSON; None on refusal."""
+    import json
+
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > cap:
+            return None
+        chunks.append(chunk)
+    try:
+        body = json.loads(b"".join(chunks))
+    except Exception:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
 # FR-51: per-USER limiter, declared with the route's own auth callable so
 # FastAPI's per-request dependency cache resolves identity once.
 _documents_limiter = user_rate_limited(
@@ -283,7 +313,7 @@ async def list_documents_route(
 
 @app.get("/documents/{document_id}")
 async def get_document_route(
-    document_id: int,
+    document_id: int = _DOC_ID,
     user_id: str = Depends(get_current_user_id),
 ):
     """FR-52: one owned document with full content — preview, download, and
@@ -320,19 +350,21 @@ _saves_limiter = user_rate_limited(
 
 @app.put("/documents/{document_id}", dependencies=[Depends(_saves_limiter)])
 async def save_document_route(
-    document_id: int,
     request: Request,
+    document_id: int = _DOC_ID,
     user_id: str = Depends(get_current_user_id),
 ):
     """FR-56: save (and optionally rename) a document — the NULL-safe CAS
     is the concurrency seam the whole §4.12 editor rides. The base token
     is OPAQUE to the client (echoed byte-for-byte); the server parses it
     at full precision."""
-    try:
-        body = await request.json()
-    except Exception:
-        body = None
-    if not isinstance(body, dict) or not isinstance(body.get("content"), str):
+    body = await _bounded_json(request, MAX_SAVE_BODY_BYTES)
+    if body is None:
+        raise HTTPException(
+            status_code=413,
+            detail=f"save body too large (limit {MAX_SAVE_BODY_BYTES} bytes)",
+        )
+    if not isinstance(body.get("content"), str):
         raise HTTPException(status_code=400, detail="content (string) is required")
     content = body["content"]
 
@@ -410,7 +442,7 @@ async def save_document_route(
 
 @app.delete("/documents/{document_id}")
 async def delete_document_route(
-    document_id: int,
+    document_id: int = _DOC_ID,
     user_id: str = Depends(get_current_user_id),
 ):
     """FR-52: hard delete behind the client's confirming affordance; the

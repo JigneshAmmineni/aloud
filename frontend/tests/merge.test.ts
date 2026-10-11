@@ -73,3 +73,15 @@ describe("merge3 (line-level diff3, user precedence)", () => {
     expect(r.merged).toBe("a EDIT\nb\nc");
   });
 });
+
+describe("trailing newline follows user precedence", () => {
+  it("a user-deleted trailing newline stays deleted through a merge", () => {
+    const r = merge3("a\nb\n", "a\nb", "a EDIT\nb\n");
+    expect(r.merged).toBe("a EDIT\nb");
+  });
+
+  it("an untouched trailing newline follows theirs", () => {
+    const r = merge3("a\nb\n", "a\nb\n", "a\nb");
+    expect(r.merged).toBe("a\nb");
+  });
+});

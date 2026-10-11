@@ -105,6 +105,14 @@ export function merge3(base: string, mine: string, theirs: string): MergeResult 
   }
   while (cursor < baseLines.length) out.push(baseLines[cursor++]);
 
-  const trailing = base.endsWith("\n") || mine.endsWith("\n") ? "\n" : "";
-  return { merged: out.join("\n") + (out.length ? trailing : ""), conflict };
+  // trailing newline follows USER precedence: if the user's side changed
+  // it (deleted or added it), their choice wins; otherwise theirs' stands
+  const mineChangedTrailing = mine.endsWith("\n") !== base.endsWith("\n");
+  const trailing = mineChangedTrailing
+    ? mine.endsWith("\n")
+    : theirs.endsWith("\n");
+  return {
+    merged: out.join("\n") + (out.length && trailing ? "\n" : ""),
+    conflict,
+  };
 }

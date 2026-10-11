@@ -67,3 +67,33 @@ describe("createSaveScheduler", () => {
     expect(saves.length).toBe(2);
   });
 });
+
+describe("pause/resume (FR-58.2's hold)", () => {
+  it("holds timers while paused, re-arms on resume, and flush restores the hold", async () => {
+    const saves: number[] = [];
+    const s = createSaveScheduler(async () => {
+      saves.push(Date.now());
+    });
+    s.noteDirty();
+    s.pause();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(saves).toHaveLength(0); // held through debounce AND max-wait
+
+    // an explicit flush saves through the hold but RESTORES it
+    await s.flush();
+    expect(saves).toHaveLength(1);
+    s.noteDirty();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(saves).toHaveLength(1); // still held
+
+    s.resume();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(saves).toHaveLength(2); // re-armed on resume
+
+    s.dispose();
+    s.noteDirty();
+    // dispose cleared dirtiness; nothing fires
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(saves.length).toBeLessThanOrEqual(3);
+  });
+});

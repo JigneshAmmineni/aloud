@@ -401,3 +401,114 @@ describe("useEditor round-2 blockers", () => {
     expect(ok).toBe(true); // Talk unblocked by the user's explicit choice
   });
 });
+
+describe("useEditor round-3 blockers", () => {
+  it("a no-op edit (the CodeMirror echo) never re-dirties — discard stays clean", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    authedFetch.mockResolvedValue(jsonResponse(500, {})); // saves fail
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "doomed");
+    });
+    await act(async () => {
+      await result.current.flushAll();
+    });
+    act(() => {
+      result.current.discard(1);
+    });
+    expect(result.current.tabs[0].dirty).toBe(false);
+    act(() => {
+      // the editor's onChange echo after the discard dispatch: same text
+      result.current.edit(1, GET_BODY.content);
+    });
+    expect(result.current.tabs[0].dirty).toBe(false); // still clean
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.flushAll();
+    });
+    expect(ok).toBe(true); // Talk stays unblocked
+  });
+
+  it("a rename during an in-flight save stays dirty and lands next save", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    let resolveSave: (r: Response) => void = () => {};
+    authedFetch.mockImplementationOnce(
+      () => new Promise<Response>((r) => (resolveSave = r)),
+    );
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { updated_at: "TOK-2", char_count: 2 }),
+    );
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "v2");
+    });
+    let flush1: Promise<boolean>;
+    await act(async () => {
+      flush1 = result.current.flushAll(); // save 1 in flight
+      await Promise.resolve();
+      result.current.rename(1, "renamed-mid-save.md"); // during the save
+      resolveSave(jsonResponse(200, { updated_at: "TOK-1", char_count: 2 }));
+      await flush1;
+    });
+    // the rename was NOT silently dropped
+    expect(result.current.tabs[0].dirty).toBe(true);
+    await act(async () => {
+      await result.current.flushAll();
+    });
+    const puts = authedFetch.mock.calls.filter(([, i]) => i?.method === "PUT");
+    const last = JSON.parse(puts[puts.length - 1][1].body);
+    expect(last.title).toBe("renamed-mid-save.md");
+    expect(result.current.tabs[0].dirty).toBe(false);
+  });
+
+  it("an unchanged title is never sent — legacy over-cap titles keep saving", async () => {
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { ...GET_BODY, title: "x".repeat(500) }),
+    );
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { updated_at: "TOK-1", char_count: 2 }),
+    );
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.edit(1, "v2");
+    });
+    await act(async () => {
+      await result.current.flushAll();
+    });
+    const put = authedFetch.mock.calls.find(([, i]) => i?.method === "PUT");
+    expect("title" in JSON.parse(put![1].body)).toBe(false);
+    expect(result.current.tabs[0].saveState).toBe("saved");
+  });
+
+  it("a local rename survives a 409 (user precedence covers titles)", async () => {
+    authedFetch.mockResolvedValueOnce(jsonResponse(200, GET_BODY)); // open
+    authedFetch.mockResolvedValueOnce(
+      jsonResponse(409, {
+        content: GET_BODY.content,
+        updated_at: "TOK-409",
+        title: "server-renamed.md",
+      }),
+    );
+    const { result } = renderHook(() => useEditor());
+    await act(async () => {
+      await result.current.open(doc(1));
+    });
+    act(() => {
+      result.current.rename(1, "my-rename.md");
+    });
+    await act(async () => {
+      await result.current.flushAll();
+    });
+    expect(result.current.tabs[0].title).toBe("my-rename.md");
+    expect(result.current.tabs[0].baseTitle).toBe("server-renamed.md");
+  });
+});

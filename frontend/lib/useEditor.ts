@@ -27,6 +27,10 @@ const BACKOFF_CAP_MS = 30_000;
 export type EditorTab = {
   id: number;
   title: string;
+  /** the last title synced with the server — the title is SENT only when
+   * it differs (a legacy over-cap stored title must not brick saving),
+   * and title dirtiness counts toward tab dirtiness */
+  baseTitle: string;
   format: string;
   /** last content synced with the server (merge base) */
   base: string;
@@ -132,6 +136,7 @@ export function useEditor({
         return;
       const sent = tab.buffer;
       const sentTitle = tab.title;
+      const renaming = sentTitle !== tab.baseTitle;
       patchTab(id, { saveState: "saving" });
       let res: Response;
       try {
@@ -141,9 +146,9 @@ export function useEditor({
           body: JSON.stringify({
             content: sent,
             base_updated_at: tab.baseToken,
-            // always carried: a rename rides the same CAS statement, and
-            // re-sending an unchanged title is a no-op SET
-            title: sentTitle,
+            // only an actual rename rides along — re-sending a legacy
+            // over-cap stored title would 400 every save forever
+            ...(renaming ? { title: sentTitle } : {}),
           }),
         });
       } catch {
@@ -159,12 +164,18 @@ export function useEditor({
         };
         retries409.current.set(id, 0);
         failStreak.current.set(id, 0);
-        patchTab(id, (t) => ({
-          base: sent,
-          baseToken: body.updated_at,
-          dirty: t.buffer !== sent,
-          saveState: t.buffer !== sent ? "unsaved" : "saved",
-        }));
+        patchTab(id, (t) => {
+          // a rename issued DURING this save stays dirty (round-3: the
+          // buffer-only recompute dropped it with a lying "saved" chip)
+          const stillDirty = t.buffer !== sent || t.title !== sentTitle;
+          return {
+            base: sent,
+            baseTitle: sentTitle,
+            baseToken: body.updated_at,
+            dirty: stillDirty,
+            saveState: stillDirty ? "unsaved" : "saved",
+          };
+        });
         onSaved?.({
           id,
           title: sentTitle,
@@ -198,8 +209,11 @@ export function useEditor({
           return {
             buffer: r.merged,
             base: cur.content,
+            // user precedence covers renames too: a local rename
+            // survives the 409; otherwise the server's title is truth
+            title: t.title !== t.baseTitle ? t.title : cur.title,
+            baseTitle: cur.title,
             baseToken: cur.updated_at,
-            title: cur.title,
             dirty: true,
             conflict: t.conflict || r.conflict,
             saveState: attempt >= MAX_409_RETRIES ? "error" : "unsaved",
@@ -252,6 +266,7 @@ export function useEditor({
       const tab: EditorTab = {
         id: doc.id,
         title: doc.title,
+        baseTitle: doc.title,
         format: doc.format,
         base: "",
         baseToken: null,
@@ -292,6 +307,7 @@ export function useEditor({
         buffer: body.content,
         baseToken: body.updated_at,
         title: body.title,
+        baseTitle: body.title,
         format: body.format,
       });
     },
@@ -300,6 +316,13 @@ export function useEditor({
 
   const edit = useCallback(
     (id: number, text: string) => {
+      const current = tabsRef.current.find((t) => t.id === id);
+      if (!current || current.buffer === text) {
+        // the echo of our own external dispatch (announce merge,
+        // discard) — re-dirtying here broke discard-on-terminal and
+        // re-PUT every clean announce (round-3 blocker 2)
+        return;
+      }
       patchTab(id, (t) => ({
         buffer: text,
         dirty: true,
@@ -315,7 +338,11 @@ export function useEditor({
   const rename = useCallback(
     (id: number, title: string) => {
       if (!title.trim()) return; // the server would 400; keep the old name
-      patchTab(id, { title, dirty: true, saveState: "unsaved" });
+      patchTab(id, (t) => ({
+        title,
+        dirty: true,
+        saveState: t.stalled || t.terminal ? t.saveState : "unsaved",
+      }));
       schedulers.current.get(id)?.noteDirty();
     },
     [patchTab],
@@ -386,6 +413,7 @@ export function useEditor({
       conflictSnaps.current.delete(id);
       patchTab(id, (t) => ({
         buffer: t.base,
+        title: t.baseTitle, // a doomed rename reverts with the content
         dirty: false,
         saveState: "saved",
         stalled: false,
@@ -452,12 +480,14 @@ export function useEditor({
         const wasDirty =
           tabsRef.current.find((t) => t.id === doc.id)?.dirty ?? false;
         patchTab(doc.id, (t) => {
+          const titleDirty = t.title !== t.baseTitle;
           if (!t.dirty) {
             return {
               base: theirs,
               buffer: theirs,
               baseToken: token,
-              title: doc.title ?? t.title,
+              title: titleDirty ? t.title : (doc.title ?? t.title),
+              baseTitle: doc.title ?? t.baseTitle,
             };
           }
           const r = merge3(t.base, t.buffer, theirs);
@@ -477,7 +507,8 @@ export function useEditor({
             dirty: true,
             saveState: "unsaved",
             conflict: t.conflict || r.conflict,
-            title: doc.title ?? t.title,
+            title: titleDirty ? t.title : (doc.title ?? t.title),
+            baseTitle: doc.title ?? t.baseTitle,
           };
         });
         if (wasDirty) {

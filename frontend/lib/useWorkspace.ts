@@ -162,6 +162,12 @@ export function useWorkspace(enabled: boolean) {
             "this save put the attached set over the character budget — " +
               "detach something before your next session",
           );
+        } else {
+          // back under budget: the save-overflow warning clears itself
+          // (only its own message — never a live attach refusal)
+          setBudgetError((prev) =>
+            prev && prev.startsWith("this save") ? null : prev,
+          );
         }
       }
       setState((s) =>

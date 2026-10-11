@@ -108,6 +108,27 @@ export function updateDocMeta(
   return { ...state, docs: [updated, ...state.docs.filter((d) => d.id !== id)] };
 }
 
+/** FR-58.1's Talk gate, extracted so the WIRING is testable: Talk
+ * refuses when the flush could not land every dirty buffer — starting
+ * anyway would hand the agent superseded text with only a quiet
+ * indicator as the clue. */
+export async function guardTalk(
+  flushAll: () => Promise<boolean>,
+  talk: (ids: number[]) => Promise<void> | void,
+  attachedIds: number[],
+  onRefused: (message: string) => void,
+): Promise<boolean> {
+  const ok = await flushAll();
+  if (!ok) {
+    onRefused(
+      "your latest edits haven't saved — fix or discard them, then tap Talk",
+    );
+    return false;
+  }
+  await talk(attachedIds);
+  return true;
+}
+
 /** FR-52's download filename: derives from an untrusted 🔒 title — path
  * separators and control characters stripped, length-capped, empty →
  * document-{id}; the extension is .md for markdown and .txt for text AND

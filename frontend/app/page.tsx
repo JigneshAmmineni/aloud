@@ -12,7 +12,7 @@ import { auth } from "@/lib/firebase";
 import { useAloudSession } from "@/lib/useAloudSession";
 import { useEditor } from "@/lib/useEditor";
 import { useWorkspace } from "@/lib/useWorkspace";
-import type { AnnouncedDoc, WorkspaceDoc } from "@/lib/workspace";
+import { guardTalk, type AnnouncedDoc, type WorkspaceDoc } from "@/lib/workspace";
 
 const STATUS: Record<string, string> = {
   idle: "",
@@ -56,6 +56,7 @@ export default function Home() {
     if (!anyDirty) return;
     const warn = (e: BeforeUnloadEvent) => {
       e.preventDefault();
+      e.returnValue = ""; // WebKit needs it — NFR-3 names mobile first
     };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
@@ -67,14 +68,7 @@ export default function Home() {
   const attachedIds = workspace.attachedIds;
   const guardedTalk = useCallback(async () => {
     setFlushError(null);
-    const ok = await flushAll();
-    if (!ok) {
-      setFlushError(
-        "your latest edits haven't saved — fix or discard them, then tap Talk",
-      );
-      return;
-    }
-    await talk(attachedIds);
+    await guardTalk(flushAll, talk, attachedIds, setFlushError);
   }, [flushAll, talk, attachedIds]);
 
   // in-app navigation is a flush point too (client-side transitions

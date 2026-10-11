@@ -143,3 +143,26 @@ describe("downloadFilename", () => {
     expect(downloadFilename("x".repeat(500), "text", 7).length).toBeLessThan(130);
   });
 });
+
+describe("guardTalk (FR-58.1's Talk gate, the wiring itself)", () => {
+  it("a failed flush refuses Talk with the message; a clean one proceeds", async () => {
+    const { guardTalk } = await import("@/lib/workspace");
+    const talks: number[][] = [];
+    const errors: string[] = [];
+    const talk = async (ids: number[]) => {
+      talks.push(ids);
+    };
+
+    expect(
+      await guardTalk(async () => false, talk, [1, 2], (m) => errors.push(m)),
+    ).toBe(false);
+    expect(talks).toHaveLength(0); // the session never started
+    expect(errors[0]).toContain("haven't saved");
+
+    expect(
+      await guardTalk(async () => true, talk, [1, 2], (m) => errors.push(m)),
+    ).toBe(true);
+    expect(talks).toEqual([[1, 2]]);
+    expect(errors).toHaveLength(1);
+  });
+});
