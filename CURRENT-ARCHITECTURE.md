@@ -214,7 +214,11 @@ frontend/     Next.js app: / (session console + document workspace), /login,
               editor-hook lanes)
 .github/workflows/  ci.yml (ruff+pytest+Postgres service+vitest+build),
               claude.yml (@claude), claude-code-review.yml (auto-review)
-Caddyfile, docker-compose.yml (dev), docker-compose.prod.yml (prod)
+Caddyfile, docker-compose.yml (dev; the backend runs
+              scripts/dev_watch.py — explicit-polling reload, because
+              Windows bind mounts emit no inotify events in-container and
+              uvicorn --reload silently serves stale code),
+              docker-compose.prod.yml (prod)
 ```
 
 Two architectural seams everything hangs on:
