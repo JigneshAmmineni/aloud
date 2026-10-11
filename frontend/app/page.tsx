@@ -15,7 +15,7 @@ import { useWorkspace } from "@/lib/useWorkspace";
 import type { AnnouncedDoc, WorkspaceDoc } from "@/lib/workspace";
 
 const STATUS: Record<string, string> = {
-  idle: "tap to start thinking out loud",
+  idle: "",
   connecting: "warming up…",
   ending: "wrapping up…",
   listening: "listening",
