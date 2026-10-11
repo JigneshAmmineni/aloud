@@ -197,6 +197,12 @@ From single upload-at-start + copy-paste artifacts to a real document workspace.
     re-render the open editor. CRDT (Yjs) rejected: cheap client-side but
     the server would become a CRDT peer (update-log storage, agent ops
     translated) — replaces the storage model for a rare case.
+  - **Versioning / undo (decided 2026-10-10):** v1 is **one-step undo** —
+    a `previous_content` 🔒 column written on every edit (agent or user),
+    so "undo that" restores the pre-edit text; a full
+    `document_versions` history table is the later shape if one step
+    proves too shallow. Until it lands, "undo" is a compensating edit —
+    there is no version control, a stated v1 acceptance of FR-53.
   - **Race cases and their required resolutions** (the spec's checklist):
     1. User types, agent idle → autosave writes; no race.
     2. Agent edits, user buffer clean → announce re-renders; no race.
