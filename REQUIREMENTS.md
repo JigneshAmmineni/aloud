@@ -1200,9 +1200,9 @@ extends. Four design principles govern every FR below:
 2. **The agent is the editor; the UI is a viewer.** The workspace is
    defined as tools of the §4.10 agent — the roadmap's charter for this
    feature: list/search/read/create/edit run through the loop's registry. The
-   browser renders, downloads, and uploads; it never edits content.
-   User-side editing and two-way co-editing are explicitly later (own
-   spec).
+   browser renders, downloads, and uploads — and, once §4.12 lands,
+   edits directly through FR-56's save, the two writers reconciling
+   by FR-58's merge rules.
 3. **Content is 🔒, metadata is not, admin stays blind.** `title` and
    `content` are dedicated sensitive columns (NFR-6) — filenames included:
    the existing log discipline already treats filenames as content-class.
@@ -1216,8 +1216,10 @@ extends. Four design principles govern every FR below:
    same data-channel server-message path the panel already consumes
    (FR-45's upsert), renamed to the document vocabulary.
 
-Out of scope, deliberately: multiple/adjustable preview panes and live
-co-editing (later, own spec — roadmap); mid-conversation uploads
+Out of scope, deliberately: multiple/adjustable preview panes
+(floating windows were later considered and rejected — §4.12);
+user-side editing and co-editing: **specced by §4.12**;
+mid-conversation uploads
 (staged on the roadmap: on-request reads are feature 4's first
 follow-up, no context-engine dependency; proactive pickup is feature
 5, which also deprecates the upload-before-session flow);
@@ -2321,6 +2323,312 @@ This block remains as the index of what changed.
 | `MAX_DOC_CHARS` (per document, post-extraction) | 200,000 | unchanged |
 | `MAX_TOTAL_CHARS` (per-session injected block, FR-21) | 400,000 | unchanged |
 | Editable formats (`edit_document` gate) | `markdown`, `text` | `db/` documents repo (the gate is `AND format` in the UPDATE predicate; the tool owns the steering message) |
+
+---
+
+### 4.12 Workspace v2 — direct editing & the editor pane
+
+Feature 4's first follow-up (ROADMAP "Workspace v2", decided
+2026-10-10): the user edits documents directly in the workspace, in a
+Claude-desktop-style file UI, while the voice session stays live. The
+concurrency model was decided against CRDT (ROADMAP records the
+rejection rationale and the six race cases this section's tests
+enumerate): **the server row is the buffer** — the editor autosaves on a
+short debounce, so the agent always reads live state; agent edits stay
+content-anchored (FR-53.4's occurrence predicate is the version check);
+announces and the FR-52/53 registry carry changes back. **Explicit
+owner decision: on conflict, USER edits take precedence.**
+
+Design principles, same as §4.11's: every gate inside the statement
+that needs it; steering/refusals visible, never silent; pure logic in
+testable modules; the FR-54 sanitization rules are untouched and apply
+to every rendered view this section adds.
+
+- **FR-56** The user can save a document's content (and optionally
+  rename it) over HTTP: `PUT /documents/{id}` replaces the stored
+  content, owner-scoped via `get_current_user_id` like every workspace
+  route. Mechanics:
+  - **The success response is the client's next base**: `200` returns
+    `{updated_at, char_count}` — without the fresh `updated_at` the
+    editor's next save would 409 against its own previous one, and
+    `char_count` is what updates the list row and the attach
+    accounting after the user's own save (the announce path only
+    covers agent edits; a user growing an attached document must move
+    the budget line and the refusal threshold too). **The base is an
+    OPAQUE token, echoed byte-for-byte and never parsed or
+    reformatted**: `updated_at` carries microseconds, a JS `Date`
+    round-trip drops them, and a client that reformats the value
+    409s every save in the product forever — so the client's
+    `base_updated_at` is the exact string from its last 200/409/GET,
+    and the mandated regression sits at the CLIENT boundary (vitest:
+    the string from the 200 is byte-identical to what the next PUT
+    sends), where the backend-only round-trip test cannot see the
+    bug.
+  - **Verification is local (`get_current_user_id`) — stated, not
+    implied by analogy**: unlike `POST /documents` (FR-29/51:
+    provisions the users row, grows the corpus), a save writes only
+    rows the account already owns, quota-bounded — a disabled
+    account can overwrite its own documents for the residual token
+    hour, exactly as its live session's edit tools already allow,
+    and cannot grow anything. FR-29's set is deliberately unchanged.
+  - **Rate-limited per user, sized for its legitimate producer**:
+    `DOCUMENT_SAVE_RATE_LIMIT` (default 120/min) sits well above
+    FR-58.1's max-wait save cadence, and a 429 lands in FR-58.1's
+    retryable class. The write amplification is stated, not
+    discovered: a large `content` lives in TOAST and every save
+    rewrites and WALs the chain, so the ceiling on disk churn is
+    this limiter plus FR-58.3's bounded retries — with FR-51's disk
+    alert as the standing backstop.
+  - An optional `title` renames in the same statement (same CAS).
+    An empty-after-strip title is a 400 (`create_document`'s empty
+    guard, applied to the one field FR-57.1 leaves on screen — a
+    blank row in a list of 200 is unidentifiable); length is capped
+    at `TITLE_MAX_CHARS` (default 200; knob row below — uploads are
+    bounded incidentally by filenames, a rename by nothing).
+    **Storage keeps the user's bytes**: sanitization stays at
+    render/download time (FR-52/54's rule) — there is no
+    storage-time title rule, and rename must not invent one that
+    makes renamed and uploaded titles different kinds of stored
+    thing. Rename is part of this FR because an editor UI makes it a
+    baseline expectation — the list reflects it on the response, and
+    the registry notification carries **content AND title**
+    (FR-53.8's block header names the file; a rename shipping only
+    content would leave every live session addressing the old name).
+  - The save carries **compare-and-swap**: the request body is
+    `{content, base_updated_at}` (null for a never-edited row), and the
+    UPDATE's own WHERE requires the stored `updated_at` to equal the
+    base (`IS NOT DISTINCT FROM` — NULL-safe). A moved base returns
+    **409 with the current row** (`content`, `updated_at`) so the
+    client merges and retries — the agent-landed-first race (ROADMAP
+    case 4) becomes a merge, never a silent overwrite of an edit the
+    agent already reported as successful.
+  - The **format gate and growth ceiling transfer from FR-53**: pdf
+    refuses (read-only extracted text), and
+    `length(content) <= max(MAX_DOC_CHARS, current_length)` in the same
+    predicate — a shrinking save on an over-ceiling row succeeds.
+  - **No usage event** (nothing was spent — the FR-32 vocabulary
+    records the agent's work, not the user's own typing); a structured
+    log event carries the document id and char count, never content.
+  - **A zero rowcount resolves through FR-53.4's diagnostic-read
+    rule** (generalized there to every refused write) with the
+    stated precedence: not-found/not-owned 404 → format gate 4xx →
+    stale base **409 + current row** → growth ceiling 4xx naming the
+    limit. A save that is both stale and over-ceiling answers 409
+    first, merges, and then meets the ceiling refusal — never the
+    merge-retry-forever loop a bare 409 would produce.
+  - **Live sessions reconcile exactly like agent edits**: a successful
+    save calls the registry's update notification with the saved
+    content in hand — a user edit of an attached document must not
+    leave any live session's block holding pre-edit text. Another
+    browser tab's open *editor* learns of it through its own next save's
+    409 or reload (the FR-55 staleness note extends to v2 unchanged).
+  - Mandated tests: a stale `base_updated_at` → 409 carrying the
+    current content, and the row is untouched; a fresh base saves,
+    bumps `updated_at`, and returns it (saving twice in a row with
+    each response's base succeeds — the self-409 regression); NULL
+    base on a never-edited row saves (the
+    NULL-safe comparison is the test's point); a rename lands with
+    content intact while an empty-after-strip title 400s; a save both
+    stale-based and over-ceiling gets the 409 first and the ceiling
+    refusal after one merge (the precedence, pinned); pdf → 4xx
+    refusal;
+    over-ceiling growth refuses while an over-ceiling shrink saves; the
+    NFR-8 negative (user B's save on user A's id is not-found and
+    writes nothing); a registered provider's section carries the saved
+    content at its next build; no usage event row is written.
+- **FR-57** The workspace becomes a file-explorer-with-editor layout
+  (the Claude-desktop shape; FR-54's list/preview amended in place by
+  this section once it lands):
+  - **FR-57.1** The file list shows **names only** — plus a
+    right-aligned per-row `char_count`, kept deliberately: it is the
+    attach budget's unit, and FR-51's visible refusal must let the
+    user see WHICH document to drop (names alone would tell them
+    they are over budget but not where). FR-54's other metadata
+    columns retire, and with them the click-a-column affordance —
+    the sort control becomes a field + direction picker over the
+    same fields (name, type, source, created, updated, size),
+    newest-activity-first the default. The
+    list pane keeps the Documents toggle, upload button, attach
+    toggles, budget line, delete-with-confirm, and "show older" —
+    those behaviors transfer from FR-54 unchanged.
+  - **FR-57.2** Opening a document (click or double-click) opens it in
+    a **docked editor pane** beside the list — never a floating
+    window (considered and rejected: web-MDI UX trap, unusable on
+    phones). Multiple open documents are **tabs in that one pane**,
+    and **one tab per document**: opening an already-open document
+    focuses its existing tab, never a duplicate. The divider between
+    list and editor drags to resize; on phone widths the editor goes
+    full-width over the list (NFR-3).
+  - **FR-57.3** `markdown` and `text` documents are **editable in
+    place** (CodeMirror-class editor: line numbers, markdown
+    highlighting); markdown gets a **preview/source toggle** whose
+    preview is FR-54's sanitized renderer verbatim — the editing
+    surface never introduces a second render path. `pdf` opens
+    read-only (its FR-53.7 rationale). **Editing is NOT idle-gated**
+    — talking while editing is the point; only upload and the attach
+    toggles keep FR-54's idle gate. The editor pane has loading and
+    error states like FR-54 mandates for the preview (a failed
+    content fetch names itself — never a blank editable buffer that
+    could be "saved" over a document that failed to load), and
+    deleting a document closes its tab the way FR-55 closes the
+    preview pane.
+  - **FR-57.4** While the workspace is open, the session console
+    **docks into the bottom of the list pane** (~30% of its height):
+    Talk/End control, waveform, and status stay fully live — talking
+    while editing is the product's signature moment, so the console
+    shrinks rather than competes. Closing the workspace restores the
+    full console.
+    **On phone widths the console survives the editor's full-width
+    overlay (FR-57.2)**: a compact console bar — Talk/End and status,
+    waveform optional — stays pinned outside the editor overlay, or
+    the two FRs would compose into no End control exactly during the
+    signature moment on the platform NFR-3 names first. Mandated
+    client test: with the editor full-width, the End control remains
+    rendered and operable.
+  - Deliberately absent from this slice, stated not overlooked:
+    **folders** (a nullable `folder` column is the cheap future
+    shape; ROADMAP), **PDF output** ("make it a pdf" — its own
+    follow-up), and **user-created blank documents** — in a
+    voice-first product the user's documents arrive by upload or by
+    asking the agent to write; a "new document" button is cheap to
+    add later (create via FR-56's machinery) if dogfooding shows
+    people reaching for it.
+  - Mandated client tests (the FR-54 vitest lane): one-tab-per-document
+    (re-open focuses); the preview toggle renders through the same
+    sanitized component the existing renderer tests pin; pdf opens
+    without an editable surface; **a failed content fetch yields the
+    error state with NO editable buffer and no save issued** — the
+    worst outcome in the feature is a blank buffer autosaving over a
+    document that failed to load, and it is also the cheapest test
+    in it; and the responsive case below (FR-57.4).
+- **FR-58** Unsaved keystrokes and concurrent edits resolve by the
+  decided model — autosave window + line-level merge, user precedence:
+  - **FR-58.1** The editor **autosaves on a ~1s trailing debounce
+    paired with a hard max-wait while dirty** (`AUTOSAVE_DEBOUNCE_MS`
+    1000 / `AUTOSAVE_MAX_WAIT_MS` 3000): a debounce alone fires only
+    on a typing GAP, so continuous typing would leave the server
+    minutes behind ("read my notes back" would read replaced text) —
+    the **max-wait is the dirty-window ceiling**, the debounce just
+    keeps quiet moments cheap. Flush points: tab switch, editor
+    close, workspace close, in-app route changes (client-side
+    navigation never fires beforeunload — the router guard flushes
+    and waits), and before `/start`. **If the pre-`/start` flush
+    fails, Talk refuses with a visible error** ("your latest edits
+    haven't saved") — proceeding would open the session on
+    superseded text with only a quiet indicator as the clue; the
+    user retries, or explicitly discards the unsaved changes and
+    proceeds. **Save state is visible**: a quiet
+    saved/saving/unsaved indicator. **Failures classify** — silence
+    here is a data-loss path: RETRYABLE (network, 5xx, 429,
+    401-then-refresh) keeps the buffer and retries with backoff;
+    TERMINAL (404 — deleted elsewhere; 403; the format gate; the
+    ceiling) **stops retrying, names what happened, and offers the
+    buffer for download or copy** — a warning is not a recovery
+    path, and a page-lifetime 404 retry loop with the only copy of
+    the user's text in an unexportable buffer is the exact outcome
+    this clause exists to prevent. While unsaved changes exist,
+    leaving the page gets the beforeunload warning; a failed flush
+    at tab close keeps the tab open. Mandated client tests (fake
+    timers): the debounce fires; a continuously-dirty buffer saves
+    at least once per max-wait; the pre-`/start` flush fires and its
+    failure blocks Talk; a terminal failure stops the retry loop and
+    exposes the buffer.
+  - **FR-58.2** An agent edit arriving while the buffer is **clean**
+    re-renders the open editor in place (the FR-55 announce path,
+    refetch-on-omitted included — extended to open editors, not just
+    the preview). Arriving while the buffer is **dirty**, the client
+    runs a **three-way merge** (base = last synced content, mine =
+    buffer, **theirs = the announce's content — or, when the
+    announce omitted it over `ANNOUNCE_CONTENT_MAX_CHARS`, which is
+    the COMMON case past 16k chars, a refetch of
+    `GET /documents/{id}`**; the pending autosave HOLDS until that
+    refetch lands — chosen over letting it 409 into FR-58.3, one
+    round trip instead of two) at **line
+    granularity** — word-level merging was considered and rejected
+    (stitching one sentence from two authors produces fluent
+    nonsense; ROADMAP). Disjoint line-hunks merge silently, both
+    edits survive. Overlapping hunks: **the user's version stays**
+    (the explicit precedence decision) and a visible banner offers
+    "apply theirs" — stated cost, accepted: the agent's edit landed
+    server-side and reported success, so user-wins undoes it unless
+    the banner is taken, and the agent rediscovers on its next read.
+    Blind-apply (losing keystrokes) and blind-ignore (the next
+    autosave silently erasing the agent's edit) are both forbidden
+    outcomes the tests pin.
+  - **FR-58.3** A 409 on save (the server moved first — agent edit or
+    another browser tab) resolves the same way: merge the 409's
+    current content against base and buffer, retry the save with the
+    new base; an overlapping hunk banners with the user's version in
+    the buffer. **The merge-retry loop is bounded**: three attempts
+    with backoff, then stop — buffer intact, a plain "someone else
+    is editing this document" state, manual retry — because two
+    instances autosaving the same row can otherwise spin merge+PUT
+    at ~1/s each, rewriting a 200k column forever with neither user
+    told anything (the bound plus FR-56's limiter is the ceiling on
+    case 5's honest worst case). Within one app instance this case
+    cannot arise from the app itself (one tab per document,
+    FR-57.2) — it is the two-browser-instances case, unpreventable
+    by design.
+  - The merge is a **pure module** (base/mine/theirs in, merged +
+    conflict flag out) in the vitest lane. Mandated tests, mapped to
+    ROADMAP's six race cases: disjoint-hunk merge keeps both edits
+    (case 3's clean half); overlapping-hunk keeps the user's lines
+    and raises the conflict flag (case 3's banner half, cases 4/6);
+    the 409 path re-merges and retries with the fresh base (cases
+    4/5); a dirty buffer is never replaced wholesale by an announce
+    (the forbidden blind-apply); an omitted-content announce on a
+    dirty buffer still merges (the refetched theirs); case 1 (the
+    autosave actually writing — FR-58.1's fake-timer tests) and case
+    2 (a clean-buffer announce re-rendering the open EDITOR — the
+    existing FR-55 cases pin the preview pane, not the editor) are
+    mapped explicitly; backend CAS tests under FR-56 cover
+    the server half.
+- **FR-59** The §4.11 leftovers ride this feature's implementation
+  branch as its opening commits (the standing process), each with its
+  required outcome stated here so the spec of record is this
+  document, not a PR thread:
+  - `GET /documents` `offset` gains an **upper NUMERIC bound** (a
+    hand-edited `?offset=10**19` is an unencodable bigint → 500) —
+    never a clamp to `total`, which would return the last page and
+    contradict FR-52's authoritative "past `total` returns an empty
+    page".
+  - A non-integral attach id is **skipped, not truncated** to a
+    neighboring document's id, and the test pins the skip (today it
+    pins the truncation).
+  - CURRENT-ARCHITECTURE.md's workspace line describes the shipped
+    flat list, not the retired two-list layout.
+  - The six nits: the pager fold counts (or states as slack) the
+    newline separators against `READ_DOCUMENT_MAX_CHARS`; the
+    diagnostic read selects NAMED columns, not mode-dependent
+    positions; `insert_document_line`'s column list has one source;
+    `search_workspace` folds its separate `count(*)` into the scan;
+    `app/ratelimit.py` drops the function-local imports; the client's
+    `deleteDoc` decrements `total` so "show older" never advertises a
+    phantom row.
+
+Knobs (client-side; the server knobs are §4.11's):
+
+| Knob | Default | Where |
+|---|---|---|
+| `AUTOSAVE_DEBOUNCE_MS` (quiet-gap save; NOT the ceiling) | 1000 | `frontend/lib` editor module |
+| `AUTOSAVE_MAX_WAIT_MS` (the dirty-window ceiling under continuous typing) | 3000 | `frontend/lib` editor module |
+| `DOCUMENT_SAVE_RATE_LIMIT` (`PUT /documents/{id}` per-user; above the autosave cadence, 429 is retryable) | 120/min | `app/ratelimit.py` |
+| `TITLE_MAX_CHARS` (rename cap; uploads are filename-bounded, a rename by nothing) | 200 | `app/` route layer |
+| Editor engine | CodeMirror 6 (`@codemirror/lang-markdown`) | `frontend/components` editor |
+
+**Amendments this feature makes** (recorded here, applied in place at
+the amended text; the amended FRs stay authoritative for everything
+not named): §4.11 design principle 2 — the browser now edits content
+through FR-56, reconciling by FR-58's rules (the "it never edits
+content" sentence is amended in place). §4.11's out-of-scope list —
+user-side editing/co-editing is specced by this section. FR-54 — the
+metadata columns retire for names + char_count, the sort control
+becomes a field picker, the preview becomes the editor's toggle, and
+the idle gate narrows to upload + attach (FR-57). FR-55 — the pane's
+upsert/tombstone/close-on-delete rules extend to editor tabs
+(FR-57/58). FR-51/FR-21 — the attach budget and refusal threshold
+move on user saves too, via FR-56's `char_count` response. FR-29 —
+deliberately unchanged (FR-56 states local verification and why).
 
 ---
 
