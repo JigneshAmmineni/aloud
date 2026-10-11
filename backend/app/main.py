@@ -391,9 +391,20 @@ def _coerce_attach_ids(raw) -> list[int]:
     ids: list[int] = []
     seen: set[int] = set()
     for value in raw if isinstance(raw, list) else []:
-        try:
+        # FR-59: a NON-INTEGRAL id is skipped like an unknown one — int()
+        # would truncate 14.9 onto a NEIGHBORING document's id
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            doc_id = value
+        elif isinstance(value, float) and value.is_integer():
             doc_id = int(value)
-        except (TypeError, ValueError):
+        elif isinstance(value, str):
+            try:
+                doc_id = int(value)
+            except ValueError:
+                continue
+        else:
             continue
         if doc_id in seen:
             continue

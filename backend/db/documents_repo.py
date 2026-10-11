@@ -135,7 +135,10 @@ async def list_workspace_rows(
     total so truncation is visible. `offset` is clamped >= 0 (FastAPI's int
     coercion accepts negatives and Postgres errors on OFFSET -1); an offset
     past total returns an empty page with the same total, never an error."""
-    offset = max(0, offset)
+    # FR-59: clamped at BOTH ends — negative 500s on OFFSET -1, and a
+    # hand-edited ?offset=10**19 is an unencodable bigint 500. Numeric
+    # bound, never a clamp to total: past-total stays an empty page.
+    offset = max(0, min(offset, 1_000_000_000))
     async with user_scoped_session(user_id) as db:
         total = (
             await db.execute(
@@ -342,11 +345,15 @@ def fold_pages(content: str, max_chars: int, max_lines: int) -> list[list[PageEn
             pages.append(cur)
             cur, cur_chars = [], 0
             continue
+        # the +1 counts the newline separator joining this line to the
+        # page (FR-59: a page must not exceed the char knob by
+        # PAGE_MAX_LINES-1 uncounted separators); the first line pays none.
         # (cur empty implies room == max_chars, so one condition covers
         # both the fits-here and fits-a-fresh-page cases)
-        if len(rest) <= room:
+        sep = 1 if cur else 0
+        if len(rest) + sep <= room:
             cur.append(PageEntry(i + 1, rest, False))
-            cur_chars += len(rest)
+            cur_chars += len(rest) + sep
             i += 1
             offset = 0
         elif cur:
@@ -498,7 +505,8 @@ async def search_workspace(user_id: str, query: str) -> WorkspaceSearchResult:
         r"""
         WITH scanned AS (
             SELECT id, title, kind, format, content,
-                   COALESCE(updated_at, created_at) AS activity
+                   COALESCE(updated_at, created_at) AS activity,
+                   count(*) OVER () AS total_docs
             FROM documents
             WHERE user_id = :uid
             ORDER BY COALESCE(updated_at, created_at) DESC, id DESC
@@ -513,35 +521,31 @@ async def search_workspace(user_id: str, query: str) -> WorkspaceSearchResult:
             FROM scanned
             WHERE title ILIKE :pat ESCAPE '\' OR content ILIKE :pat ESCAPE '\'
         )
-        SELECT id, title, kind, format, title_hit, content_hit,
-            CASE WHEN content_hit THEN
-                1 + length(substr(content, 1, pos - 1))
-                  - length(replace(substr(content, 1, pos - 1), chr(10), ''))
+        SELECT meta.total_docs, meta.scanned_n,
+            h.id, h.title, h.kind, h.format, h.title_hit, h.content_hit,
+            CASE WHEN h.content_hit THEN
+                1 + length(substr(h.content, 1, h.pos - 1))
+                  - length(replace(substr(h.content, 1, h.pos - 1), chr(10), ''))
             END AS line,
-            CASE WHEN content_hit THEN
-                substr(content,
-                       (CASE WHEN pos > :ctx THEN pos - :ctx ELSE 1 END)::int,
+            CASE WHEN h.content_hit THEN
+                substr(h.content,
+                       (CASE WHEN h.pos > :ctx THEN h.pos - :ctx ELSE 1 END)::int,
                        (:snip)::int)
             END AS snippet,
-            CASE WHEN content_hit THEN
-                (length(lower(content))
-                 - length(replace(lower(content), lower(:q), '')))
+            CASE WHEN h.content_hit THEN
+                (length(lower(h.content))
+                 - length(replace(lower(h.content), lower(:q), '')))
                 / length(lower(:q))
             ELSE 0 END AS match_count,
-            count(*) OVER () AS documents_matched
-        FROM hits
-        ORDER BY activity DESC, id DESC
+            count(h.id) OVER () AS documents_matched
+        FROM (SELECT max(total_docs) AS total_docs, count(*) AS scanned_n
+              FROM scanned) meta
+        LEFT JOIN hits h ON true
+        ORDER BY h.activity DESC NULLS LAST, h.id DESC
         LIMIT :results_cap
         """
     )
     async with user_scoped_session(user_id) as db:
-        total = (
-            await db.execute(
-                select(func.count())
-                .select_from(Document)
-                .where(Document.user_id == user_id)
-            )
-        ).scalar_one()
         rows = (
             await db.execute(
                 sql,
@@ -556,6 +560,8 @@ async def search_workspace(user_id: str, query: str) -> WorkspaceSearchResult:
                 },
             )
         ).all()
+    meta = rows[0]  # the meta join guarantees one row even with no hits
+    rows = [r for r in rows if r.id is not None]
     hits = [
         WorkspaceSearchHit(
             id=r.id,
@@ -573,8 +579,8 @@ async def search_workspace(user_id: str, query: str) -> WorkspaceSearchResult:
     return WorkspaceSearchResult(
         hits=hits,
         documents_matched=int(rows[0].documents_matched) if rows else 0,
-        scanned=min(total, SEARCH_SCAN_CAP),
-        scan_truncated=total > SEARCH_SCAN_CAP,
+        scanned=int(meta.scanned_n),
+        scan_truncated=int(meta.total_docs or 0) > SEARCH_SCAN_CAP,
     )
 
 
@@ -891,9 +897,8 @@ async def insert_document_line(
           AND length(content) + length(:txt) + 1 <=
               CASE WHEN length(content) > :ceiling
                    THEN length(content) ELSE :ceiling END
-        RETURNING id, user_id, session_id, source, format, kind,
-                  legacy_artifact_id, created_at, updated_at, title, content
-        """
+        RETURNING {columns}
+        """.format(columns=", ".join(c.name for c in Document.__table__.columns))
     )
     async with user_scoped_session(user_id) as db:
         row = (
@@ -915,17 +920,14 @@ async def insert_document_line(
             _document_edit_event(row.kind, row.format, user_id, session_id, turn_id)
         )
         await db.commit()
+    # built generically from the same single column source as RETURNING —
+    # a new model column cannot silently miss the announce
     doc = Document(
-        user_id=row.user_id,
-        session_id=row.session_id,
-        source=row.source,
-        format=row.format,
-        kind=row.kind,
-        legacy_artifact_id=row.legacy_artifact_id,
-        created_at=row.created_at,
-        updated_at=row.updated_at,
-        title=row.title,
-        content=row.content,
+        **{
+            c.name: getattr(row, c.name)
+            for c in Document.__table__.columns
+            if c.name != "id"
+        }
     )
     doc.id = row.id
     return doc
@@ -963,25 +965,34 @@ async def diagnose_edit_failure(
     multi-match LINE enumeration is string_to_array/strpos-family and runs
     only on Postgres — old_str is model-controlled text, and a regex-based
     lookup on "plan (v2)" would raise mid-turn or quote the wrong lines."""
-    cols = [Document.format, func.length(Document.content)]
+    # named columns (FR-59): a wrong POSITION under mode-dependent lists
+    # would yield a plausible EditDiagnosis, not an exception
+    cols = [
+        Document.format.label("format"),
+        func.length(Document.content).label("cur_len"),
+    ]
     if old_str is not None:
         cols.append(
             (
-                func.length(Document.content)
-                - func.length(func.replace(Document.content, old_str, ""))
-            )
-            / len(old_str)
+                (
+                    func.length(Document.content)
+                    - func.length(func.replace(Document.content, old_str, ""))
+                )
+                / len(old_str)
+            ).label("occurrences")
         )
         cols.append(
             func.length(
                 func.replace(Document.content, old_str, new_str or "")
-            )
+            ).label("new_len")
         )
     else:
         cols.append(
-            func.length(Document.content)
-            - func.length(func.replace(Document.content, "\n", ""))
-            + 1
+            (
+                func.length(Document.content)
+                - func.length(func.replace(Document.content, "\n", ""))
+                + 1
+            ).label("total_lines")
         )
     async with user_scoped_session(user_id) as db:
         row = (
@@ -993,13 +1004,13 @@ async def diagnose_edit_failure(
         ).first()
         if row is None:
             return EditDiagnosis(reason="not_found")
-        format, cur_len = row[0], row[1]
+        format, cur_len = row.format, row.cur_len
         if format not in EDITABLE_FORMATS:
             return EditDiagnosis(reason="not_editable", format=format)
         cap = max(ceiling, cur_len)
 
         if old_str is not None:
-            occurrences, new_len = int(row[2]), int(row[3])
+            occurrences, new_len = int(row.occurrences), int(row.new_len)
             if occurrences == 0:
                 return EditDiagnosis(reason="no_match", format=format)
             if occurrences != required:
@@ -1052,7 +1063,7 @@ async def diagnose_edit_failure(
                 return EditDiagnosis(reason="over_ceiling", format=format)
             return EditDiagnosis(reason="unknown", format=format)
 
-        total_lines = int(row[2])
+        total_lines = int(row.total_lines)
         if insert_line is not None and not (0 <= insert_line <= total_lines):
             return EditDiagnosis(
                 reason="bad_line", format=format, total_lines=total_lines

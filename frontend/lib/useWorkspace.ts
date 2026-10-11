@@ -245,6 +245,8 @@ export function useWorkspace(enabled: boolean) {
         return;
       }
       setState((s) => markDeleted(s, doc.id));
+      // "show older" must not advertise a phantom row after a delete
+      setTotal((t) => Math.max(0, t - 1));
       attachedRef.current.delete(doc.id);
       syncAttached();
     },

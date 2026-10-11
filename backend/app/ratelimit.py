@@ -17,8 +17,10 @@ is the fallback; the backend port is never internet-reachable in prod.
 import time
 from collections import deque
 
-from fastapi import HTTPException, Request
+from fastapi import Depends, HTTPException, Request
 from loguru import logger
+
+from app.auth import AuthedUser
 
 _SWEEP_THRESHOLD = 1024  # drop stale buckets once the dict grows past this
 
@@ -75,10 +77,6 @@ def user_rate_limited(max_requests: int, window_s: float, auth_dep):
     to key on). `auth_dep` must be THE SAME callable the route declares —
     FastAPI's per-request dependency cache then resolves identity once; a
     different callable is a cache miss and a second (local) verify."""
-    from fastapi import Depends
-
-    from app.auth import AuthedUser
-
     buckets: dict[str, deque] = {}
 
     async def dependency(

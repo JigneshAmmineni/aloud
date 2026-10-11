@@ -378,11 +378,13 @@ def test_attach_id_coercion_skips_dedupes_and_caps(monkeypatch):
     length-capped before any query."""
 
     monkeypatch.setattr(main, "MAX_DOCUMENTS_PER_USER", 3)
+    # 14.9 is SKIPPED, never truncated onto document 14 (FR-59); 14.0 is
+    # integral and fine
     assert main._coerce_attach_ids(["12", 13, 13, "old-uuid", None, 14.9]) == [
         12,
         13,
-        14,
     ]
+    assert main._coerce_attach_ids([14.0, True]) == [14]
     assert main._coerce_attach_ids("not-a-list") == []
     assert main._coerce_attach_ids([1, 2, 3, 4, 5]) == [1, 2, 3]
 
