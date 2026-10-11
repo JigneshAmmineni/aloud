@@ -2324,6 +2324,149 @@ This block remains as the index of what changed.
 
 ---
 
+### 4.12 Workspace v2 — direct editing & the editor pane
+
+Feature 4's first follow-up (ROADMAP "Workspace v2", decided
+2026-10-10): the user edits documents directly in the workspace, in a
+Claude-desktop-style file UI, while the voice session stays live. The
+concurrency model was decided against CRDT (ROADMAP records the
+rejection rationale and the six race cases this section's tests
+enumerate): **the server row is the buffer** — the editor autosaves on a
+short debounce, so the agent always reads live state; agent edits stay
+content-anchored (FR-53.4's occurrence predicate is the version check);
+announces and the FR-52/53 registry carry changes back. **Explicit
+owner decision: on conflict, USER edits take precedence.**
+
+Design principles, same as §4.11's: every gate inside the statement
+that needs it; steering/refusals visible, never silent; pure logic in
+testable modules; the FR-54 sanitization rules are untouched and apply
+to every rendered view this section adds.
+
+- **FR-56** The user can save a document's content over HTTP:
+  `PUT /documents/{id}` replaces the stored content, owner-scoped via
+  `get_current_user_id` like every workspace route. Mechanics:
+  - The save carries **compare-and-swap**: the request body is
+    `{content, base_updated_at}` (null for a never-edited row), and the
+    UPDATE's own WHERE requires the stored `updated_at` to equal the
+    base (`IS NOT DISTINCT FROM` — NULL-safe). A moved base returns
+    **409 with the current row** (`content`, `updated_at`) so the
+    client merges and retries — the agent-landed-first race (ROADMAP
+    case 4) becomes a merge, never a silent overwrite of an edit the
+    agent already reported as successful.
+  - The **format gate and growth ceiling transfer from FR-53**: pdf
+    refuses (read-only extracted text), and
+    `length(content) <= max(MAX_DOC_CHARS, current_length)` in the same
+    predicate — a shrinking save on an over-ceiling row succeeds.
+  - **No usage event** (nothing was spent — the FR-32 vocabulary
+    records the agent's work, not the user's own typing); a structured
+    log event carries the document id and char count, never content.
+  - **Live sessions reconcile exactly like agent edits**: a successful
+    save calls the registry's update notification with the saved
+    content in hand — a user edit of an attached document must not
+    leave any live session's block holding pre-edit text. Another
+    browser tab's open *editor* learns of it through its own next save's
+    409 or reload (the FR-55 staleness note extends to v2 unchanged).
+  - Mandated tests: a stale `base_updated_at` → 409 carrying the
+    current content, and the row is untouched; a fresh base saves and
+    bumps `updated_at`; NULL base on a never-edited row saves (the
+    NULL-safe comparison is the test's point); pdf → 4xx refusal;
+    over-ceiling growth refuses while an over-ceiling shrink saves; the
+    NFR-8 negative (user B's save on user A's id is not-found and
+    writes nothing); a registered provider's section carries the saved
+    content at its next build; no usage event row is written.
+- **FR-57** The workspace becomes a file-explorer-with-editor layout
+  (the Claude-desktop shape; FR-54's list/preview amended in place by
+  this section once it lands):
+  - **FR-57.1** The file list shows **names only** (FR-54's metadata
+    columns retire; the sort control stays, acting on the same
+    underlying fields, with newest-activity-first the default). The
+    list pane keeps the Documents toggle, upload button, attach
+    toggles, budget line, delete-with-confirm, and "show older" —
+    those behaviors transfer from FR-54 unchanged.
+  - **FR-57.2** Opening a document (click or double-click) opens it in
+    a **docked editor pane** beside the list — never a floating
+    window (considered and rejected: web-MDI UX trap, unusable on
+    phones). Multiple open documents are **tabs in that one pane**,
+    and **one tab per document**: opening an already-open document
+    focuses its existing tab, never a duplicate. The divider between
+    list and editor drags to resize; on phone widths the editor goes
+    full-width over the list (NFR-3).
+  - **FR-57.3** `markdown` and `text` documents are **editable in
+    place** (CodeMirror-class editor: line numbers, markdown
+    highlighting); markdown gets a **preview/source toggle** whose
+    preview is FR-54's sanitized renderer verbatim — the editing
+    surface never introduces a second render path. `pdf` opens
+    read-only (its FR-53.7 rationale).
+  - **FR-57.4** While the workspace is open, the session console
+    **docks into the bottom of the list pane** (~30% of its height):
+    Talk/End control, waveform, and status stay fully live — talking
+    while editing is the product's signature moment, so the console
+    shrinks rather than competes. Closing the workspace restores the
+    full console.
+  - Folders are deliberately absent from this slice (a nullable
+    `folder` column is the cheap future shape; ROADMAP). PDF *output*
+    ("make it a pdf") is its own follow-up, not here.
+  - Mandated client tests (the FR-54 vitest lane): one-tab-per-document
+    (re-open focuses); the preview toggle renders through the same
+    sanitized component the existing renderer tests pin; pdf opens
+    without an editable surface.
+- **FR-58** Unsaved keystrokes and concurrent edits resolve by the
+  decided model — autosave window + line-level merge, user precedence:
+  - **FR-58.1** The editor **autosaves on a ~1s debounce**
+    (`AUTOSAVE_DEBOUNCE_MS`, default 1000) through FR-56, and
+    **flushes immediately** on tab switch, editor close, workspace
+    close, and before `/start` — the agent must see the live state
+    when the session begins, and the dirty window (the only period
+    the server lags the user's buffer) stays at most one debounce
+    plus a round trip.
+  - **FR-58.2** An agent edit arriving while the buffer is **clean**
+    re-renders the open editor in place (the FR-55 announce path,
+    refetch-on-omitted included). Arriving while the buffer is
+    **dirty**, the client runs a **three-way merge** (base = last
+    synced content, mine = buffer, theirs = announce) at **line
+    granularity** — word-level merging was considered and rejected
+    (stitching one sentence from two authors produces fluent
+    nonsense; ROADMAP). Disjoint line-hunks merge silently, both
+    edits survive. Overlapping hunks: **the user's version stays**
+    (the explicit precedence decision) and a visible banner offers
+    "apply theirs" — stated cost, accepted: the agent's edit landed
+    server-side and reported success, so user-wins undoes it unless
+    the banner is taken, and the agent rediscovers on its next read.
+    Blind-apply (losing keystrokes) and blind-ignore (the next
+    autosave silently erasing the agent's edit) are both forbidden
+    outcomes the tests pin.
+  - **FR-58.3** A 409 on save (the server moved first — agent edit or
+    another browser tab) resolves the same way: merge the 409's
+    current content against base and buffer, retry the save with the
+    new base; an overlapping hunk banners with the user's version in
+    the buffer. Within one app instance this case cannot arise from
+    the app itself (one tab per document, FR-57.2) — it is the
+    two-browser-instances case, unpreventable by design.
+  - The merge is a **pure module** (base/mine/theirs in, merged +
+    conflict flag out) in the vitest lane. Mandated tests, mapped to
+    ROADMAP's six race cases: disjoint-hunk merge keeps both edits
+    (case 3's clean half); overlapping-hunk keeps the user's lines
+    and raises the conflict flag (case 3's banner half, cases 4/6);
+    the 409 path re-merges and retries with the fresh base (cases
+    4/5); a dirty buffer is never replaced wholesale by an announce
+    (the forbidden blind-apply); backend CAS tests under FR-56 cover
+    the server half.
+- **FR-59** The §4.11 leftovers ride this feature's implementation
+  branch as its opening commits (the standing process): PR #20's
+  round-4 findings — the `offset` upper clamp, attach-id
+  truncation-vs-skip (a non-integral id is skipped, not truncated to a
+  neighboring document's id, and the test pins the skip), the stale
+  CURRENT-ARCHITECTURE workspace line, and the six recorded nits.
+
+Knobs (client-side; the server knobs are §4.11's):
+
+| Knob | Default | Where |
+|---|---|---|
+| `AUTOSAVE_DEBOUNCE_MS` (dirty-window ceiling) | 1000 | `frontend/lib` editor module |
+| Editor engine | CodeMirror 6 (`@codemirror/lang-markdown`) | `frontend/components` editor |
+
+---
+
 ## 5. Non-Functional Requirements
 
 ### 5.1 Latency
