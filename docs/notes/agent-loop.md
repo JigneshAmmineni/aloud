@@ -396,3 +396,47 @@ counts (feasible / helpful / cheap).
   str_replace/insert/append). Nothing to adopt beyond cross-checking
   command semantics. Docs: code.claude.com/docs/en/agent-sdk/overview.md,
   platform.claude.com/docs/en/agents-and-tools/tool-use/text-editor-tool.md.
+
+## Blog seeds — common agent problems and how this app dealt with them
+
+(Running list, one entry per problem, written as material for a future
+blog post: "the problems everyone building a voice agent hits, and what
+actually worked here." Add to this section as new ones get dealt with.)
+
+### 1. Model stubbornness: the agent that would not stop creating files
+
+The single most persistent behavior problem so far (feature 4 through
+§4.13): the model defaults to CREATING a new document for any
+write-shaped request — "note that down" mid-discussion of an open doc,
+"create two lists" about the document being discussed — no matter what
+the instructions say. The escalation ladder actually tried, in order:
+
+1. **Tool description** ("create only when explicitly asked") — failed
+   live the same day it shipped. Descriptions steer the happy path;
+   they do not hold against a model's prior.
+2. **System prompt rules** — reduced but did not eliminate it. Each
+   rule got sharper wording, examples, caps for emphasis; the model
+   still reached for create under paraphrase ("create two lists" reads
+   as create-a-thing).
+3. **Deterministic-ish block: the FR-60 judge gate** — a cheap second
+   LLM call in front of the tool ("did the user explicitly ask for a
+   new document? YES/NO"), failing closed, refusal as the tool result.
+   This is the layer that actually held: the model can keep WANTING to
+   create, and it does not matter — the call does not execute.
+4. **The refusal copy turned out to be half the fix.** First version
+   said "add it to an existing document or ask the user" — the model
+   asked, with exactly one obvious target attached. Second version
+   names the default ("the document under discussion, NOW, don't ask").
+   Third version reopens the prior question ("did they want anything
+   WRITTEN at all? a summary takes a spoken answer") because a blocked
+   create was being laundered into an unwanted edit.
+
+The transferable lesson: you cannot prompt away a strong prior; you
+move the enforcement OUT of the model (a gate the call must pass) and
+then spend your prompt budget on the RECOVERY path — what the model
+does after the block is as much a design surface as the block itself.
+Related: the gate judge runs through the same provider seam as the
+loop (no new vendor), fails closed, and its worst failure mode is one
+extra voice turn. Decision trail: docs/evals/2026-10-10-* (the failed
+description fix), REQUIREMENTS §4.13/FR-60, the 2026-10-11 sections
+above.
