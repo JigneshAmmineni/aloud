@@ -431,6 +431,15 @@ the instructions say. The escalation ladder actually tried, in order:
    WRITTEN at all? a summary takes a spoken answer") because a blocked
    create was being laundered into an unwanted edit.
 
+The general shape of layer 3 in the wider ecosystem is middleware /
+tool hooks: a code checkpoint between the model's tool call and its
+execution that can deny, rewrite, or redirect the call (Claude Code's
+PreToolUse hooks and LangChain's guardrail middleware are the
+off-the-shelf versions; decision models like Jev slot in as the
+classifier). We own our tool dispatch, so our "hook" is just the
+gate in the loop — but if you're on a framework, this is the seam to
+look for instead of building one.
+
 The transferable lesson: you cannot prompt away a strong prior; you
 move the enforcement OUT of the model (a gate the call must pass) and
 then spend your prompt budget on the RECOVERY path — what the model
