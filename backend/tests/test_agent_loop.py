@@ -18,6 +18,8 @@ import json
 from types import SimpleNamespace
 
 from pipecat.frames.frames import LLMTextFrame
+from pipecat.observers.base_observer import FramePushed
+from pipecat.processors.frame_processor import FrameDirection
 
 import agent.loop as loop_mod
 from agent.context import INTERRUPTED_SUFFIX, ContextProvider
@@ -1184,6 +1186,10 @@ def test_gated_create_runs_on_yes_and_judge_usage_lands_on_the_turn():
         e.stage == "llm" and e.quantity == 40
         for e in _queued(h.recorder, UsageEvent)
     )
+    # FR-49: the judge call writes its own trace row (purpose "gate")
+    gate_rows = [t for t in _queued(h.traces, LLMTrace) if t.purpose == "gate"]
+    assert len(gate_rows) == 1
+    assert "YES" in gate_rows[0].output
 
 
 def test_gate_fails_closed_on_a_judge_error():
@@ -1322,7 +1328,10 @@ def test_fully_heard_playback_is_never_amended():
     assert INTERRUPTED_SUFFIX not in last["content"]
 
 
-def test_nothing_heard_replaces_entry_with_the_cut_marker():
+def test_nothing_heard_keeps_the_text_and_adds_the_mark():
+    """Round-1 review: the no-match fallback must NEVER discard the text —
+    a single-sentence reply cut mid-play (empty uttered stream) keeps its
+    content, annotated, so "what did you say?" still has an answer."""
     scripts = [[LLMTextDelta("Never played at all."), _done()]]
     h = make_loop(scripts)
     asyncio.run(h.loop._run_turn("go"))
@@ -1331,8 +1340,8 @@ def test_nothing_heard_replaces_entry_with_the_cut_marker():
     asyncio.run(h.loop._start_interruption())
 
     last = h.ctx.build()[-1]
-    assert "cut this off" in last["content"]
-    assert "Never played" not in last["content"]
+    assert "Never played at all." in last["content"]
+    assert last["content"].endswith(INTERRUPTED_SUFFIX)
 
 
 def test_uttered_buffer_resets_at_the_next_turn():
@@ -1350,7 +1359,8 @@ def test_uttered_buffer_resets_at_the_next_turn():
     asyncio.run(h.loop._start_interruption())
 
     last = h.ctx.build()[-1]
-    assert "cut this off" in last["content"]
+    assert "New turn text." in last["content"]  # text kept, never erased
+    assert last["content"].endswith(INTERRUPTED_SUFFIX)
 
 
 def test_mid_generation_interruption_path_is_untouched():
@@ -1370,3 +1380,66 @@ def test_mid_generation_interruption_path_is_untouched():
     asyncio.run(run())
     last = h.ctx.build()[-1]
     assert last["content"].endswith(INTERRUPTED_SUFFIX)
+
+
+def test_second_round_still_gets_its_filler(monkeypatch):
+    """Round-1 review: a stale pending filler task must not starve the
+    NEXT round — step 1's instant tool left a sleeping task, and step 2's
+    slow tool then got six seconds of silence."""
+    monkeypatch.setattr(loop_mod, "FILLER_DELAY_MS", 60)
+    scripts = [
+        [LLMToolCall(name="echo", arguments={}, id="c1"), _done()],
+        [LLMToolCall(name="slow", arguments={}, id="c2"), _done()],
+        [LLMTextDelta("Found it."), _done()],
+    ]
+    h = make_loop(
+        scripts, tools=[read_tool(), read_tool(name="slow", delay=0.3)]
+    )
+
+    asyncio.run(h.loop._run_turn("find that"))
+
+    text = _pushed_text(h)
+    assert any(f in text for f in FILLER_LINES)
+
+
+def test_observer_feeds_only_transport_released_tts_text():
+    """Round-1 review: FR-61's signal rests on the frame contract — a
+    TTSTextFrame counts ONLY when the output transport releases it (its
+    audio played); the same frame on its earlier TTS-side hops must not,
+    and the release itself is deduped across re-observation."""
+    from unittest.mock import MagicMock
+
+    from pipecat.frames.frames import TTSTextFrame as _TTSText
+    from pipecat.transports.base_output import BaseOutputTransport
+
+    class _StubOutput(BaseOutputTransport):
+        pass
+
+    transport = object.__new__(_StubOutput)  # isinstance without __init__
+    h = make_loop([])
+    observer = loop_mod.AgentLoopObserver(loop=h.loop)
+    frame = _TTSText(text="Played sentence.", aggregated_by="sentence")
+
+    def pushed(source, direction=FrameDirection.DOWNSTREAM):
+        return FramePushed(
+            source=source,
+            destination=MagicMock(),
+            frame=frame,
+            direction=direction,
+            timestamp=0,
+        )
+
+    async def run():
+        # the TTS->transport hop (non-transport source): ignored, unmarked
+        await observer.on_push_frame(pushed(MagicMock()))
+        assert h.loop._uttered == []
+        # the transport's release: counts exactly once
+        await observer.on_push_frame(pushed(transport))
+        await observer.on_push_frame(pushed(transport))  # re-observed hop
+        # upstream direction from the transport: ignored
+        await observer.on_push_frame(
+            pushed(transport, FrameDirection.UPSTREAM)
+        )
+
+    asyncio.run(run())
+    assert h.loop._uttered == ["Played sentence."]

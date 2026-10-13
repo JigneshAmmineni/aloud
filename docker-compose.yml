@@ -5,10 +5,9 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://aloud:aloud@db:5432/aloud
       # Windows bind mounts emit no inotify events inside the container
-      # and watchfiles ignores its own polling env var — scripts/
+      # and watchfiles ignores its own polling env var, so scripts/
       # dev_watch.py passes force_polling explicitly (found 2026-10-11:
       # four hours of edits served stale code with zero reloads logged)
-      - WATCHFILES_FORCE_POLLING=true
     ports:
       - "7860:7860"
     volumes:

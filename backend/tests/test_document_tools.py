@@ -761,8 +761,27 @@ def test_rename_mode_validation_and_ownership(tmp_path):
             other,
         )
         assert stolen["status"] == "not_found"
+
+        # round-1 review: a PDF's title is metadata — rename must work on
+        # every format (it carried a content gate that 'not_found'ed a
+        # document the model had just listed)
+        pdf = await insert_upload_row("uid-a", "scan.pdf", "pdf", "extracted")
+        renamed = await edit(
+            {"document_id": pdf.id, "mode": "rename", "title": "Q3 Plan"},
+            ctx,
+        )
+        assert renamed["status"] == "edited"
+        assert renamed["title"] == "Q3 Plan"
         async with session_factory()() as db:
-            row = (await db.execute(select(Document))).scalars().one()
+            row = (
+                (
+                    await db.execute(
+                        select(Document).where(Document.id == document_id)
+                    )
+                )
+                .scalars()
+                .one()
+            )
         assert row.title != "Mine"
 
     asyncio.run(run())

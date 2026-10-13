@@ -45,7 +45,13 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.transports.base_output import BaseOutputTransport
 
 from agent.context import ContextProvider
-from agent.gate import GATE_REFUSAL, GATED_TOOLS, judge_allows
+from agent.gate import (
+    GATE_REFUSAL,
+    GATED_TOOLS,
+    JUDGE_RECENT_TURNS,
+    judge_allows,
+    judge_messages,
+)
 from agent.prompts import (
     FALLBACK_GREETING_LINES,
     FALLBACK_LINES,
@@ -504,7 +510,11 @@ class AgentLoopProcessor(FrameProcessor):
             await self._speak_filler(state, elapsed_ms)
             return
         if self._filler_task is not None and not self._filler_task.done():
-            return  # one pending filler at a time
+            # stale: its round is already over (fire_later would no-op on
+            # the step/tools_done checks) — cancel and re-arm for THIS
+            # round; returning here starved every later round of its
+            # filler (round-1 review)
+            self._filler_task.cancel()
         armed_step = state.step
 
         async def fire_later() -> None:
@@ -568,13 +578,16 @@ class AgentLoopProcessor(FrameProcessor):
     ) -> None:
         tool = self._tools.get(call.name)
         log = self._log.bind(turn_id=state.turn_id, step=state.step, tool=call.name)
-        t0 = time.monotonic()
         outcome = "ok"
         denied = (
             tool is not None
             and tool.name in GATED_TOOLS
             and not await self._gate_allows(state, call, log)
         )
+        # AFTER the gate: each stage owns only its own time — billing the
+        # judge round-trip to step.N.tool.* double-counted it and fired
+        # spurious slow-stage WARNs at the DB write (round-1 review)
+        t0 = time.monotonic()
         if tool is None:
             result = {"status": "error", "error": f"unknown tool: {call.name}"}
             outcome = "error"
@@ -639,17 +652,25 @@ class AgentLoopProcessor(FrameProcessor):
         """FR-60: one judge call through the loop's own FR-48 client,
         instrumented like any stage and FAILING CLOSED — a judge error
         degrades to the agent asking the user, never to an unwanted
-        write. Judge tokens land on the turn like any LLM call."""
+        write. Judge tokens land on the turn like any LLM call, and the
+        call writes its FR-49 trace row (purpose "gate") — the verdict
+        you most want to reconstruct is the one the eval doc points at."""
         g0 = time.monotonic()
+        messages = judge_messages(
+            call.name,
+            call.arguments,
+            self._context.recent_user_texts(JUDGE_RECENT_TURNS),
+        )
+        verdict_text = ""
+        usage = None
         try:
-            allowed, usage = await judge_allows(
-                self._llm,
-                call.name,
-                call.arguments,
-                self._context.recent_user_texts(),
+            allowed, usage, verdict_text = await judge_allows(
+                self._llm, messages
             )
+            finish = "stop"
         except Exception as e:
             allowed = False
+            finish = "error"
             log.bind(event="gate.judge_failed").warning(
                 f"gate judge failed ({type(e).__name__}) — refusing {call.name}"
             )
@@ -661,6 +682,19 @@ class AgentLoopProcessor(FrameProcessor):
                     turn_id=state.turn_id,
                 )
         gate_ms = round((time.monotonic() - g0) * 1000)
+        self._traces.record_trace(
+            turn_id=state.turn_id,
+            step=state.step,
+            model=self._model_name,
+            purpose="gate",
+            finish_reason=finish,
+            prompt_tokens=usage.prompt_tokens if usage else None,
+            completion_tokens=usage.completion_tokens if usage else None,
+            ttfb_ms=None,
+            duration_ms=gate_ms,
+            input_messages=messages,
+            output=verdict_text,
+        )
         self._recorder.record_step_stage(
             state.turn_id, f"step.{state.step}.gate.{call.name}", gate_ms
         )

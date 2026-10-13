@@ -34,14 +34,19 @@ def _stop(proc: subprocess.Popen) -> None:
 
 
 def main() -> None:
+    # SIGTERM (docker compose down) raises so the finally actually runs
+    # and uvicorn drains instead of being reaped by container teardown
+    signal.signal(signal.SIGTERM, lambda s, f: (_ for _ in ()).throw(KeyboardInterrupt()))
     proc = subprocess.Popen(CMD)
     try:
+        # NOT /app/scripts: editing this script would restart uvicorn
+        # while the OLD watcher kept running — the one file whose edits
+        # can't hot-apply needs a container restart, so don't pretend
         for changes in watch(
             "/app/app",
             "/app/agent",
             "/app/db",
             "/app/obs",
-            "/app/scripts",
             watch_filter=PythonFilter(),
             force_polling=True,
         ):

@@ -874,16 +874,17 @@ async def rename_document(
     session_id: str,
 ) -> Document | None:
     """Title-only update — the title is a COLUMN, not document text, so
-    no content gate applies (no ceiling, no readable-window cap; the
-    format gate stays, matching every other agent write). Added because
-    the only path to a rename was replace-with-full-content, which forced
-    a read of the whole document to change five words of metadata."""
+    NO content gate applies: no ceiling, no readable-window cap, and no
+    EDITABLE_FORMATS filter either (round-1 review: a PDF's title is
+    metadata exactly like a text file's, and refusing it as not_found
+    told the model an existing document didn't exist). Added because the
+    only path to a rename was replace-with-full-content, which forced a
+    read of the whole document to change five words of metadata."""
     stmt = (
         update(Document)
         .where(
             Document.id == document_id,
             Document.user_id == user_id,
-            Document.format.in_(EDITABLE_FORMATS),
         )
         .values(title=title, updated_at=datetime.now(timezone.utc))
         .returning(Document)

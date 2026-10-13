@@ -8,7 +8,7 @@ import asyncio
 import pytest
 
 import agent.gate as gate_mod
-from agent.gate import _evidence, judge_allows
+from agent.gate import _evidence, judge_allows, judge_messages
 from agent.providers import LLMDone, LLMTextDelta, LLMUsage
 
 
@@ -30,12 +30,14 @@ class OneShotLLM:
 
 def test_yes_allows_reports_usage_and_declares_no_tools():
     llm = OneShotLLM([LLMTextDelta("YES"), LLMDone("stop", LLMUsage(50, 1))])
-    allowed, usage = asyncio.run(
+    allowed, usage, verdict = asyncio.run(
         judge_allows(
             llm,
-            "create_document",
-            {"title": "Packing list"},
-            ["make me a packing list for the trip"],
+            judge_messages(
+                "create_document",
+                {"title": "Packing list"},
+                ["make me a packing list for the trip"],
+            ),
         )
     )
     assert allowed is True
@@ -46,12 +48,14 @@ def test_yes_allows_reports_usage_and_declares_no_tools():
 
 def test_no_refuses():
     llm = OneShotLLM([LLMTextDelta("NO"), LLMDone("stop", None)])
-    allowed, _ = asyncio.run(
+    allowed, _, _ = asyncio.run(
         judge_allows(
             llm,
-            "create_document",
-            {"title": "Notes"},
-            ["can you note that detail down"],
+            judge_messages(
+                "create_document",
+                {"title": "Notes"},
+                ["can you note that detail down"],
+            ),
         )
     )
     assert allowed is False
@@ -63,7 +67,9 @@ def test_anything_but_a_clear_yes_is_a_no():
     llm = OneShotLLM(
         [LLMTextDelta("Sure, creating it now!"), LLMDone("stop", None)]
     )
-    allowed, _ = asyncio.run(judge_allows(llm, "create_document", {}, ["hm"]))
+    allowed, _, _ = asyncio.run(
+        judge_allows(llm, judge_messages("create_document", {}, ["hm"]))
+    )
     assert allowed is False
 
 
@@ -71,7 +77,9 @@ def test_judge_timeout_propagates_for_the_loop_to_fail_closed(monkeypatch):
     monkeypatch.setattr(gate_mod, "JUDGE_TIMEOUT_S", 0.05)
     llm = OneShotLLM([60.0, LLMTextDelta("YES"), LLMDone("stop", None)])
     with pytest.raises(asyncio.TimeoutError):
-        asyncio.run(judge_allows(llm, "create_document", {}, ["x"]))
+        asyncio.run(
+            judge_allows(llm, judge_messages("create_document", {}, ["x"]))
+        )
 
 
 def test_evidence_is_bounded_and_quotes_only_recent_turns():

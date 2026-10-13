@@ -1035,7 +1035,7 @@ FR-7 still governs: the agent acts when the user asks.
   by that feature's own clause — the loop is *built through* its trace,
   not traced after the fact. Every LLM call the loop makes writes one
   row to an `llm_traces` table: `session_id`, `turn_id`, step number,
-  timestamp, model, purpose (`turn` | `greeting` | `wrap_up` — exactly
+  timestamp, model, purpose (`turn` | `greeting` | `wrap_up` | `gate` — exactly
   the calls that exist; the FR-42 fallback is a canned line, not an LLM
   call, so it can have no trace row), finish reason (FR-48's vocabulary,
   `interrupted` included — the cut-off turns are precisely the ones a
@@ -2658,8 +2658,17 @@ deliberately unchanged (FR-56 states local verification and why).
     pick which existing document fits; the main agent owns that with
     the attached documents in its context.
   - Instrumented like any stage (`step.N.gate.create_document` + a
-    `tool.gated` log line with the verdict), and the judge's tokens
-    land on the turn as ordinary LLM usage (FR-45).
+    `tool.gated` log line with the verdict), the judge's tokens land on
+    the turn as ordinary LLM usage (FR-45), and the call writes an
+    `llm_traces` row (purpose `gate`, FR-49) carrying the evidence
+    turns sent and the verdict returned — the row the eval's results
+    get reconstructed from.
+  - **Recorded trade (review round 1):** the refusal steers hard onto
+    `edit_document`, which is UNGATED and has no undo yet. Owner
+    decision: write-without-asking to the clear destination IS the
+    product behavior; one-step undo (ROADMAP, documents follow-ups) is
+    the planned complement, and gating edits is the revisit if live
+    use ever shows unwanted mutations of the working document.
   - The gated set is `agent/gate.py`'s `GATED_TOOLS`;
     `delete_document` joins it when that tool ships (ROADMAP).
 

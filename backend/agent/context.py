@@ -207,10 +207,16 @@ class ContextProvider:
             if heard.endswith(" ".join(words[:k])):
                 kept = k
                 break
-        prefix = " ".join(words[:kept])
-        amended = (prefix + INTERRUPTED_SUFFIX) if prefix else (
-            "[the user cut this off before any of it was heard]"
-        )
+        if kept:
+            amended = " ".join(words[:kept]) + INTERRUPTED_SUFFIX
+        else:
+            # NO positive match — never discard the text (round-1 review:
+            # a single-sentence reply cut mid-play has an empty uttered
+            # stream, and sanitizer filters can make a FULLY heard reply
+            # match nothing). Degrade to annotating the intact entry: the
+            # model keeps what it said plus the mark that the user may
+            # not have heard it.
+            amended = content + INTERRUPTED_SUFFIX
         self._approx_chars += len(amended) - len(content)
         last["content"] = amended
         self._log.bind(
