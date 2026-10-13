@@ -31,6 +31,11 @@ GATED_TOOLS = frozenset({"create_document"})
 
 JUDGE_TIMEOUT_S = 4.0
 
+# The verdict is one word; the cap keeps a judge that ignores the
+# one-word contract from streaming a paragraph on the user's time and
+# the user's token bill (round-2 review).
+JUDGE_MAX_OUTPUT_TOKENS = 8
+
 # Bounded evidence: the judge reads the last few USER turns only —
 # never document content, never tool results. JUDGE_RECENT_TURNS is the
 # real window: the loop passes it to recent_user_texts (round-1 review:
@@ -72,26 +77,46 @@ _SYSTEM = (
 )
 
 
-def _evidence(tool_name: str, args: dict, user_turns: list[str]) -> str:
+def _evidence(
+    tool_name: str,
+    args: dict,
+    user_turns: list[str],
+    assistant_text: str | None = None,
+) -> str:
     turns = [t[:_TURN_MAX_CHARS] for t in user_turns[-JUDGE_RECENT_TURNS:]]
     quoted = "\n".join(f"- {t!r}" for t in turns) or "- (no user turns)"
+    # the assistant's own preceding reply gives a bare "yes" its referent
+    # (round-2 review: without the offer, the ask-then-yes recovery the
+    # refusal promises could never pass the gate)
+    offer = (
+        f"The assistant's own preceding reply (data): "
+        f"{assistant_text[:_TURN_MAX_CHARS]!r}\n\n"
+        if assistant_text
+        else ""
+    )
     title = str(args.get("title", ""))[:120]
     want = tool_name + (f" titled {title!r}" if title else "")
     return (
-        f"Recent user turns, oldest first:\n{quoted}\n\n"
+        f"{offer}Recent user turns, oldest first:\n{quoted}\n\n"
         f"The assistant now wants: {want}.\n"
         "YES or NO: did the user explicitly ask for this new document?"
     )
 
 
 def judge_messages(
-    tool_name: str, args: dict, user_turns: list[str]
+    tool_name: str,
+    args: dict,
+    user_turns: list[str],
+    assistant_text: str | None = None,
 ) -> list[dict]:
     """The judge call's exact message list — built by the caller so the
     FR-49 trace row can record it even when the call itself fails."""
     return [
         {"role": "system", "content": _SYSTEM},
-        {"role": "user", "content": _evidence(tool_name, args, user_turns)},
+        {
+            "role": "user",
+            "content": _evidence(tool_name, args, user_turns, assistant_text),
+        },
     ]
 
 
@@ -108,7 +133,11 @@ async def judge_allows(
     async def ask() -> tuple[str, LLMUsage | None]:
         text = ""
         usage: LLMUsage | None = None
-        async with aclosing(llm.stream(messages, tools=None)) as stream:
+        async with aclosing(
+            llm.stream(
+                messages, tools=None, max_output_tokens=JUDGE_MAX_OUTPUT_TOKENS
+            )
+        ) as stream:
             async for event in stream:
                 if isinstance(event, LLMTextDelta):
                     text += event.text

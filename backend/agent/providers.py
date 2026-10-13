@@ -217,14 +217,19 @@ class GeminiLoopClient:
         messages: list[dict],
         tools: list[dict] | None = None,
         tool_choice: str = "auto",
+        max_output_tokens: int | None = None,
     ):
         """Yields LLMTextDelta / LLMToolCall events, then exactly one
         LLMDone. `tool_choice`: "auto" or "none" — "none" keeps the tools
         DECLARED but forbids selection (FR-42's greeting and forced final
-        step; spike-verified against the live API)."""
+        step; spike-verified against the live API). `max_output_tokens`
+        bounds short classifier calls (the FR-60 judge); None leaves the
+        model default."""
         config = genai_types.GenerateContentConfig(
             thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
         )
+        if max_output_tokens is not None:
+            config.max_output_tokens = max_output_tokens
         system_instruction, contents = to_gemini_contents(messages)
         if system_instruction:
             config.system_instruction = system_instruction

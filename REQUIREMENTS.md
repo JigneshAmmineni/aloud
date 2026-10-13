@@ -2645,8 +2645,11 @@ deliberately unchanged (FR-56 states local verification and why).
     request a new document in their recent turns?") through the same
     provider-neutral FR-48 client the loop uses — no second provider,
     no new SDK surface. Evidence is the last 4 user turns (600 chars
-    each) plus the proposed title; never document content, never tool
-    results, and the prompt marks the quoted turns as data.
+    each), the assistant's own preceding reply (the referent a bare
+    "yes" answers — the ask-then-yes recovery is unworkable without it,
+    round 2), and the proposed title; never document content, never
+    tool results, and the prompt marks all quoted text as data. The
+    judge's output is capped (the verdict is one word).
   - Anything but a clear YES refuses, and the gate **fails closed**: a
     judge error or timeout (4s) refuses with the same steering — the
     worst failure mode is one extra voice turn, never an unwanted
@@ -2675,6 +2678,7 @@ deliberately unchanged (FR-56 states local verification and why).
 | Knob | Default | Where |
 |---|---|---|
 | `JUDGE_TIMEOUT_S` (judge call ceiling; on breach the gate refuses) | 4s | `agent/gate.py` |
+| `JUDGE_MAX_OUTPUT_TOKENS` (output cap; the verdict is one word) | 8 | `agent/gate.py` |
 | Judge evidence window (user turns / chars per turn) | 4 / 600 | `agent/gate.py` |
 
 ### 4.14 Playback-aware interruption context

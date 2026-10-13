@@ -203,19 +203,28 @@ class ContextProvider:
             return False  # fully heard (or nothing to amend)
         words = norm.split()
         kept = 0
-        for k in range(len(words), 0, -1):
+        # floor of 2 words: a one-word match is coincidence territory (the
+        # uttered stream ending "First point." must not truncate a reply
+        # opening "point. And..." — round-2 review), mirroring
+        # _spoken_prefix's length guard for the same class of mismatch
+        for k in range(len(words), 1, -1):
             if heard.endswith(" ".join(words[:k])):
                 kept = k
                 break
         if kept:
             amended = " ".join(words[:kept]) + INTERRUPTED_SUFFIX
+        elif heard:
+            # sentences PLAYED but none prefix-match: the two streams
+            # disagree textually (the TTS sanitizer rewrites markdown and
+            # identifiers before synthesis, so the raw entry can never
+            # match the spoken form — round-2 review). The safe direction
+            # is FR-46's over-approximation: count it heard, change
+            # nothing — never mark a fully-heard reply as cut.
+            return False
         else:
-            # NO positive match — never discard the text (round-1 review:
-            # a single-sentence reply cut mid-play has an empty uttered
-            # stream, and sanitizer filters can make a FULLY heard reply
-            # match nothing). Degrade to annotating the intact entry: the
-            # model keeps what it said plus the mark that the user may
-            # not have heard it.
+            # nothing reached the speaker at all — annotate the INTACT
+            # text (round 1: never discard), so "what did you say?"
+            # still has an answer.
             amended = content + INTERRUPTED_SUFFIX
         self._approx_chars += len(amended) - len(content)
         last["content"] = amended
@@ -231,6 +240,18 @@ class ContextProvider:
             text += INTERRUPTED_SUFFIX
         self._messages.append({"role": "assistant", "content": text})
         self._approx_chars += len(text)
+
+    def last_assistant_text(self, max_chars: int = 300) -> str | None:
+        """FR-60 round 2: the judge's evidence must include the assistant's
+        own preceding reply — after the gate's branch (3) asks "do you
+        want a new document?", the user's bare "yes" has no referent
+        without the question it answers."""
+        for m in reversed(self._messages):
+            if m.get("role") == "assistant":
+                content = m.get("content") or ""
+                if content.strip():
+                    return content.strip()[:max_chars]
+        return None
 
     def recent_user_texts(self, n: int = 4) -> list[str]:
         """FR-60: the gate's evidence — the last n USER turns, oldest

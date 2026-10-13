@@ -189,6 +189,12 @@ class AgentLoopProcessor(FrameProcessor):
         # Reset at turn START, never at turn end - the buffer must span
         # the previous turn's playback tail, where the cut can land.
         self._uttered: list[str] = []
+        # FR-61's safety valve (round-2 review): if audio demonstrably
+        # played this turn but no uttered sentence ever arrived, the
+        # transport signal is broken (or the cut landed inside the first
+        # sentence — heard, by §4.14's over-approximation): never amend.
+        self._bot_spoke_this_turn = False
+        self._fr61_signal_warned = False
         self._fallback_cycle = itertools.cycle(FALLBACK_LINES)
         self._greeting_fallback_cycle = itertools.cycle(FALLBACK_GREETING_LINES)
 
@@ -267,6 +273,8 @@ class AgentLoopProcessor(FrameProcessor):
 
     def note_bot_speaking(self, speaking: bool) -> None:
         self._bot_speaking = speaking
+        if speaking:
+            self._bot_spoke_this_turn = True  # FR-61's valve: audio began
         if not speaking:
             self._audio_pending = False  # everything queued has played out
 
@@ -286,6 +294,7 @@ class AgentLoopProcessor(FrameProcessor):
 
     async def _run_turn(self, user_text: str | None):
         self._uttered = []  # FR-61: the previous turn's tail is settled
+        self._bot_spoke_this_turn = False
         purpose = "greeting" if user_text is None else "turn"
         state = self._state = _TurnState(self._recorder.current_turn, purpose)
         log = self._log.bind(turn_id=state.turn_id)
@@ -534,7 +543,12 @@ class AgentLoopProcessor(FrameProcessor):
             )
 
         # plain asyncio task (like tool tasks): guarded by the state
-        # identity check above; cleanup() cancels a pending one.
+        # identity check above; cleanup() cancels a pending one. The
+        # delayed push can land OUTSIDE the LLMFullResponseStart/End pair
+        # — checked against pipecat 1.3's TTSService: it aggregates text
+        # itself (SimpleTextAggregator) and flushes on sentence
+        # boundaries, and every FILLER_LINES entry ends with a period, so
+        # an out-of-pair filler still synthesizes (round-2 review note).
         self._filler_task = asyncio.create_task(fire_later())
 
     async def _speak_filler(self, state: _TurnState, elapsed_ms: int) -> None:
@@ -579,10 +593,18 @@ class AgentLoopProcessor(FrameProcessor):
         tool = self._tools.get(call.name)
         log = self._log.bind(turn_id=state.turn_id, step=state.step, tool=call.name)
         outcome = "ok"
+        # FR-47's anti-overwrite rule holds for the GATE key too: two
+        # same-named gated calls in one step get indexed stage keys, like
+        # the tool key below (round-2 review)
+        gate_key_suffix = (
+            f".{index + 1}"
+            if sum(1 for c in state.calls if c.name == call.name) > 1
+            else ""
+        )
         denied = (
             tool is not None
             and tool.name in GATED_TOOLS
-            and not await self._gate_allows(state, call, log)
+            and not await self._gate_allows(state, call, log, gate_key_suffix)
         )
         # AFTER the gate: each stage owns only its own time — billing the
         # judge round-trip to step.N.tool.* double-counted it and fired
@@ -596,6 +618,10 @@ class AgentLoopProcessor(FrameProcessor):
             # closed). The refusal steers the model to edit_document or
             # to asking the user; no handler runs, nothing is written.
             result = dict(GATE_REFUSAL)
+            # the gate working as designed is not a tool ERROR — the
+            # refusal majority must not read as a failing create rate
+            # (round-2 review); tool.gated carries allowed=false already
+            outcome = "gated"
         else:
             # asyncio.create_task, NOT self.create_task: a processor-owned
             # task dies with the pipeline, and a write cancelled mid-commit
@@ -647,63 +673,71 @@ class AgentLoopProcessor(FrameProcessor):
         state.results[index] = result
 
     async def _gate_allows(
-        self, state: _TurnState, call: LLMToolCall, log
+        self, state: _TurnState, call: LLMToolCall, log, key_suffix: str = ""
     ) -> bool:
         """FR-60: one judge call through the loop's own FR-48 client,
         instrumented like any stage and FAILING CLOSED — a judge error
         degrades to the agent asking the user, never to an unwanted
         write. Judge tokens land on the turn like any LLM call, and the
-        call writes its FR-49 trace row (purpose "gate") — the verdict
-        you most want to reconstruct is the one the eval doc points at."""
+        call writes its FR-49 trace row (purpose "gate") on EVERY exit —
+        including the barge-in cancellation, which is the row FR-49 names
+        the cancellation path for (round-2 review)."""
         g0 = time.monotonic()
         messages = judge_messages(
             call.name,
             call.arguments,
             self._context.recent_user_texts(JUDGE_RECENT_TURNS),
+            self._context.last_assistant_text(),
         )
         verdict_text = ""
         usage = None
+        allowed = False
+        finish = FINISH_INTERRUPTED  # overwritten unless a cancel unwinds
         try:
             allowed, usage, verdict_text = await judge_allows(
                 self._llm, messages
             )
             finish = "stop"
-        except Exception as e:
-            allowed = False
-            finish = "error"
-            log.bind(event="gate.judge_failed").warning(
-                f"gate judge failed ({type(e).__name__}) — refusing {call.name}"
-            )
-        else:
             if usage is not None:
                 self._recorder.record_llm_usage(
                     usage.prompt_tokens,
                     usage.completion_tokens,
                     turn_id=state.turn_id,
                 )
-        gate_ms = round((time.monotonic() - g0) * 1000)
-        self._traces.record_trace(
-            turn_id=state.turn_id,
-            step=state.step,
-            model=self._model_name,
-            purpose="gate",
-            finish_reason=finish,
-            prompt_tokens=usage.prompt_tokens if usage else None,
-            completion_tokens=usage.completion_tokens if usage else None,
-            ttfb_ms=None,
-            duration_ms=gate_ms,
-            input_messages=messages,
-            output=verdict_text,
-        )
-        self._recorder.record_step_stage(
-            state.turn_id, f"step.{state.step}.gate.{call.name}", gate_ms
-        )
-        log.bind(
-            event="tool.gated", allowed=allowed, duration_ms=gate_ms
-        ).info(
-            f"{call.name}: gate {'allowed' if allowed else 'refused'} "
-            f"in {gate_ms}ms"
-        )
+        except asyncio.CancelledError:
+            raise  # the finally still writes the interrupted trace row
+        except Exception as e:
+            finish = "error"
+            log.bind(event="gate.judge_failed").warning(
+                f"gate judge failed ({type(e).__name__}) — refusing {call.name}"
+            )
+        finally:
+            gate_ms = round((time.monotonic() - g0) * 1000)
+            self._traces.record_trace(
+                turn_id=state.turn_id,
+                step=state.step,
+                model=self._model_name,
+                purpose="gate",
+                finish_reason=finish,
+                prompt_tokens=usage.prompt_tokens if usage else None,
+                completion_tokens=usage.completion_tokens if usage else None,
+                ttfb_ms=None,
+                duration_ms=gate_ms,
+                input_messages=messages,
+                output=verdict_text,
+            )
+            self._recorder.record_step_stage(
+                state.turn_id,
+                f"step.{state.step}.gate.{call.name}{key_suffix}",
+                gate_ms,
+            )
+            if finish != FINISH_INTERRUPTED:
+                log.bind(
+                    event="tool.gated", allowed=allowed, duration_ms=gate_ms
+                ).info(
+                    f"{call.name}: gate "
+                    f"{'allowed' if allowed else 'refused'} in {gate_ms}ms"
+                )
         return allowed
 
     def _write_done(self, call: LLMToolCall, task: asyncio.Task) -> None:
@@ -890,7 +924,20 @@ class AgentLoopProcessor(FrameProcessor):
             # start) landed during the LAST turn's playback tail — if the
             # cut left context text the user never heard, mark it now,
             # before the new user turn appends.
-            self._context.amend_unspoken_tail(" ".join(self._uttered))
+            if not self._uttered and self._bot_spoke_this_turn:
+                # audio played but NO sentence was released: either the
+                # cut landed inside the first sentence (heard, by the
+                # over-approximation) or the transport signal is broken —
+                # both no-op, and a broken signal warns once per session
+                # instead of corrupting every turn (round-2 review)
+                if not self._fr61_signal_warned:
+                    self._fr61_signal_warned = True
+                    self._log.bind(event="fr61.signal_suspect").warning(
+                        "bot audio played this turn but the uttered buffer "
+                        "is empty — playback-cut amendment skipped"
+                    )
+            else:
+                self._context.amend_unspoken_tail(" ".join(self._uttered))
         await super()._start_interruption()
 
     async def cleanup(self):

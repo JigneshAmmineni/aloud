@@ -120,7 +120,7 @@ class LLMTrace(Base):
     step: Mapped[int] = mapped_column(Integer)
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     model: Mapped[str] = mapped_column(String(64))
-    purpose: Mapped[str] = mapped_column(String(16))  # turn|greeting|wrap_up
+    purpose: Mapped[str] = mapped_column(String(16))  # turn|greeting|wrap_up|gate
     finish_reason: Mapped[str] = mapped_column(String(16))  # FR-48 vocabulary
     prompt_tokens: Mapped[int | None] = mapped_column(Integer)
     completion_tokens: Mapped[int | None] = mapped_column(Integer)

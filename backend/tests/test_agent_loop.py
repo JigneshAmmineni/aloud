@@ -50,9 +50,16 @@ class FakeLLM:
         self._scripts = [list(s) for s in scripts]
         self.calls: list[dict] = []
 
-    async def stream(self, messages, tools=None, tool_choice="auto"):
+    async def stream(
+        self, messages, tools=None, tool_choice="auto", max_output_tokens=None
+    ):
         self.calls.append(
-            {"messages": messages, "tools": tools, "tool_choice": tool_choice}
+            {
+                "messages": messages,
+                "tools": tools,
+                "tool_choice": tool_choice,
+                "max_output_tokens": max_output_tokens,
+            }
         )
         script = self._scripts.pop(0) if self._scripts else [_done()]
         for event in script:
@@ -1443,3 +1450,131 @@ def test_observer_feeds_only_transport_released_tts_text():
 
     asyncio.run(run())
     assert h.loop._uttered == ["Played sentence."]
+
+
+def test_two_gated_calls_in_one_step_get_indexed_stage_keys():
+    """Round-2 review: FR-47's anti-overwrite rule holds for the gate key
+    — two create_document calls in one step must not collapse into one
+    stage entry ("create two lists" is exactly this turn shape)."""
+    scripts = [
+        [
+            LLMToolCall(name="create_document", arguments={}, id="c1"),
+            LLMToolCall(name="create_document", arguments={}, id="c2"),
+            _done(),
+        ],
+        [LLMTextDelta("NO"), _done()],  # judge for one call
+        [LLMTextDelta("NO"), _done()],  # judge for the other
+        [LLMTextDelta("Added to your notes."), _done()],
+    ]
+    h = make_loop(scripts, tools=[_create_tool([])])
+
+    async def run():
+        turn = asyncio.create_task(h.loop._run_turn("create two lists"))
+        await asyncio.sleep(0.05)
+        h.recorder.record_measurement(700)
+        await turn
+
+    asyncio.run(run())
+    rows = _queued(h.recorder, TurnMetric)
+    assert rows
+    keys = set(rows[0].stages_ms)
+    assert "step.1.gate.create_document.1" in keys
+    assert "step.1.gate.create_document.2" in keys
+
+
+def test_barged_in_judge_still_writes_its_interrupted_trace():
+    """Round-2 review: FR-49 names the cancellation path as the row that
+    must exist — a judge cut by barge-in records purpose=gate with
+    finish_reason=interrupted before the cancel propagates."""
+    scripts = [
+        [LLMToolCall(name="create_document", arguments={}, id="c1"), _done()],
+        [asyncio.CancelledError()],  # the judge's stream is cut mid-call
+    ]
+    h = make_loop(scripts, tools=[_create_tool([])])
+
+    async def run():
+        try:
+            await h.loop._run_turn("note it")
+        except asyncio.CancelledError:
+            return True
+        return False
+
+    assert asyncio.run(run()) is True
+    gate_rows = [t for t in _queued(h.traces, LLMTrace) if t.purpose == "gate"]
+    assert len(gate_rows) == 1
+    assert gate_rows[0].finish_reason == "interrupted"
+
+
+def test_fr61_valve_skips_amend_when_audio_played_but_nothing_released():
+    """Round-2 review: audio demonstrably played this turn but the uttered
+    buffer is empty — either the transport signal is broken or the cut
+    landed inside the first sentence. Both must be a no-op, never a mark
+    on every turn."""
+    scripts = [[LLMTextDelta("A full reply."), _done()]]
+    h = make_loop(scripts)
+    asyncio.run(h.loop._run_turn("go"))
+    h.loop.note_bot_speaking(True)
+    h.loop.note_bot_speaking(False)
+
+    asyncio.run(h.loop._start_interruption())
+
+    last = h.ctx.build()[-1]
+    assert last["content"] == "A full reply."
+    assert INTERRUPTED_SUFFIX not in last["content"]
+
+
+def test_filtered_stream_mismatch_is_a_no_op_not_a_cut_mark():
+    """Round-2 blocker: the TTS sanitizer rewrites markdown before
+    synthesis, so the raw entry can never prefix-match the spoken stream
+    — a fully-heard reply must not be recorded as interrupted."""
+    scripts = [[LLMTextDelta("Two things: **scope** and timing."), _done()]]
+    h = make_loop(scripts)
+    asyncio.run(h.loop._run_turn("go"))
+    h.loop.note_uttered_sentence("Two things: scope and timing.")
+
+    asyncio.run(h.loop._start_interruption())
+
+    last = h.ctx.build()[-1]
+    assert last["content"] == "Two things: **scope** and timing."
+
+
+def test_single_word_coincidence_never_truncates():
+    """Round-2 nit: the uttered stream ending with the reply's first word
+    is coincidence territory — a 2-word floor keeps a mostly-unheard
+    reply from collapsing to one word (old code truncated to 'point.')."""
+    scripts = [
+        [LLMTextDelta("point. And the rest was never played."), _done()]
+    ]
+    h = make_loop(scripts)
+    asyncio.run(h.loop._run_turn("go"))
+    h.loop.note_uttered_sentence("First point.")  # ends with 'point.'
+
+    asyncio.run(h.loop._start_interruption())
+
+    last = h.ctx.build()[-1]
+    # no k>=2 prefix matches and the stream is non-empty: safe no-op
+    assert last["content"] == "point. And the rest was never played."
+
+
+def test_pipecat_contract_for_fr61_still_holds():
+    """Round-2 blocker (round-1 finding 2): pin the pipecat facts FR-61
+    rests on, so an upgrade that moves the release site breaks HERE, not
+    silently in production. (The runtime valve covers the live half.)"""
+    import inspect
+
+    from pipecat.transports import base_output
+
+    src = inspect.getsource(base_output)
+    # non-audio frames are held behind their preceding audio...
+    assert "handle_sync_frame" in src
+    assert "preceding audio" in src
+    # ...and an interruption discards what never played
+    assert "_audio_queue.reset()" in src
+
+    from pipecat.processors import frame_processor
+
+    fsrc = inspect.getsource(frame_processor)
+    # FramePushed carries the pushing processor as source — the
+    # observer's isinstance(source, BaseOutputTransport) check needs it
+    assert "FramePushed(" in fsrc
+    assert "source=self" in fsrc

@@ -33,10 +33,14 @@ def _stop(proc: subprocess.Popen) -> None:
         proc.wait()
 
 
+def _reraise_as_interrupt(signum, frame):
+    raise KeyboardInterrupt  # so main's finally drains uvicorn
+
+
 def main() -> None:
     # SIGTERM (docker compose down) raises so the finally actually runs
     # and uvicorn drains instead of being reaped by container teardown
-    signal.signal(signal.SIGTERM, lambda s, f: (_ for _ in ()).throw(KeyboardInterrupt()))
+    signal.signal(signal.SIGTERM, _reraise_as_interrupt)
     proc = subprocess.Popen(CMD)
     try:
         # NOT /app/scripts: editing this script would restart uvicorn
