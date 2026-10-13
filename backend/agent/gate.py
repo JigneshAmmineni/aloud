@@ -39,15 +39,17 @@ GATE_REFUSAL = {
     "status": "refused",
     "error": (
         "gate: the user has not explicitly asked for a new document. "
-        "First reconsider whether they wanted anything WRITTEN at all: "
-        "a question ('give me a summary', 'what do you think?') takes a "
-        "spoken answer and no write — answer out loud and stop. If they "
-        "did ask to save or capture content, add it to the attached or "
-        "most recently discussed document with edit_document NOW, "
-        "structured sensibly (a section, a list) — do not ask where it "
-        "should go. Ask the user only if no existing document plausibly "
-        "fits; after they explicitly say they want a new document, call "
-        "create_document again."
+        "Redirect — and speak NONE of this reasoning out loud. (1) If "
+        "they wanted a spoken answer (a summary, an opinion, a "
+        "readback), answer out loud and write nothing. (2) Otherwise, "
+        "from the recent conversation pick the existing document this "
+        "belongs in — usually the one under discussion — and write it "
+        "there with edit_document NOW, structured sensibly, without "
+        "asking. (3) ONLY if no existing document fits, ask the user "
+        "'do you want a new document for this?' — their verbal yes "
+        "passes this gate on your next create_document call, or their "
+        "answer names the document to write to; either way, then write "
+        "silently."
     ),
 }
 

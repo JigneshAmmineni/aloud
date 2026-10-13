@@ -440,3 +440,37 @@ features land:
 [docs/notes/memory.md](docs/notes/memory.md) are brainstorming/learning
 notes, not specs — useful background when speccing features 1 and 4, but
 REQUIREMENTS.md is what implementation and review are held to.
+
+## Pending verification — the 2026-10-11/12 behavior-fix batch
+
+Shipped on the create-gate branch but only partially verified live
+(moving on to bigger features; come back and run the two eval docs:
+docs/evals/2026-10-11-create-gate-judge.md and
+docs/evals/2026-10-11-voice-behavior-fixes.md). The list, so nothing is
+forgotten:
+
+- **Questions and instructions never get "Hmm."** — lean talkative over
+  unresponsive: a QUESTION always gets a real answer, a misheard one
+  gets "say that again?", and never two "Hmm."s in a row.
+- **Silent tool work** — no narrated reasoning, steps, or workflow
+  ("let me read the document", "okay I have the content").
+- **Minimal confirmations** — never "it's on your screen", "I have
+  written that to the document", "the document has been updated";
+  "Done." is enough.
+- **Filler threshold** — the filler phrase only when the agent is
+  genuinely taking long (800ms of dead air), not on every tool call.
+- **Filler round scoping** — a filler armed for a tool round dies with
+  that round; no "One moment." after the result is already visible.
+- **Create-gate redirection (FR-60)** — a blocked create silently picks
+  the existing document from recent conversation (usually the one under
+  discussion), writes without asking; only with no fitting document
+  does it ask "do you want a new document for this?" (verbal yes passes
+  the judge on retry); a spoken-answer request (summary/opinion) gets a
+  spoken answer, never laundered into an edit.
+- **Placement judgment** — "where in the document?" is never asked when
+  there's a clear destination.
+- **Rename mode** — a title change is ONE edit_document rename call, no
+  document read, no narration.
+- **Playback-cut context (FR-61)** — barge in on a finished reply, say
+  "continue": the agent knows what was actually heard
+  (grep logs for context.playback_cut to watch it fire).
