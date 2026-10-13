@@ -14,4 +14,4 @@ pytest
 aiosqlite
 httpx
 ruff
-watchfiles  # dev reload runner (scripts/dev_watch.py) — explicit, not a uvicorn extra
+watchfiles  # DEV-ONLY (scripts/dev_watch.py; prod runs uvicorn directly) — explicit, not a uvicorn extra

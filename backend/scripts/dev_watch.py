@@ -15,6 +15,7 @@ Production (docker-compose.prod.yml) runs uvicorn directly and never
 touches this file.
 """
 
+import os
 import signal
 import subprocess
 
@@ -45,11 +46,11 @@ def main() -> None:
     # and uvicorn drains instead of being reaped by container teardown
     signal.signal(signal.SIGTERM, _reraise_as_interrupt)
     # a wrong entry here fails the same quiet way the original bug did —
-    # make it loud at startup instead of silent for four hours
-    import os
-
+    # make it loud at startup. raise, not assert: python -O strips
+    # asserts (db/engine.py states the house rule)
     for d in WATCHED:
-        assert os.path.isdir(d), f"dev_watch: watch dir missing: {d}"
+        if not os.path.isdir(d):
+            raise SystemExit(f"dev_watch: watch dir missing: {d}")
     print(f"dev_watch: polling {', '.join(WATCHED)}", flush=True)
     proc = subprocess.Popen(CMD)
     try:

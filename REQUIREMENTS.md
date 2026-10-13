@@ -2710,10 +2710,13 @@ deliberately unchanged (FR-56 states local verification and why).
     sanitizer rewrites markdown/identifiers before synthesis, so the
     raw entry can never match the spoken form; counted as heard (the
     FR-46 over-approximation direction) with a `context.playback_
-    mismatch` WARN. (ii) Audio played this turn but the uttered buffer
-    is empty — a broken transport signal or a cut inside the first
-    sentence; no-op with one `fr61.signal_suspect` WARN per session,
-    never a mark on every turn.
+    mismatch` WARN. (ii) The WHOLE buffer is empty although audio
+    played this turn — a broken transport signal; no-op with one
+    `fr61.signal_suspect` WARN per session, never a mark on every turn.
+    An entry with no releases of its OWN while earlier audio played
+    (a filler-led turn cut inside the closing reply's first sentence)
+    is NOT this case: it annotates its intact text — the direction
+    amendment always errs.
   - Accepted over-approximation, same direction as FR-46: the sentence
     mid-play when the cut lands counts as heard.
   - A context whose last message is no longer the assistant's, or whose

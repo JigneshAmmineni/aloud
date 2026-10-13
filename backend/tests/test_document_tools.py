@@ -782,6 +782,8 @@ def test_rename_mode_validation_and_ownership(tmp_path):
                 .scalars()
                 .one()
             )
-        assert row.title != "Mine"
+        # the strong negative: uid-b changed NOTHING (not merely "didn't
+        # write that one string") — the title is still _create's own
+        assert row.title == "T"
 
     asyncio.run(run())

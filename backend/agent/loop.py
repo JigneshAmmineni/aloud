@@ -356,6 +356,15 @@ class AgentLoopProcessor(FrameProcessor):
     ) -> bool:
         """One step: build → one streaming LLM call → forward deltas →
         maybe a tool round. Returns True when the turn is over."""
+        # FR-61 entry scope, stamped at STEP start (round 4): playback of
+        # this step's own reply begins while the stream is still open, so
+        # an append-time mark raced it — the entry's first sentences fell
+        # below the mark and the mismatch valve ate the amendment. At
+        # step start nothing of this step has been pushed yet; a filler
+        # released during THIS step belongs to this entry (step_filler
+        # prefixes it), and an earlier step's late sentences merely
+        # prefix `heard`, which the endswith match ignores.
+        self._uttered_mark = len(self._uttered)
         messages = self._context.build(turn_id=state.turn_id, step=state.step)
         if wrap_up:
             messages = messages + [{"role": "system", "content": WRAP_UP_INSTRUCTION}]
@@ -488,7 +497,6 @@ class AgentLoopProcessor(FrameProcessor):
                 self._context.append_assistant(
                     (state.step_filler + state.step_text).strip()
                 )
-                self._uttered_mark = len(self._uttered)  # FR-61 entry scope
                 state.step_filler = ""
             else:
                 await self._speak_fallback(state, reason="forbidden_tool_calls")
@@ -499,14 +507,12 @@ class AgentLoopProcessor(FrameProcessor):
             state.tools_done = True
             appended = state.step_filler + state.step_text
             self._context.append_step(appended, state.calls, state.results)
-            self._uttered_mark = len(self._uttered)  # FR-61 entry scope
             state.appended_texts.append(appended)
             state.step_filler = ""
             self._land_late_results()
             return False  # next step sees the results
 
         self._context.append_assistant(state.step_filler + state.step_text)
-        self._uttered_mark = len(self._uttered)  # FR-61 entry scope
         return True
 
     async def _maybe_filler(self, state: _TurnState, elapsed_ms: int) -> None:
@@ -602,10 +608,10 @@ class AgentLoopProcessor(FrameProcessor):
         tool = self._tools.get(call.name)
         log = self._log.bind(turn_id=state.turn_id, step=state.step, tool=call.name)
         outcome = "ok"
-        # FR-47's anti-overwrite rule holds for the GATE key too: two
-        # same-named gated calls in one step get indexed stage keys, like
-        # the tool key below (round-2 review)
-        gate_key_suffix = (
+        # FR-47's anti-overwrite rule, computed ONCE for both stage keys
+        # (gate and tool): two same-named calls in one step would silently
+        # overwrite each other in the stage dict
+        stage_suffix = (
             f".{index + 1}"
             if sum(1 for c in state.calls if c.name == call.name) > 1
             else ""
@@ -613,7 +619,7 @@ class AgentLoopProcessor(FrameProcessor):
         denied = (
             tool is not None
             and tool.name in GATED_TOOLS
-            and not await self._gate_allows(state, call, log, gate_key_suffix)
+            and not await self._gate_allows(state, call, log, stage_suffix)
         )
         # AFTER the gate: each stage owns only its own time — billing the
         # judge round-trip to step.N.tool.* double-counted it and fired
@@ -664,12 +670,7 @@ class AgentLoopProcessor(FrameProcessor):
             # a raising handler propagates: FR-42's primary error path
             # (spoken fallback, clean end of turn) — never a dead session.
         duration_ms = round((time.monotonic() - t0) * 1000)
-        key = f"step.{state.step}.tool.{call.name}"
-        if sum(1 for c in state.calls if c.name == call.name) > 1:
-            # two same-named calls in ONE step would silently overwrite
-            # each other in the stage dict (review: FR-47's anti-overwrite
-            # rule must hold within a step too)
-            key += f".{index + 1}"
+        key = f"step.{state.step}.tool.{call.name}{stage_suffix}"
         self._recorder.record_step_stage(state.turn_id, key, duration_ms)
         if outcome == "ok" and isinstance(result, dict):
             status = result.get("status", "ok")
@@ -881,7 +882,6 @@ class AgentLoopProcessor(FrameProcessor):
         heard = state.step_filler + state.step_text
         if heard.strip():
             self._context.append_assistant(heard.strip())
-            self._uttered_mark = len(self._uttered)  # FR-61 entry scope
             state.step_filler = ""
 
     def _instrument_call(

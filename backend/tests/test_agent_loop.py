@@ -949,10 +949,10 @@ def test_wrap_up_call_returning_tools_never_executes_them():
 
 
 def test_audio_pending_does_not_latch_across_turns(monkeypatch):
-    monkeypatch.setattr(loop_mod, "FILLER_DELAY_MS", 0)
     """Round-3 should-fix 3: a barge-in after text was forwarded but
     before playback started leaves no BotStoppedSpeakingFrame — the next
     turn's silent tool round must still get its filler."""
+    monkeypatch.setattr(loop_mod, "FILLER_DELAY_MS", 0)
     scripts = [
         [LLMTextDelta("Queued but never played. "), 60],
         [LLMToolCall(name="echo", arguments={}, id="c1"), _done()],
@@ -1539,9 +1539,10 @@ def test_filtered_stream_mismatch_is_a_no_op_not_a_cut_mark():
 
 
 def test_single_word_coincidence_never_truncates():
-    """Round-2 nit: the uttered stream ending with the reply's first word
-    is coincidence territory — a 2-word floor keeps a mostly-unheard
-    reply from collapsing to one word (old code truncated to 'point.')."""
+    """Round-2 nit (floor now 15 CHARS, round 3): the uttered stream
+    ending with the reply's first word is coincidence territory — the
+    character floor keeps a mostly-unheard reply from collapsing to one
+    word (old code truncated to 'point.')."""
     scripts = [
         [LLMTextDelta("point. And the rest was never played."), _done()]
     ]
@@ -1631,4 +1632,40 @@ def test_last_assistant_text_skips_tool_call_step_entries():
     assert (
         provider.last_assistant_text()
         == "Do you want a new document for this?"
+    )
+
+
+def test_entry_sentences_released_before_append_still_vouch_and_truncate():
+    """Round-4 blocker: playback of a reply's OWN first sentences starts
+    before the stream ends, so an append-time mark put them below the
+    mark and the mismatch valve ate the amendment on exactly the
+    multi-sentence replies FR-61 exists for. The mark is stamped at STEP
+    start instead; this test was proven discriminating against the
+    append-time mark (it fails there: mismatch no-op, no suffix)."""
+    scripts = [
+        [
+            LLMTextDelta("First point here. "),
+            0.1,
+            LLMTextDelta("Second part arrives. And the third never plays."),
+            _done(),
+        ]
+    ]
+    h = make_loop(scripts)
+
+    async def run():
+        turn = asyncio.create_task(h.loop._run_turn("go"))
+        await asyncio.sleep(0.05)
+        # the entry's own first sentence releases MID-STREAM, before any
+        # append could stamp a mark
+        h.loop.note_uttered_sentence("First point here.")
+        await turn
+        # the second lands during the playback tail; the third never does
+        h.loop.note_uttered_sentence("Second part arrives.")
+
+    asyncio.run(run())
+    asyncio.run(h.loop._start_interruption())
+
+    last = h.ctx.build()[-1]
+    assert last["content"] == (
+        "First point here. Second part arrives." + INTERRUPTED_SUFFIX
     )
