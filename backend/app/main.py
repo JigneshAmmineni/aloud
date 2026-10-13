@@ -347,7 +347,8 @@ async def get_document_route(
 
 
 # §4.12 FR-56: the editor's autosave target. TITLE_MAX_CHARS (imported —
-# app/documents.py owns the one cap for every writer) bounds a rename.
+# app/documents.py owns the cap; the save route, the rename mode, and
+# create_document all clamp or refuse against it) bounds a rename.
 # Verification is local (get_current_user_id), a stated choice:
 # a save writes only rows the account already owns, quota-bounded — a
 # disabled account can overwrite its own documents for its residual token

@@ -203,23 +203,36 @@ class ContextProvider:
             return False  # fully heard (or nothing to amend)
         words = norm.split()
         kept = 0
-        # floor of 2 words: a one-word match is coincidence territory (the
-        # uttered stream ending "First point." must not truncate a reply
-        # opening "point. And..." — round-2 review), mirroring
-        # _spoken_prefix's length guard for the same class of mismatch
-        for k in range(len(words), 1, -1):
-            if heard.endswith(" ".join(words[:k])):
+        # 15-char floor (round 3; _spoken_prefix's own guard): a short
+        # match is coincidence territory — the uttered stream ending
+        # "First point." or "...and the" must not truncate a reply that
+        # merely opens with the same words. Short genuinely-cut prefixes
+        # fall to the mismatch no-op below, the safe direction.
+        for k in range(len(words), 0, -1):
+            candidate = " ".join(words[:k])
+            if len(candidate) >= 15 and heard.endswith(candidate):
                 kept = k
                 break
         if kept:
             amended = " ".join(words[:kept]) + INTERRUPTED_SUFFIX
         elif heard:
-            # sentences PLAYED but none prefix-match: the two streams
-            # disagree textually (the TTS sanitizer rewrites markdown and
-            # identifiers before synthesis, so the raw entry can never
-            # match the spoken form — round-2 review). The safe direction
-            # is FR-46's over-approximation: count it heard, change
-            # nothing — never mark a fully-heard reply as cut.
+            # THIS ENTRY's own sentences played but none prefix-match: the
+            # two streams disagree textually (the TTS sanitizer rewrites
+            # markdown and identifiers before synthesis, so the raw entry
+            # can never match the spoken form — round-2 review). The safe
+            # direction is FR-46's over-approximation: count it heard,
+            # change nothing — never mark a fully-heard reply as cut. The
+            # loop entry-scopes the uttered slice (round 3), so an earlier
+            # entry's audio (a filler-led turn) can no longer satisfy this
+            # branch for a reply that never played. WARNED, not silent:
+            # the FR-61 eval greps for the amendment, and a disagreement
+            # must be distinguishable from "no cut happened".
+            self._log.bind(
+                event="context.playback_mismatch", heard_chars=len(heard)
+            ).warning(
+                "post-turn barge-in: uttered stream matches no prefix of "
+                "the last entry — counting it heard (filter disagreement)"
+            )
             return False
         else:
             # nothing reached the speaker at all — annotate the INTACT
@@ -247,7 +260,11 @@ class ContextProvider:
         want a new document?", the user's bare "yes" has no referent
         without the question it answers."""
         for m in reversed(self._messages):
-            if m.get("role") == "assistant":
+            # skip tool-call step entries: their content is the FR-43
+            # filler whenever the round was slow, and "One moment." next
+            # to a bare "yes" is exactly the no-antecedent input the
+            # offer exists to fix (round 3)
+            if m.get("role") == "assistant" and not m.get("tool_calls"):
                 content = m.get("content") or ""
                 if content.strip():
                     return content.strip()[:max_chars]

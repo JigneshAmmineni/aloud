@@ -1565,9 +1565,9 @@ def test_pipecat_contract_for_fr61_still_holds():
     from pipecat.transports import base_output
 
     src = inspect.getsource(base_output)
-    # non-audio frames are held behind their preceding audio...
+    # non-audio frames are held behind their preceding audio (the
+    # structural half only — a docstring reword must not red CI)...
     assert "handle_sync_frame" in src
-    assert "preceding audio" in src
     # ...and an interruption discards what never played
     assert "_audio_queue.reset()" in src
 
@@ -1578,3 +1578,57 @@ def test_pipecat_contract_for_fr61_still_holds():
     # observer's isinstance(source, BaseOutputTransport) check needs it
     assert "FramePushed(" in fsrc
     assert "source=self" in fsrc
+
+
+def test_filler_audio_never_vouches_for_the_unheard_closing_reply():
+    """Round-3 blocker: a filler-led turn — the filler's audio played,
+    the closing reply never did. The entry-scoped slice means the reply
+    annotates (intact + mark) instead of hiding behind the mismatch
+    valve as "heard"."""
+    monkey_delay = 0.2
+
+    scripts = [
+        [LLMToolCall(name="echo", arguments={}, id="c1"), _done()],
+        [LLMTextDelta("You have the launch plan and the packing list."), _done()],
+    ]
+
+    async def slow_handler(args, ctx):
+        await asyncio.sleep(monkey_delay)
+        return {"status": "ok"}
+
+    h = make_loop(scripts, tools=[read_tool(handler=slow_handler)])
+
+    async def run():
+        turn = asyncio.create_task(h.loop._run_turn("go"))
+        await asyncio.sleep(0.1)
+        # the filler (an EARLIER entry's audio) is released mid-round,
+        # BEFORE the closing reply is appended
+        h.loop.note_uttered_sentence("One moment.")
+        await turn
+
+    asyncio.run(run())
+    # the closing reply's own slice is empty: nothing of IT played
+    asyncio.run(h.loop._start_interruption())
+
+    last = h.ctx.build()[-1]
+    assert "launch plan and the packing list" in last["content"]
+    assert last["content"].endswith(INTERRUPTED_SUFFIX)
+
+
+def test_last_assistant_text_skips_tool_call_step_entries():
+    """Round-3 should-fix: a slow list_documents round before the create
+    retry must not replace the offer with 'One moment.' as the judge's
+    referent."""
+    provider = ContextProvider("base", session_id="s-t")
+    provider.append_user("put that somewhere separate")
+    provider.append_assistant("Do you want a new document for this?")
+    provider.append_user("yes")
+    provider.append_step(
+        "One moment. ",
+        [LLMToolCall(name="list_documents", arguments={}, id="c9")],
+        [{"status": "ok"}],
+    )
+    assert (
+        provider.last_assistant_text()
+        == "Do you want a new document for this?"
+    )

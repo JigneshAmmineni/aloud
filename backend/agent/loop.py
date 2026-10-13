@@ -189,6 +189,11 @@ class AgentLoopProcessor(FrameProcessor):
         # Reset at turn START, never at turn end - the buffer must span
         # the previous turn's playback tail, where the cut can land.
         self._uttered: list[str] = []
+        # round 3: sentences released AFTER the last context append are
+        # the ones that vouch for the last entry — without the mark, a
+        # filler-led turn's filler audio satisfied the mismatch valve and
+        # the unheard closing reply was counted as heard
+        self._uttered_mark = 0
         # FR-61's safety valve (round-2 review): if audio demonstrably
         # played this turn but no uttered sentence ever arrived, the
         # transport signal is broken (or the cut landed inside the first
@@ -294,6 +299,7 @@ class AgentLoopProcessor(FrameProcessor):
 
     async def _run_turn(self, user_text: str | None):
         self._uttered = []  # FR-61: the previous turn's tail is settled
+        self._uttered_mark = 0
         self._bot_spoke_this_turn = False
         purpose = "greeting" if user_text is None else "turn"
         state = self._state = _TurnState(self._recorder.current_turn, purpose)
@@ -482,6 +488,7 @@ class AgentLoopProcessor(FrameProcessor):
                 self._context.append_assistant(
                     (state.step_filler + state.step_text).strip()
                 )
+                self._uttered_mark = len(self._uttered)  # FR-61 entry scope
                 state.step_filler = ""
             else:
                 await self._speak_fallback(state, reason="forbidden_tool_calls")
@@ -492,12 +499,14 @@ class AgentLoopProcessor(FrameProcessor):
             state.tools_done = True
             appended = state.step_filler + state.step_text
             self._context.append_step(appended, state.calls, state.results)
+            self._uttered_mark = len(self._uttered)  # FR-61 entry scope
             state.appended_texts.append(appended)
             state.step_filler = ""
             self._land_late_results()
             return False  # next step sees the results
 
         self._context.append_assistant(state.step_filler + state.step_text)
+        self._uttered_mark = len(self._uttered)  # FR-61 entry scope
         return True
 
     async def _maybe_filler(self, state: _TurnState, elapsed_ms: int) -> None:
@@ -694,10 +703,9 @@ class AgentLoopProcessor(FrameProcessor):
         allowed = False
         finish = FINISH_INTERRUPTED  # overwritten unless a cancel unwinds
         try:
-            allowed, usage, verdict_text = await judge_allows(
+            allowed, usage, verdict_text, finish = await judge_allows(
                 self._llm, messages
             )
-            finish = "stop"
             if usage is not None:
                 self._recorder.record_llm_usage(
                     usage.prompt_tokens,
@@ -732,8 +740,15 @@ class AgentLoopProcessor(FrameProcessor):
                 gate_ms,
             )
             if finish != FINISH_INTERRUPTED:
+                # verdict + finish in the bind (round 3): "the judge said
+                # NO" and "the judge said nothing (blocked/truncated)"
+                # must be distinguishable without the trace row
                 log.bind(
-                    event="tool.gated", allowed=allowed, duration_ms=gate_ms
+                    event="tool.gated",
+                    allowed=allowed,
+                    duration_ms=gate_ms,
+                    verdict=verdict_text[:40],
+                    finish_reason=finish,
                 ).info(
                     f"{call.name}: gate "
                     f"{'allowed' if allowed else 'refused'} in {gate_ms}ms"
@@ -866,6 +881,7 @@ class AgentLoopProcessor(FrameProcessor):
         heard = state.step_filler + state.step_text
         if heard.strip():
             self._context.append_assistant(heard.strip())
+            self._uttered_mark = len(self._uttered)  # FR-61 entry scope
             state.step_filler = ""
 
     def _instrument_call(
@@ -924,6 +940,7 @@ class AgentLoopProcessor(FrameProcessor):
             # start) landed during the LAST turn's playback tail — if the
             # cut left context text the user never heard, mark it now,
             # before the new user turn appends.
+            tail = self._uttered[self._uttered_mark :]
             if not self._uttered and self._bot_spoke_this_turn:
                 # audio played but NO sentence was released: either the
                 # cut landed inside the first sentence (heard, by the
@@ -937,7 +954,11 @@ class AgentLoopProcessor(FrameProcessor):
                         "is empty — playback-cut amendment skipped"
                     )
             else:
-                self._context.amend_unspoken_tail(" ".join(self._uttered))
+                # only THIS entry's own releases vouch for it: an earlier
+                # entry's audio (the filler, step text) is excluded by the
+                # mark, so a reply that never played annotates instead of
+                # hiding behind the mismatch valve (round-3 blocker)
+                self._context.amend_unspoken_tail(" ".join(tail))
         await super()._start_interruption()
 
     async def cleanup(self):

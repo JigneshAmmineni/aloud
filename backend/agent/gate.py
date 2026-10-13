@@ -83,14 +83,18 @@ def _evidence(
     user_turns: list[str],
     assistant_text: str | None = None,
 ) -> str:
-    turns = [t[:_TURN_MAX_CHARS] for t in user_turns[-JUDGE_RECENT_TURNS:]]
+    # the CALLER owns the window (it passes JUDGE_RECENT_TURNS); slicing
+    # again here would silently narrow a deliberately wider hand-off —
+    # the mirror image of round 1's dead knob. This function owns only
+    # the per-turn char cap.
+    turns = [t[:_TURN_MAX_CHARS] for t in user_turns]
     quoted = "\n".join(f"- {t!r}" for t in turns) or "- (no user turns)"
     # the assistant's own preceding reply gives a bare "yes" its referent
     # (round-2 review: without the offer, the ask-then-yes recovery the
-    # refusal promises could never pass the gate)
+    # refusal promises could never pass the gate). Its length is owned by
+    # ContextProvider.last_assistant_text (300 chars) — no second cap.
     offer = (
-        f"The assistant's own preceding reply (data): "
-        f"{assistant_text[:_TURN_MAX_CHARS]!r}\n\n"
+        f"The assistant's own preceding reply (data): {assistant_text!r}\n\n"
         if assistant_text
         else ""
     )
@@ -122,17 +126,22 @@ def judge_messages(
 
 async def judge_allows(
     llm, messages: list[dict]
-) -> tuple[bool, LLMUsage | None, str]:
+) -> tuple[bool, LLMUsage | None, str, str]:
     """One bounded judge call through the FR-48 client. Returns
-    (allowed, usage, verdict_text) — usage for FR-45 attribution, the
-    raw verdict for the FR-49 trace. Raises propagate: the loop owns
-    fail-closed and its instrumentation. aclosing: a timeout or barge-in
-    cancellation must close the provider stream (and its HTTP
-    connection) deterministically, not at GC time (round-1 review)."""
+    (allowed, usage, verdict_text, finish_reason) — usage for FR-45
+    attribution, the raw verdict and the STREAM's OWN finish reason for
+    the FR-49 trace (round 3: a truncated or safety-blocked judge must
+    not be recorded as a clean stop — a blocked judge refuses every
+    create in the session and the trace is the only place that shows
+    why). Raises propagate: the loop owns fail-closed and its
+    instrumentation. aclosing: a timeout or barge-in cancellation must
+    close the provider stream (and its HTTP connection)
+    deterministically, not at GC time (round-1 review)."""
 
-    async def ask() -> tuple[str, LLMUsage | None]:
+    async def ask() -> tuple[str, LLMUsage | None, str]:
         text = ""
         usage: LLMUsage | None = None
+        finish = "stop"
         async with aclosing(
             llm.stream(
                 messages, tools=None, max_output_tokens=JUDGE_MAX_OUTPUT_TOKENS
@@ -143,7 +152,8 @@ async def judge_allows(
                     text += event.text
                 elif isinstance(event, LLMDone):
                     usage = event.usage
-        return text, usage
+                    finish = event.finish_reason
+        return text, usage, finish
 
-    text, usage = await asyncio.wait_for(ask(), JUDGE_TIMEOUT_S)
-    return text.strip().upper().startswith("YES"), usage, text
+    text, usage, finish = await asyncio.wait_for(ask(), JUDGE_TIMEOUT_S)
+    return text.strip().upper().startswith("YES"), usage, text, finish

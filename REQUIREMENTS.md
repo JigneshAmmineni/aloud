@@ -2680,6 +2680,7 @@ deliberately unchanged (FR-56 states local verification and why).
 | `JUDGE_TIMEOUT_S` (judge call ceiling; on breach the gate refuses) | 4s | `agent/gate.py` |
 | `JUDGE_MAX_OUTPUT_TOKENS` (output cap; the verdict is one word) | 8 | `agent/gate.py` |
 | Judge evidence window (user turns / chars per turn) | 4 / 600 | `agent/gate.py` |
+| Judge evidence: assistant-reply cap | 300 | `agent/context.py` (`last_assistant_text`) |
 
 ### 4.14 Playback-aware interruption context
 
@@ -2696,11 +2697,23 @@ deliberately unchanged (FR-56 states local verification and why).
     uttered buffer that resets at the NEXT turn's start (it must span
     the playback tail, where the cut lands).
   - An interruption arriving with NO live turn compares the last
-    assistant entry against the uttered stream: fully heard is a strict
+    assistant entry against the sentences released SINCE that entry was
+    appended (entry-scoped — an earlier entry's audio, e.g. the FR-43
+    filler, never vouches for the last one): fully heard is a strict
     no-op (every ordinary speech start broadcasts an interruption);
-    otherwise the entry truncates to the longest word-prefix the
-    uttered stream ends with, plus FR-46's cut-off suffix (or a
-    nothing-was-heard marker).
+    otherwise the entry truncates to the longest matching word-prefix
+    (15-char floor — shorter is coincidence) plus FR-46's cut-off
+    suffix, and an entry none of whose audio played keeps its INTACT
+    text with the suffix appended — amendment never destroys content.
+  - **Recorded bounds (review rounds 2–3), both no-amend exits:** (i)
+    this entry's sentences played but none prefix-match — the TTS
+    sanitizer rewrites markdown/identifiers before synthesis, so the
+    raw entry can never match the spoken form; counted as heard (the
+    FR-46 over-approximation direction) with a `context.playback_
+    mismatch` WARN. (ii) Audio played this turn but the uttered buffer
+    is empty — a broken transport signal or a cut inside the first
+    sentence; no-op with one `fr61.signal_suspect` WARN per session,
+    never a mark on every turn.
   - Accepted over-approximation, same direction as FR-46: the sentence
     mid-play when the cut lands counts as heard.
   - A context whose last message is no longer the assistant's, or whose

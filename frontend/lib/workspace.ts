@@ -129,7 +129,8 @@ export async function guardTalk(
   return true;
 }
 
-/** FR-56's rename cap — mirrors the server's TITLE_MAX_CHARS (main.py);
+/** FR-56's rename cap — mirrors the server's TITLE_MAX_CHARS
+ * (app/documents.py);
  * the title input and the rename guard both read this one, so raising the
  * knob is a two-place change (server + here), not a hunt. */
 export const TITLE_MAX_CHARS = 200;

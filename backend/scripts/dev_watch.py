@@ -37,20 +37,27 @@ def _reraise_as_interrupt(signum, frame):
     raise KeyboardInterrupt  # so main's finally drains uvicorn
 
 
+WATCHED = ("/app/app", "/app/agent", "/app/db", "/app/obs")
+
+
 def main() -> None:
     # SIGTERM (docker compose down) raises so the finally actually runs
     # and uvicorn drains instead of being reaped by container teardown
     signal.signal(signal.SIGTERM, _reraise_as_interrupt)
+    # a wrong entry here fails the same quiet way the original bug did —
+    # make it loud at startup instead of silent for four hours
+    import os
+
+    for d in WATCHED:
+        assert os.path.isdir(d), f"dev_watch: watch dir missing: {d}"
+    print(f"dev_watch: polling {', '.join(WATCHED)}", flush=True)
     proc = subprocess.Popen(CMD)
     try:
         # NOT /app/scripts: editing this script would restart uvicorn
         # while the OLD watcher kept running — the one file whose edits
         # can't hot-apply needs a container restart, so don't pretend
         for changes in watch(
-            "/app/app",
-            "/app/agent",
-            "/app/db",
-            "/app/obs",
+            *WATCHED,
             watch_filter=PythonFilter(),
             force_polling=True,
         ):

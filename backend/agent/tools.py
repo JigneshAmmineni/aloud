@@ -98,7 +98,9 @@ def _echo(s: str) -> str:
 
 async def _create_document(args: dict, ctx: ToolContext) -> dict:
     log = logger.bind(session_id=ctx.session_id, component="agent.tools")
-    title = str(args.get("title", "")).strip() or "Untitled"
+    # clamp, don't refuse: an agent-minted over-cap title otherwise
+    # creates a row the editor can rename but never save (round 3)
+    title = (str(args.get("title", "")).strip() or "Untitled")[:TITLE_MAX_CHARS]
     kind = args.get("kind", "summary")
     if kind not in DOCUMENT_KINDS:
         kind = "summary"

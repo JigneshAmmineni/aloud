@@ -38,7 +38,7 @@ class OneShotLLM:
 
 def test_yes_allows_reports_usage_and_declares_no_tools():
     llm = OneShotLLM([LLMTextDelta("YES"), LLMDone("stop", LLMUsage(50, 1))])
-    allowed, usage, verdict = asyncio.run(
+    allowed, usage, verdict, finish = asyncio.run(
         judge_allows(
             llm,
             judge_messages(
@@ -49,6 +49,7 @@ def test_yes_allows_reports_usage_and_declares_no_tools():
         )
     )
     assert allowed is True
+    assert finish == "stop"
     assert usage.prompt_tokens == 50
     # the judge must never recurse into tool use, and its output is capped
     assert llm.calls[0]["tools"] is None
@@ -57,7 +58,7 @@ def test_yes_allows_reports_usage_and_declares_no_tools():
 
 def test_no_refuses():
     llm = OneShotLLM([LLMTextDelta("NO"), LLMDone("stop", None)])
-    allowed, _, _ = asyncio.run(
+    allowed, _, _, _ = asyncio.run(
         judge_allows(
             llm,
             judge_messages(
@@ -76,7 +77,7 @@ def test_anything_but_a_clear_yes_is_a_no():
     llm = OneShotLLM(
         [LLMTextDelta("Sure, creating it now!"), LLMDone("stop", None)]
     )
-    allowed, _, _ = asyncio.run(
+    allowed, _, _, _ = asyncio.run(
         judge_allows(llm, judge_messages("create_document", {}, ["hm"]))
     )
     assert allowed is False
@@ -92,8 +93,13 @@ def test_judge_timeout_propagates_for_the_loop_to_fail_closed(monkeypatch):
 
 
 def test_evidence_is_bounded_and_quotes_only_recent_turns():
+    # the CALLER owns the window (round 3) — mirror the loop's slice
+    from agent.gate import JUDGE_RECENT_TURNS
+
     turns = [f"turn {i} " + "x" * 1000 for i in range(10)]
-    text = _evidence("create_document", {"title": "t" * 500}, turns)
+    text = _evidence(
+        "create_document", {"title": "t" * 500}, turns[-JUDGE_RECENT_TURNS:]
+    )
     assert "turn 9" in text and "turn 6" in text  # the last four
     assert "turn 5" not in text
     # per-turn and title caps hold: no unbounded transcript in the prompt
@@ -116,3 +122,16 @@ def test_evidence_includes_the_assistants_offer_for_the_yes_to_answer():
     # and without one, the block simply omits the line
     bare = judge_messages("create_document", {}, ["yes"])[1]["content"]
     assert "preceding reply" not in bare
+
+
+def test_blocked_or_truncated_judge_reports_its_real_finish():
+    """Round-3 blocker: a safety-blocked judge (empty verdict, refuses
+    every create) or a truncated one must not be recorded as a clean
+    stop — the finish reason is the stream's own."""
+    llm = OneShotLLM([LLMDone("blocked", None)])
+    allowed, _, verdict, finish = asyncio.run(
+        judge_allows(llm, judge_messages("create_document", {}, ["x"]))
+    )
+    assert allowed is False
+    assert verdict == ""
+    assert finish == "blocked"
