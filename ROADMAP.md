@@ -303,6 +303,18 @@ Replace the loop's monolithic context with a context window we fully
 control — the foundation the memory layer builds on. Builds inside the
 agent loop (feature 3), which already owns context assembly per turn.
 
+- **Prompt caching for the conversation (added 2026-10-12, cost-driven):**
+  every LLM call resends the FULL accumulated conversation (system prompt,
+  attach block, every turn, every tool round), so per-session token cost
+  grows quadratically with turn count — user LLM costs will skyrocket as
+  sessions lengthen. Gemini supports context caching (implicit prefix
+  caching plus explicit cached-content handles); the conversation's
+  strictly-append-only prefix is the ideal cache shape, and the provider
+  seam (FR-48's client) is where the cache handle lives. Design with this
+  section's budgets in mind: section boundaries that rewrite the prefix
+  (re-rendered attach blocks, compression) invalidate the cache, so cache
+  granularity and section layout get decided together.
+
 - Distinct, individually budgeted sections: system prompt, core memory
   (durable facts about the user), retrieved memory (populated by feature 6),
   and the current conversation.
