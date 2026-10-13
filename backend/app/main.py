@@ -57,9 +57,9 @@ from app.config import load_settings
 from app.documents import (
     EXTRACT_SEMAPHORE,
     MAX_DOC_CHARS,
-    TITLE_MAX_CHARS,
     MAX_FILE_BYTES,
     MAX_TOTAL_CHARS,
+    TITLE_MAX_CHARS,
     DocumentError,
     extract_text,
 )
