@@ -4,11 +4,15 @@ services:
     env_file: .env
     environment:
       - DATABASE_URL=postgresql+asyncpg://aloud:aloud@db:5432/aloud
+      # Windows bind mounts emit no inotify events inside the container
+      # and watchfiles ignores its own polling env var, so scripts/
+      # dev_watch.py passes force_polling explicitly (found 2026-10-11:
+      # four hours of edits served stale code with zero reloads logged)
     ports:
       - "7860:7860"
     volumes:
       - ./backend:/app
-    command: uvicorn app.main:app --host 0.0.0.0 --port 7860 --reload
+    command: python scripts/dev_watch.py
     depends_on:
       db:
         condition: service_healthy

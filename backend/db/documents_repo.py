@@ -865,6 +865,41 @@ async def replace_document_content(
     return row
 
 
+async def rename_document(
+    user_id: str,
+    document_id: int,
+    title: str,
+    *,
+    turn_id: int | None,
+    session_id: str,
+) -> Document | None:
+    """Title-only update — the title is a COLUMN, not document text, so
+    NO content gate applies: no ceiling, no readable-window cap, and no
+    EDITABLE_FORMATS filter either (round-1 review: a PDF's title is
+    metadata exactly like a text file's, and refusing it as not_found
+    told the model an existing document didn't exist). Added because the
+    only path to a rename was replace-with-full-content, which forced a
+    read of the whole document to change five words of metadata."""
+    stmt = (
+        update(Document)
+        .where(
+            Document.id == document_id,
+            Document.user_id == user_id,
+        )
+        .values(title=title, updated_at=datetime.now(timezone.utc))
+        .returning(Document)
+    )
+    async with user_scoped_session(user_id) as db:
+        row = (await db.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        db.add(
+            _document_edit_event(row.kind, row.format, user_id, session_id, turn_id)
+        )
+        await db.commit()
+    return row
+
+
 async def insert_document_line(
     user_id: str,
     document_id: int,

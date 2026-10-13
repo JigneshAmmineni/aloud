@@ -1,0 +1,73 @@
+"""Dev-only reload runner (docker-compose.yml's backend command).
+
+Windows bind mounts emit no inotify events inside the container, so
+`uvicorn --reload` never fires — and watchfiles 1.2.0 ignores its own
+WATCHFILES_FORCE_POLLING env default (verified 2026-10-11: an explicit
+force_polling=True watch sees host edits instantly; the env-default
+call sits blind while four hours of edits served stale code). Polling
+must be passed EXPLICITLY, and neither uvicorn, the watchfiles CLI,
+nor run_process() exposes it — so this script owns the loop: poll
+the CODE dirs, restart uvicorn on any .py change. The code dirs, not
+/app: a stray host .venv in the bind mount (26k files) makes a full-
+tree poll take minutes per cycle over a Windows mount — the watch list
+below is also what keeps any future junk dir from killing reload.
+Production (docker-compose.prod.yml) runs uvicorn directly and never
+touches this file.
+"""
+
+import os
+import signal
+import subprocess
+
+from watchfiles import PythonFilter, watch
+
+CMD = ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7860"]
+
+
+def _stop(proc: subprocess.Popen) -> None:
+    # SIGTERM: the app's own drain path; a dev server owes no grace
+    proc.send_signal(signal.SIGTERM)
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
+def _reraise_as_interrupt(signum, frame):
+    raise KeyboardInterrupt  # so main's finally drains uvicorn
+
+
+WATCHED = ("/app/app", "/app/agent", "/app/db", "/app/obs")
+
+
+def main() -> None:
+    # SIGTERM (docker compose down) raises so the finally actually runs
+    # and uvicorn drains instead of being reaped by container teardown
+    signal.signal(signal.SIGTERM, _reraise_as_interrupt)
+    # a wrong entry here fails the same quiet way the original bug did —
+    # make it loud at startup. raise, not assert: python -O strips
+    # asserts (db/engine.py states the house rule)
+    for d in WATCHED:
+        if not os.path.isdir(d):
+            raise SystemExit(f"dev_watch: watch dir missing: {d}")
+    print(f"dev_watch: polling {', '.join(WATCHED)}", flush=True)
+    proc = subprocess.Popen(CMD)
+    try:
+        # NOT /app/scripts: editing this script would restart uvicorn
+        # while the OLD watcher kept running — the one file whose edits
+        # can't hot-apply needs a container restart, so don't pretend
+        for changes in watch(
+            *WATCHED,
+            watch_filter=PythonFilter(),
+            force_polling=True,
+        ):
+            print(f"reloading: {sorted(p for _, p in changes)}", flush=True)
+            _stop(proc)
+            proc = subprocess.Popen(CMD)
+    finally:
+        _stop(proc)
+
+
+if __name__ == "__main__":
+    main()

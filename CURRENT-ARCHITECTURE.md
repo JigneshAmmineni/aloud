@@ -155,9 +155,12 @@ backend/
               detection, caps; runs via threadpool + semaphore)
   agent/      companion.py (CompanionAgent: builds/runs one session's pipeline)
               loop.py (§4.10 AgentLoopProcessor: the agent loop IN the
-              pipeline's LLM slot — steps, tools, filler backstop, barge-in
-              disposal, self-instrumentation; + AgentLoopObserver, its eyes
-              downstream), context.py (FR-44 ContextProvider: the loop's
+              pipeline's LLM slot — steps, tools, the FR-60 gate, filler
+              backstop, barge-in disposal, FR-61 playback-cut amendment,
+              self-instrumentation; + AgentLoopObserver, its eyes
+              downstream: bot-speaking, the synthesis stream,
+              user-speech-start, and FR-61's transport-released
+              utterance signal), context.py (FR-44 ContextProvider: the loop's
               only message source — feature 5 re-implements behind it),
               providers.py (THE provider seam: SDK construction for
               STT/TTS + the FR-48 loop LLM streaming client),
@@ -165,7 +168,10 @@ backend/
               the per-document attach-block renderer),
               tools.py (FR-53 registry: create/list/read/search/
               edit_document — paged reads, two-scope search, str_replace/
-              insert/append/replace, announce payload cap),
+              insert/append/replace/rename, announce payload cap),
+              gate.py (FR-60 create gate: a bounded yes/no judge call
+              through the FR-48 client in front of gated writes —
+              explicit-request check, fails closed),
               registry.py (FR-52/53 session-provider registry: HTTP-side
               deletes and cross-session edits reach live attach blocks;
               same-process by stated assumption — one uvicorn worker),
@@ -211,7 +217,11 @@ frontend/     Next.js app: / (session console + document workspace), /login,
               editor-hook lanes)
 .github/workflows/  ci.yml (ruff+pytest+Postgres service+vitest+build),
               claude.yml (@claude), claude-code-review.yml (auto-review)
-Caddyfile, docker-compose.yml (dev), docker-compose.prod.yml (prod)
+Caddyfile, docker-compose.yml (dev; the backend runs
+              scripts/dev_watch.py — explicit-polling reload, because
+              Windows bind mounts emit no inotify events in-container and
+              uvicorn --reload silently serves stale code),
+              docker-compose.prod.yml (prod)
 ```
 
 Two architectural seams everything hangs on:

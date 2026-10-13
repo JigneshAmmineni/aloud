@@ -86,6 +86,7 @@ def test_registry_inventory_and_classification():
         "insert",
         "append",
         "replace",
+        "rename",
     ]
 
 
@@ -696,5 +697,93 @@ def test_replace_race_where_row_grows_after_the_read_returns_refused(
         async with session_factory()() as db:
             content = (await db.execute(select(Document.content))).scalar_one()
         assert "tiny" not in content
+
+    asyncio.run(run())
+
+
+def test_rename_mode_changes_only_the_title(tmp_path):
+    """The rename mode exists because the only path to a title change was
+    replace-with-full-content (live session 2026-10-11: the model read the
+    whole document aloud-ly to change five words of metadata)."""
+
+    async def run():
+        await _setup_db(tmp_path)
+        emitted = []
+        ctx = _ctx(emitted, turn_id=5)
+        document_id = await _create(ctx, content="the content stays")
+
+        result = await _tool("edit_document").handler(
+            {"document_id": document_id, "mode": "rename", "title": "New Name"},
+            ctx,
+        )
+        assert result["status"] == "edited"
+        assert result["title"] == "New Name"
+
+        async with session_factory()() as db:
+            row = (await db.execute(select(Document))).scalars().one()
+        assert (row.title, row.content) == ("New Name", "the content stays")
+        assert row.updated_at is not None  # the list re-sorts on activity
+
+        # the announce reconciles the client list/editor like any edit
+        updates = [e for e in emitted if e["type"] == "document.updated"]
+        assert updates[-1]["document"]["title"] == "New Name"
+
+        # a rename lands a usage edit event like every write (FR-36)
+        async with session_factory()() as db:
+            events = (
+                (await db.execute(select(UsageEvent))).scalars().all()
+            )
+        assert any(e.unit == "edits" for e in events)
+
+    asyncio.run(run())
+
+
+def test_rename_mode_validation_and_ownership(tmp_path):
+    async def run():
+        await _setup_db(tmp_path)
+        ctx = _ctx([])
+        document_id = await _create(ctx, content="c")
+
+        edit = _tool("edit_document").handler
+        missing = await edit({"document_id": document_id, "mode": "rename"}, ctx)
+        assert missing["status"] == "error"
+        too_long = await edit(
+            {"document_id": document_id, "mode": "rename", "title": "t" * 201},
+            ctx,
+        )
+        assert too_long["status"] == "error"
+        assert "200" in too_long["error"]
+
+        # NFR-8: another user's document is not_found, never renamed
+        other = _ctx([], user_id="uid-b", session_id="s-b")
+        stolen = await edit(
+            {"document_id": document_id, "mode": "rename", "title": "Mine"},
+            other,
+        )
+        assert stolen["status"] == "not_found"
+
+        # round-1 review: a PDF's title is metadata — rename must work on
+        # every format (it carried a content gate that 'not_found'ed a
+        # document the model had just listed)
+        pdf = await insert_upload_row("uid-a", "scan.pdf", "pdf", "extracted")
+        renamed = await edit(
+            {"document_id": pdf.id, "mode": "rename", "title": "Q3 Plan"},
+            ctx,
+        )
+        assert renamed["status"] == "edited"
+        assert renamed["title"] == "Q3 Plan"
+        async with session_factory()() as db:
+            row = (
+                (
+                    await db.execute(
+                        select(Document).where(Document.id == document_id)
+                    )
+                )
+                .scalars()
+                .one()
+            )
+        # the strong negative: uid-b changed NOTHING (not merely "didn't
+        # write that one string") — the title is still _create's own
+        assert row.title == "T"
 
     asyncio.run(run())

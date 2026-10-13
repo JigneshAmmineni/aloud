@@ -171,6 +171,41 @@ The rules:
   - `docs/notes/memory.md` — passing mention in a scaling note
 - C-3 still binds everywhere: never therapy/therapist/counselor.
 
+### 3.3 Thinking-partner mode — proactive reasoning & ambient capture
+
+Two capabilities the 2026-10-11 live sessions showed the agent lacks, both
+deferred to their own spec (they change the agent's core behavior, not one
+tool):
+
+- **Proactive reasoning partner.** Asked "how are we going to get the list
+  of movies — stored or an API?", the agent answered "I don't have
+  information on that; the document doesn't cover it." Unhelpful by
+  design: today's prompt makes it a transcriber/reader. The user should be
+  able to ask "is this viable?", "what do you think of this change?" and
+  get a reasoned opinion that draws on the model's own knowledge, clearly
+  framed as opinion, which the user can then have written down. Likely a
+  system-prompt stance change plus an eval; possibly a mode or per-turn
+  classification so brain-dump turns still get silence, questions get
+  thinking.
+- **Ambient capture while thinking out loud.** During brainstorming the
+  user should not have to say "make a note of that" after every idea —
+  ideas spoken mid-flow should land in the working document, coherently
+  structured, as they're said (the product vision's "gives their words
+  structure" line, still unimplemented). Needs care against the FR-60
+  boundary (ambient WRITES to the discussed doc are wanted; ambient
+  CREATES are not) and against barge-in (writes mid-speech). Candidate
+  shape: a capture mode the user toggles by voice ("take notes while I
+  talk"), scoped to one target document.
+
+### 3.4 Playback-aware interruption context — shipped as FR-61 (§4.14)
+
+A barge-in during TTS playback of an already-completed turn left the
+context believing the whole reply was heard (observed 2026-10-11,
+session c47e28af). Shipped same day: the output transport's
+audio-synced text-frame release is the played/discarded signal; a
+post-turn interruption truncates the last assistant entry to the
+uttered prefix with FR-46's cut-off mark.
+
 ### 4. Documents & artifacts rework
 
 From single upload-at-start + copy-paste artifacts to a real document workspace.
@@ -197,6 +232,17 @@ From single upload-at-start + copy-paste artifacts to a real document workspace.
     re-render the open editor. CRDT (Yjs) rejected: cheap client-side but
     the server would become a CRDT peer (update-log storage, agent ops
     translated) — replaces the storage model for a rare case.
+  - **Create gate (shipped as FR-60, §4.13, 2026-10-11):** the
+    description-only create boundary failed live ("note that down"
+    made a new doc); creation is now gated by a server-side yes/no
+    judge over the user's recent turns, failing closed. Judge
+    considered-and-rejected extras: having it also pick which existing
+    document a change fits — too much for a cheap fast classifier, and
+    the main agent already holds the docs in context.
+  - **`delete_document` tool (planned):** expose deletion to the agent,
+    gated by the SAME FR-60 judge (explicit request required, fail
+    closed) — deletion is more destructive than creation, so it does
+    not ship before one-step undo exists.
   - **Versioning / undo (decided 2026-10-10):** v1 is **one-step undo** —
     a `previous_content` 🔒 column written on every edit (agent or user),
     so "undo that" restores the pre-edit text; a full
@@ -256,6 +302,18 @@ From single upload-at-start + copy-paste artifacts to a real document workspace.
 Replace the loop's monolithic context with a context window we fully
 control — the foundation the memory layer builds on. Builds inside the
 agent loop (feature 3), which already owns context assembly per turn.
+
+- **Prompt caching for the conversation (added 2026-10-12, cost-driven):**
+  every LLM call resends the FULL accumulated conversation (system prompt,
+  attach block, every turn, every tool round), so per-session token cost
+  grows quadratically with turn count — user LLM costs will skyrocket as
+  sessions lengthen. Gemini supports context caching (implicit prefix
+  caching plus explicit cached-content handles); the conversation's
+  strictly-append-only prefix is the ideal cache shape, and the provider
+  seam (FR-48's client) is where the cache handle lives. Design with this
+  section's budgets in mind: section boundaries that rewrite the prefix
+  (re-rendered attach blocks, compression) invalidate the cache, so cache
+  granularity and section layout get decided together.
 
 - Distinct, individually budgeted sections: system prompt, core memory
   (durable facts about the user), retrieved memory (populated by feature 6),
@@ -394,3 +452,37 @@ features land:
 [docs/notes/memory.md](docs/notes/memory.md) are brainstorming/learning
 notes, not specs — useful background when speccing features 1 and 4, but
 REQUIREMENTS.md is what implementation and review are held to.
+
+## Pending verification — the 2026-10-11/12 behavior-fix batch
+
+Shipped on the create-gate branch but only partially verified live
+(moving on to bigger features; come back and run the two eval docs:
+docs/evals/2026-10-11-create-gate-judge.md and
+docs/evals/2026-10-11-voice-behavior-fixes.md). The list, so nothing is
+forgotten:
+
+- **Questions and instructions never get "Hmm."** — lean talkative over
+  unresponsive: a QUESTION always gets a real answer, a misheard one
+  gets "say that again?", and never two "Hmm."s in a row.
+- **Silent tool work** — no narrated reasoning, steps, or workflow
+  ("let me read the document", "okay I have the content").
+- **Minimal confirmations** — never "it's on your screen", "I have
+  written that to the document", "the document has been updated";
+  "Done." is enough.
+- **Filler threshold** — the filler phrase only when the agent is
+  genuinely taking long (800ms of dead air), not on every tool call.
+- **Filler round scoping** — a filler armed for a tool round dies with
+  that round; no "One moment." after the result is already visible.
+- **Create-gate redirection (FR-60)** — a blocked create silently picks
+  the existing document from recent conversation (usually the one under
+  discussion), writes without asking; only with no fitting document
+  does it ask "do you want a new document for this?" (verbal yes passes
+  the judge on retry); a spoken-answer request (summary/opinion) gets a
+  spoken answer, never laundered into an edit.
+- **Placement judgment** — "where in the document?" is never asked when
+  there's a clear destination.
+- **Rename mode** — a title change is ONE edit_document rename call, no
+  document read, no narration.
+- **Playback-cut context (FR-61)** — barge in on a finished reply, say
+  "continue": the agent knows what was actually heard
+  (grep logs for context.playback_cut to watch it fire).

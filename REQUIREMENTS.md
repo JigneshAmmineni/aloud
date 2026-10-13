@@ -1035,7 +1035,7 @@ FR-7 still governs: the agent acts when the user asks.
   by that feature's own clause — the loop is *built through* its trace,
   not traced after the fact. Every LLM call the loop makes writes one
   row to an `llm_traces` table: `session_id`, `turn_id`, step number,
-  timestamp, model, purpose (`turn` | `greeting` | `wrap_up` — exactly
+  timestamp, model, purpose (`turn` | `greeting` | `wrap_up` | `gate` — exactly
   the calls that exist; the FR-42 fallback is a canned line, not an LLM
   call, so it can have no trace row), finish reason (FR-48's vocabulary,
   `interrupted` included — the cut-off turns are precisely the ones a
@@ -2629,6 +2629,98 @@ upsert/tombstone/close-on-delete rules extend to editor tabs
 (FR-57/58). FR-51/FR-21 — the attach budget and refusal threshold
 move on user saves too, via FR-56's `char_count` response. FR-29 —
 deliberately unchanged (FR-56 states local verification and why).
+
+### 4.13 Create gate — the judge in front of document creation
+
+- **FR-60** **`create_document` executes only after a server-side judge
+  confirms the user explicitly asked for a new document; otherwise the
+  call returns a steering refusal and nothing is written.** The
+  description-only boundary did not hold in live use (the 2026-10-10
+  eval's recorded result: "note that down" mid-discussion produced a
+  new document), so the boundary is code, not prompt. Mechanism:
+  - The gate sits in the agent loop's dispatch (`agent/gate.py` +
+    the loop's `_gate_allows`), in front of the handler — a refused
+    call runs no handler and writes nothing.
+  - The judge is ONE bounded yes/no LLM call ("did the user explicitly
+    request a new document in their recent turns?") through the same
+    provider-neutral FR-48 client the loop uses — no second provider,
+    no new SDK surface. Evidence is the last 4 user turns (600 chars
+    each), the assistant's own preceding reply (the referent a bare
+    "yes" answers — the ask-then-yes recovery is unworkable without it,
+    round 2), and the proposed title; never document content, never
+    tool results, and the prompt marks all quoted text as data. The
+    judge's output is capped (the verdict is one word).
+  - Anything but a clear YES refuses, and the gate **fails closed**: a
+    judge error or timeout (4s) refuses with the same steering — the
+    worst failure mode is one extra voice turn, never an unwanted
+    document.
+  - The refusal text steers the recovery: add to an existing document
+    via `edit_document`, or ask the user and call again — after a
+    spoken yes, the confirmation is in the recent turns and the judge
+    allows the retry. The deliberate scope limit: the judge does NOT
+    pick which existing document fits; the main agent owns that with
+    the attached documents in its context.
+  - Instrumented like any stage (`step.N.gate.create_document` + a
+    `tool.gated` log line with the verdict), the judge's tokens land on
+    the turn as ordinary LLM usage (FR-45), and the call writes an
+    `llm_traces` row (purpose `gate`, FR-49) carrying the evidence
+    turns sent and the verdict returned — the row the eval's results
+    get reconstructed from.
+  - **Recorded trade (review round 1):** the refusal steers hard onto
+    `edit_document`, which is UNGATED and has no undo yet. Owner
+    decision: write-without-asking to the clear destination IS the
+    product behavior; one-step undo (ROADMAP, documents follow-ups) is
+    the planned complement, and gating edits is the revisit if live
+    use ever shows unwanted mutations of the working document.
+  - The gated set is `agent/gate.py`'s `GATED_TOOLS`;
+    `delete_document` joins it when that tool ships (ROADMAP).
+
+| Knob | Default | Where |
+|---|---|---|
+| `JUDGE_TIMEOUT_S` (judge call ceiling; on breach the gate refuses) | 4s | `agent/gate.py` |
+| `JUDGE_MAX_OUTPUT_TOKENS` (output cap; the verdict is one word) | 8 | `agent/gate.py` |
+| Judge evidence window (user turns / chars per turn) | 4 / 600 | `agent/gate.py` |
+| Judge evidence: assistant-reply cap | 300 | `agent/context.py` (`last_assistant_text`) |
+
+### 4.14 Playback-aware interruption context
+
+- **FR-61** **A barge-in during playback of a COMPLETED turn amends the
+  context to what the user actually heard.** FR-46's cut-off mark covers
+  turns interrupted mid-generation; this closes the other half (observed
+  live 2026-10-11: the agent named two documents, playback was cut after
+  the first, and the context recorded both as said — "continue" would
+  have been a no-op). Mechanism:
+  - The output transport releases a sentence's TTSTextFrame downstream
+    only after the preceding audio was sent, and discards queued frames
+    on interruption — so a transport-released text frame means
+    "actually played". The loop's observer feeds these to a per-turn
+    uttered buffer that resets at the NEXT turn's start (it must span
+    the playback tail, where the cut lands).
+  - An interruption arriving with NO live turn compares the last
+    assistant entry against the sentences released SINCE that entry was
+    appended (entry-scoped — an earlier entry's audio, e.g. the FR-43
+    filler, never vouches for the last one): fully heard is a strict
+    no-op (every ordinary speech start broadcasts an interruption);
+    otherwise the entry truncates to the longest matching word-prefix
+    (15-char floor — shorter is coincidence) plus FR-46's cut-off
+    suffix, and an entry none of whose audio played keeps its INTACT
+    text with the suffix appended — amendment never destroys content.
+  - **Recorded bounds (review rounds 2–3), both no-amend exits:** (i)
+    this entry's sentences played but none prefix-match — the TTS
+    sanitizer rewrites markdown/identifiers before synthesis, so the
+    raw entry can never match the spoken form; counted as heard (the
+    FR-46 over-approximation direction) with a `context.playback_
+    mismatch` WARN. (ii) The WHOLE buffer is empty although audio
+    played this turn — a broken transport signal; no-op with one
+    `fr61.signal_suspect` WARN per session, never a mark on every turn.
+    An entry with no releases of its OWN while earlier audio played
+    (a filler-led turn cut inside the closing reply's first sentence)
+    is NOT this case: it annotates its intact text — the direction
+    amendment always errs.
+  - Accepted over-approximation, same direction as FR-46: the sentence
+    mid-play when the cut lands counts as heard.
+  - A context whose last message is no longer the assistant's, or whose
+    entry already carries the mid-generation mark, is never amended.
 
 ---
 

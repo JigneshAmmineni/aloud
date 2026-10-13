@@ -180,6 +180,72 @@ class ContextProvider:
         )
         return False
 
+    def amend_unspoken_tail(self, uttered: str) -> bool:
+        """FR-61 (the playback-cut gap): a barge-in during playback of a
+        COMPLETED turn used to leave this context claiming the whole reply
+        was heard. Called on every post-turn interruption; compares the
+        LAST assistant entry against the sentences that actually reached
+        the speaker and, when playback was cut, truncates the entry to the
+        longest word-prefix the uttered stream ends with, marked with the
+        same cut-off suffix mid-generation interruptions use. Fully-heard
+        entries (every ordinary user turn - Pipecat broadcasts an
+        interruption on each speech start) are a no-op, as is a context
+        whose last message is no longer the assistant's."""
+        last = self._messages[-1] if self._messages else None
+        if not last or last.get("role") != "assistant" or last.get("tool_calls"):
+            return False
+        content = last.get("content") or ""
+        if content.endswith(INTERRUPTED_SUFFIX):
+            return False  # already marked by the mid-generation path
+        norm = " ".join(content.split())
+        heard = " ".join(uttered.split())
+        if not norm or norm in heard:
+            return False  # fully heard (or nothing to amend)
+        words = norm.split()
+        kept = 0
+        # 15-char floor (round 3; _spoken_prefix's own guard): a short
+        # match is coincidence territory — the uttered stream ending
+        # "First point." or "...and the" must not truncate a reply that
+        # merely opens with the same words. Short genuinely-cut prefixes
+        # fall to the mismatch no-op below, the safe direction.
+        for k in range(len(words), 0, -1):
+            candidate = " ".join(words[:k])
+            if len(candidate) >= 15 and heard.endswith(candidate):
+                kept = k
+                break
+        if kept:
+            amended = " ".join(words[:kept]) + INTERRUPTED_SUFFIX
+        elif heard:
+            # THIS ENTRY's own sentences played but none prefix-match: the
+            # two streams disagree textually (the TTS sanitizer rewrites
+            # markdown and identifiers before synthesis, so the raw entry
+            # can never match the spoken form — round-2 review). The safe
+            # direction is FR-46's over-approximation: count it heard,
+            # change nothing — never mark a fully-heard reply as cut. The
+            # loop entry-scopes the uttered slice (round 3), so an earlier
+            # entry's audio (a filler-led turn) can no longer satisfy this
+            # branch for a reply that never played. WARNED, not silent:
+            # the FR-61 eval greps for the amendment, and a disagreement
+            # must be distinguishable from "no cut happened".
+            self._log.bind(
+                event="context.playback_mismatch", heard_chars=len(heard)
+            ).warning(
+                "post-turn barge-in: uttered stream matches no prefix of "
+                "the last entry — counting it heard (filter disagreement)"
+            )
+            return False
+        else:
+            # nothing reached the speaker at all — annotate the INTACT
+            # text (round 1: never discard), so "what did you say?"
+            # still has an answer.
+            amended = content + INTERRUPTED_SUFFIX
+        self._approx_chars += len(amended) - len(content)
+        last["content"] = amended
+        self._log.bind(
+            event="context.playback_cut", kept_words=kept, total_words=len(words)
+        ).info("post-turn barge-in: assistant entry amended to spoken prefix")
+        return True
+
     def append_assistant(self, text: str, *, interrupted: bool = False) -> None:
         """The turn's closing text-only assistant entry (also FR-43's
         filler-alone path and FR-46's spoken-prefix capture)."""
@@ -187,6 +253,33 @@ class ContextProvider:
             text += INTERRUPTED_SUFFIX
         self._messages.append({"role": "assistant", "content": text})
         self._approx_chars += len(text)
+
+    def last_assistant_text(self, max_chars: int = 300) -> str | None:
+        """FR-60 round 2: the judge's evidence must include the assistant's
+        own preceding reply — after the gate's branch (3) asks "do you
+        want a new document?", the user's bare "yes" has no referent
+        without the question it answers."""
+        for m in reversed(self._messages):
+            # skip tool-call step entries: their content is the FR-43
+            # filler whenever the round was slow, and "One moment." next
+            # to a bare "yes" is exactly the no-antecedent input the
+            # offer exists to fix (round 3)
+            if m.get("role") == "assistant" and not m.get("tool_calls"):
+                content = m.get("content") or ""
+                if content.strip():
+                    return content.strip()[:max_chars]
+        return None
+
+    def recent_user_texts(self, n: int = 4) -> list[str]:
+        """FR-60: the gate's evidence — the last n USER turns, oldest
+        first. Tool results carry role 'tool' in the neutral format, so
+        role 'user' here is genuinely the user's speech."""
+        texts = [
+            m["content"]
+            for m in self._messages
+            if m["role"] == "user" and isinstance(m["content"], str)
+        ]
+        return texts[-n:]
 
     def _approx_tokens(self) -> int:
         # O(1): the running counter is maintained by every append/update
