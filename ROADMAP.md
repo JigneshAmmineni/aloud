@@ -173,6 +173,24 @@ The rules:
 
 ### 3.3 Thinking-partner mode — proactive reasoning & ambient capture
 
+**Decisions 2026-11-12 (research: docs/notes/turn-decision-jev.md):**
+the per-turn INTENT decider (spoken-substance? × write-asked? → ack /
+silent-execute / discuss-with-read-tools / both) runs on **Claude Haiku
+5.5 through the FR-48 provider seam** — mechanical bindings only (write
+tools stripped for discuss, turn suppression, canned replies; reads
+NEVER stripped). **Swap-if-slow is pre-decided:** the decider sits
+behind a factory, so if its measured stage latency (step.N.* metrics)
+becomes a problem, switch the factory to TypeSafe Jev (~150–300ms
+faster, needs a privacy-policy amendment as a 4th processor) — one
+client + env var, no loop changes. End-of-turn detection is the AUDIO
+layer, not Jev: tune Flux eot_threshold first, DuplexJev
+(open-weights, self-hosted) as the upgrade. The FR-60 create-gate
+judge moves to the same Haiku client immediately; CONSOLIDATION
+end-state: the gate's "explicit new-doc ask?" becomes a third question
+in the one pre-call decision bundle, and the gate keeps its fail-closed
+enforcement point but consults the bundled verdict instead of making
+its own mid-turn call.
+
 Two capabilities the 2026-10-11 live sessions showed the agent lacks, both
 deferred to their own spec (they change the agent's core behavior, not one
 tool):
