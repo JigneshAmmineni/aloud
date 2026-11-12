@@ -142,6 +142,8 @@ class AgentLoopProcessor(FrameProcessor):
         emit,
         write_registry: set,
         greeting_trigger: str,  # required: dropping it must not pass a green suite
+        judge_llm=None,
+        judge_model_name: str | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -152,6 +154,10 @@ class AgentLoopProcessor(FrameProcessor):
         self._session_id = session_id
         self._user_id = user_id
         self._model_name = model_name
+        # FR-60: the gate's judge may run on a smaller model than the loop;
+        # unset, it shares the loop's client.
+        self._judge_llm = judge_llm or llm
+        self._judge_model_name = judge_model_name or model_name
         self._recorder = recorder
         self._traces = traces
         self._emit = emit
@@ -685,7 +691,7 @@ class AgentLoopProcessor(FrameProcessor):
     async def _gate_allows(
         self, state: _TurnState, call: LLMToolCall, log, key_suffix: str = ""
     ) -> bool:
-        """FR-60: one judge call through the loop's own FR-48 client,
+        """FR-60: one judge call through the FR-48 seam (the judge client),
         instrumented like any stage and FAILING CLOSED — a judge error
         degrades to the agent asking the user, never to an unwanted
         write. Judge tokens land on the turn like any LLM call, and the
@@ -705,7 +711,7 @@ class AgentLoopProcessor(FrameProcessor):
         finish = FINISH_INTERRUPTED  # overwritten unless a cancel unwinds
         try:
             allowed, usage, verdict_text, finish = await judge_allows(
-                self._llm, messages
+                self._judge_llm, messages
             )
             if usage is not None:
                 self._recorder.record_llm_usage(
@@ -725,7 +731,7 @@ class AgentLoopProcessor(FrameProcessor):
             self._traces.record_trace(
                 turn_id=state.turn_id,
                 step=state.step,
-                model=self._model_name,
+                model=self._judge_model_name,
                 purpose="gate",
                 finish_reason=finish,
                 prompt_tokens=usage.prompt_tokens if usage else None,

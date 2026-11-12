@@ -9,7 +9,7 @@ import os
 import pytest
 
 os.environ.setdefault("DEEPGRAM_API_KEY", "test-dg")
-os.environ.setdefault("GOOGLE_API_KEY", "test-g")
+os.environ.setdefault("ANTHROPIC_API_KEY", "test-a")
 os.environ.setdefault("CARTESIA_API_KEY", "test-c")
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite://")
 # Never a real file: auth deps are overridden in tests, and app.auth inits
@@ -51,12 +51,15 @@ def make_settings():
     def _make(**overrides) -> Settings:
         base = dict(
             deepgram_api_key="dg_fake",
+            anthropic_api_key="a_fake",
             google_api_key="g_fake",
             cartesia_api_key="c_fake",
             cartesia_voice_id="voice",
-            llm_model="gemini-2.5-flash",
+            llm_model="claude-sonnet-5-5",
+            judge_model="claude-haiku-5-5",
+            llm_effort="medium",
             stt_provider="deepgram_flux",
-            llm_provider="google",
+            llm_provider="anthropic",
             tts_provider="cartesia",
             tts_sanitize_enabled=True,
             cartesia_speed=0.85,

@@ -476,7 +476,9 @@ REQUIREMENTS.md is what implementation and review are held to.
 Shipped on the create-gate branch but only partially verified live
 (moving on to bigger features; come back and run the two eval docs:
 docs/evals/2026-10-11-create-gate-judge.md and
-docs/evals/2026-10-11-voice-behavior-fixes.md). The list, so nothing is
+docs/evals/2026-10-11-voice-behavior-fixes.md). The LLM swap's eval
+(docs/evals/2026-11-12-anthropic-llm-swap.md) re-runs both on Claude, so
+one live session can close all three. The list, so nothing is
 forgotten:
 
 - **Questions and instructions never get "Hmm."** — lean talkative over

@@ -106,7 +106,7 @@ def write_tool(name="save", delay=0.0, result=None, emit_on_done=True):
     )
 
 
-def make_loop(scripts, tools=(), current_turn=2):
+def make_loop(scripts, tools=(), current_turn=2, **loop_kwargs):
     """A loop with real recorders (never started — the NFR-10 fake-queue
     half: enqueue paths touch no database) and stubbed frame plumbing."""
     recorder = UsageRecorder("s-1", "uid-a")
@@ -130,6 +130,7 @@ def make_loop(scripts, tools=(), current_turn=2):
         emit=emit,
         write_registry=set(),
         greeting_trigger=GREETING_TRIGGER,
+        **loop_kwargs,
     )
     pushed: list = []
 
@@ -1197,6 +1198,37 @@ def test_gated_create_runs_on_yes_and_judge_usage_lands_on_the_turn():
     gate_rows = [t for t in _queued(h.traces, LLMTrace) if t.purpose == "gate"]
     assert len(gate_rows) == 1
     assert "YES" in gate_rows[0].output
+
+
+def test_gate_judge_runs_on_its_own_client_and_model():
+    """The judge may be a smaller model than the loop's: its call goes
+    through the judge client and its trace row names the judge model,
+    while the turn's own steps stay on the loop client."""
+    ran: list = []
+    judge = FakeLLM([[LLMTextDelta("YES"), _done()]])
+    scripts = [
+        [
+            LLMToolCall(name="create_document", arguments={"title": "x"}, id="c1"),
+            _done(),
+        ],
+        [LLMTextDelta("Done."), _done()],
+    ]
+    h = make_loop(
+        scripts,
+        tools=[_create_tool(ran)],
+        judge_llm=judge,
+        judge_model_name="judge-model",
+    )
+
+    asyncio.run(h.loop._run_turn("make a new doc called x"))
+
+    assert len(ran) == 1
+    assert len(judge.calls) == 1
+    assert judge.calls[0]["tools"] is None
+    assert len(h.llm.calls) == 2  # the loop client never saw the judge call
+    rows = _queued(h.traces, LLMTrace)
+    assert [t.model for t in rows if t.purpose == "gate"] == ["judge-model"]
+    assert {t.model for t in rows if t.purpose != "gate"} == {"test-model"}
 
 
 def test_gate_fails_closed_on_a_judge_error():

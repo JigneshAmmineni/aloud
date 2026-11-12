@@ -534,7 +534,7 @@ govern every FR below:
    deterministic code (context assembly, token math — microseconds, no LLM)
    or overlaps speech that is already playing. A "decider" LLM call in
    front of the speaking call is explicitly rejected: it is serial latency
-   with no offsetting benefit when the speaking model (Gemini Flash) already
+   with no offsetting benefit when the speaking model already
    selects tools and produces text in the same call.
 2. **The loop is the brain; Pipecat stays the chassis.** Transport, audio,
    STT/turn detection, TTS, sentence aggregation, and barge-in interruption
@@ -1021,9 +1021,10 @@ FR-7 still governs: the agent acts when the user asks.
   (the stream cancelled mid-generation by barge-in, whose partial
   consumption FR-46 records and whose trace row FR-49 keeps); without it
   the loop cannot tell an empty ending from a blocked generation
-  (FR-42's empty-step rule) nor a finished turn from a cut one. Gemini first
-  (the provider SDK lives inside the factory, per the hard constraint);
-  Claude remains the runner-up swap. Implementation MUST begin with a
+  (FR-42's empty-step rule) nor a finished turn from a cut one. Claude is the
+  provider in use (the provider SDK lives inside the factory, per the
+  hard constraint); the Gemini client, the first one built, remains as
+  the swap-back. Implementation MUST begin with a
   **spike** proving streamed text + native function calling + usage
   metadata through this client against the live Gemini API before the
   loop is built on it — and the spike must additionally **determine
@@ -2643,7 +2644,8 @@ deliberately unchanged (FR-56 states local verification and why).
     call runs no handler and writes nothing.
   - The judge is ONE bounded yes/no LLM call ("did the user explicitly
     request a new document in their recent turns?") through the same
-    provider-neutral FR-48 client the loop uses — no second provider,
+    provider-neutral FR-48 seam the loop uses, on a smaller, faster
+    model of the same provider (`JUDGE_MODEL`) — no second provider,
     no new SDK surface. Evidence is the last 4 user turns (600 chars
     each), the assistant's own preceding reply (the referent a bare
     "yes" answers — the ask-then-yes recovery is unworkable without it,

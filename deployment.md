@@ -35,7 +35,7 @@ you need to navigate, troubleshoot, and update the box afterward.
         │   backend ◀── UDP media (host network) ──────┘  (phone ↔ backend directly)     │
         │      │                                                                         │
         │      ├──▶ Postgres (:5432, loopback only)                                       │
-        │      └──▶ Deepgram / Google / Cartesia  (outbound HTTPS to provider APIs)       │
+        │      └──▶ Deepgram / Anthropic / Cartesia (outbound HTTPS to provider APIs)     │
         └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -240,12 +240,14 @@ nano .env
 Paste, filling in your real keys:
 ```
 DEEPGRAM_API_KEY=...
-GOOGLE_API_KEY=...
+ANTHROPIC_API_KEY=...
 CARTESIA_API_KEY=...
 CARTESIA_VOICE_ID=
-LLM_MODEL=gemini-2.5-flash
 STT_PROVIDER=deepgram_flux
-LLM_PROVIDER=google
+LLM_PROVIDER=anthropic
+LLM_MODEL=claude-sonnet-5-5
+JUDGE_MODEL=claude-haiku-5-5
+LLM_EFFORT=medium
 TTS_PROVIDER=cartesia
 TTS_SANITIZE_ENABLED=true
 LOG_LEVEL=INFO
@@ -608,7 +610,7 @@ SSH in and `docker compose -f docker-compose.prod.yml up -d`. To go back, set th
 | Domain | ~$10 / **year** |
 | **Total** | **~$14–15/mo + $10/yr** |
 
-Provider API usage (Deepgram/Gemini/Cartesia) bills separately per use, as today.
+Provider API usage (Deepgram/Anthropic/Cartesia) bills separately per use, as today.
 To pause spend between demos: `gcloud compute instances stop aloud --zone=us-west1-b`
 (you stop paying for compute; keep the static IP attached or it may be reclaimed).
 
