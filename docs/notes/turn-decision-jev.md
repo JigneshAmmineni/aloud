@@ -58,9 +58,13 @@ Prompt hints alone will not hold. Mechanical bindings per outcome:
 - **incoherent** → canned "say that again?" / "Hmm." WITHOUT an LLM
   call — again saves a turn; today the main model burns a full call to
   output "Hmm."
-- **discuss-only (yes,no)** → `tool_choice="none"` on the main call —
-  the FR-48 client already supports it (the greeting/wrap-up use it);
-  the agent structurally CANNOT write on that turn.
+- **discuss-only (yes,no)** → WRITE tools stripped from the declared
+  tool set for that call (the registry already classifies every tool
+  `is_write`; the loop passes a filtered schema list) — the agent
+  structurally cannot write, but KEEPS its read tools: read_document,
+  search, and future discussion aids (web search etc.). Owner decision
+  2026-11-12: never `tool_choice="none"` here — discussion should be
+  informed by reads.
 - **execute-only (no,yes)** → tools allowed + the existing brevity
   rules.
 - **(yes,yes)** → tools allowed + one ephemeral system line ("the user
@@ -139,9 +143,12 @@ benching as the go/no-go.**
    decider behind a new provider-seam factory; Jev vs flash-lite
    decided by a one-day bench from our VM (latency p95 + accuracy on
    a labeled corpus pulled from our own transcript_events).
-3. Go/no-go gates: intent decider p95 ≤ ~300ms from the VM; accuracy
-   beats the flash-lite baseline on our corpus; privacy amendment
-   written before any hosted-Jev traffic.
+3. Go/no-go gates (loosened 2026-11-12, owner decision: quality first,
+   budget later — keep ~3s E2E as a SOFT target so later optimization
+   stays minor): the latency gate is advisory, not disqualifying —
+   bench and record p95, prefer the faster option at equal accuracy;
+   accuracy on our corpus is the real gate; privacy amendment written
+   before any hosted-Jev traffic.
 
 Natural home: roadmap §3.3 (thinking-partner mode) — this IS the
 response-mode decider that section needs; spec it as its own § when
