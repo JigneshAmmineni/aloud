@@ -191,6 +191,53 @@ in the one pre-call decision bundle, and the gate keeps its fail-closed
 enforcement point but consults the bundled verdict instead of making
 its own mid-turn call.
 
+**Measured since (2026-11-12, first Claude session), reopening the
+Haiku-vs-Jev choice:** the Haiku judge took 0.7–1.9s per call (685,
+976, 1230, 1884 ms live; ~0.7–0.85s in the smoke test), well over the
+assumption behind "Haiku first". A decider that runs BEFORE every main
+call at that speed adds about a second to every turn. Two consequences
+for the spec: (1) bench Jev and Haiku side by side from our own
+environment before choosing (latency p50/p95 and accuracy on a labelled
+set pulled from our transcript_events) — Jev first is now a live
+option, not just the fallback; (2) consider binding the verdict at tool
+DISPATCH instead of at the request: start the main call and the decider
+together, and let the decider's verdict refuse write tools when they
+arrive (the create gate's existing shape) rather than strip them from
+the request. The decider then costs no serial latency on turns that
+never call a write tool. Owner's fallback if gating disappoints: no
+decider, plain Sonnet deciding as today (it already judged
+keep-listening vs. respond well in that session).
+
+**Answer modes — match how hands-on the user wants to be (owner spec,
+2026-11-12; implement with the decision gates).** The agent gauges the
+level of involvement the user wants and operates there: the less
+hands-on they are, the more autonomous and end-to-end it works; the more
+hands-on, the more detail it gives. Three modes:
+
+1. **Silent execution.** Do the work; at most "Done."
+2. **Summary (the default for a question).** Two sentences, three at
+   most, done in a few seconds, feels like conversation. Ideally it ends
+   there. A short spoken list of relevant points is allowed ONLY when
+   really needed (the user wants to hear five relevant things): up to
+   four or five points, each very concise — one clause, at most two.
+   The sentence bound does not apply to the list; the per-point bound
+   does. May close with an offer to go deeper.
+3. **Explain / elaborate / recite.** Only on an explicit ask ("explain",
+   "go into detail", "read me that section"). The agent takes its time
+   and goes into depth while staying conversational, and may recite the
+   requested parts of a document verbatim.
+
+Prompt changes this implies: drop "and completely" from "answer directly
+and completely" (Sonnet resolves it against "keep replies brief" in
+favour of long answers — the 2026-11-12 supplier answer ran 344 tokens);
+replace "keep replies brief" with the mode-2 bound; relax "never read a
+document's content aloud" for mode 3; and say how a list is SPOKEN (the
+voice has no bullet points: short separate sentences, no markdown).
+Enforcement is instructions only — no deterministic check on the output
+and no retry, since either adds latency. Which mode a turn gets is
+exactly what the intent decider above classifies, so the two ship
+together; an `LLM_EFFORT=low` A/B belongs in the same eval.
+
 Two capabilities the 2026-10-11 live sessions showed the agent lacks, both
 deferred to their own spec (they change the agent's core behavior, not one
 tool):
