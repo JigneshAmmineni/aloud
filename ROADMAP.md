@@ -332,6 +332,25 @@ agent loop (feature 3), which already owns context assembly per turn.
   section's budgets in mind: section boundaries that rewrite the prefix
   (re-rendered attach blocks, compression) invalidate the cache, so cache
   granularity and section layout get decided together.
+  - **On Claude (noted 2026-11-12, after the LLM swap): more urgent, and
+    nothing to build.** Sonnet 5.5 input is $2 per 1M tokens against
+    roughly $0.30 on Gemini 2.5 Flash (about 7x; output about 4x), and
+    every call still pays full price for the whole context. Caching is a
+    server-side API feature, not a framework: the request marks
+    `cache_control` breakpoints and the API caches everything before
+    them; cached reads cost $0.10 per 1M (a twentieth of the input
+    price), cache writes cost slightly more than normal input. The work
+    is ours only in two places: (1) `ClaudeLoopClient` sends `system` as
+    blocks with breakpoints instead of one joined string, and (2) the
+    context is ordered stable-first — system prompt, tool definitions,
+    older turns ahead of the breakpoint; the attached-documents block,
+    which is re-rendered on every edit, after it (today it sits second
+    in the system prompt and would invalidate the cache on every write).
+    Also to decide at spec time: usage accounting (cached-read and
+    cache-write tokens are reported separately from input tokens and
+    priced differently, and FR-34's single input rate assumes one
+    price), and the cache lifetime to pay for (5 minutes by default;
+    pauses in a voice session can exceed it).
 
 - Distinct, individually budgeted sections: system prompt, core memory
   (durable facts about the user), retrieved memory (populated by feature 6),
