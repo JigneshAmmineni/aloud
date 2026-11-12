@@ -260,8 +260,24 @@ class ContextProvider:
         want a new document?", the user's bare "yes" has no referent
         without the question it answers. The cap keeps the TAIL: a reply
         explains first and asks last, so the head of a long one is the
-        part without the offer (PR #24 round 1)."""
+        part without the offer (PR #24 round 1).
+
+        Returns only the reply the user's LATEST turn directly follows,
+        else None (round 2): the judge is told this text is what that
+        turn responds to, so an offer from before an earlier user turn
+        must never be passed off as adjacent. A turn can leave no spoken
+        reply at all (a barge-in during a tool round, a fallback that
+        spoke nothing), and a later bare "yeah" would then confirm an
+        offer the user had already declined."""
+        latest_user_seen = False
         for m in reversed(self._messages):
+            if m.get("role") == "user":
+                if latest_user_seen:
+                    return None  # nothing spoken between the last two turns
+                latest_user_seen = True
+                continue
+            if not latest_user_seen:
+                continue  # the current turn's own entries
             # skip tool-call step entries: their content is the FR-43
             # filler whenever the round was slow, and "One moment." next
             # to a bare "yes" is exactly the no-antecedent input the

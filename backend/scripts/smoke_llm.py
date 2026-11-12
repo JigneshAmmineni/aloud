@@ -56,7 +56,7 @@ async def main() -> int:
     text = ""
     done = None
     async for event in make_loop_llm(settings).stream(_MESSAGES, tools=_TOOLS):
-        if ttfb_ms is None:
+        if ttfb_ms is None and isinstance(event, (LLMTextDelta, LLMToolCall)):
             ttfb_ms = round((time.monotonic() - t0) * 1000)
         if isinstance(event, LLMTextDelta):
             text += event.text
@@ -64,6 +64,9 @@ async def main() -> int:
             print(f"  tool call: {event.name}({event.arguments})")
         elif isinstance(event, LLMDone):
             done = event
+    if done is None:
+        print("FAILED: the loop stream ended without an LLMDone")
+        return 1
     print(f"loop:  ttfb={ttfb_ms}ms finish={done.finish_reason} usage={done.usage}")
     print(f"       {text!r}")
 

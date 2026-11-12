@@ -7,8 +7,9 @@ so the boundary is enforced in code: before a gated tool runs, a cheap
 non-thinking judge call classifies the user's recent turns — did they
 EXPLICITLY ask for a new document? — and anything but a clear YES
 returns a steering refusal instead of executing. The judge speaks
-through the same provider-neutral FR-48 client the loop uses (no second
-provider, no SDK import here), inside a bounded timeout, and the loop
+through the same provider-neutral FR-48 seam the loop uses, on its own
+client and a smaller model of the same provider (no second provider,
+no SDK import here), inside a bounded timeout, and the loop
 FAILS CLOSED on judge errors: the worst failure mode is one extra voice
 turn (the agent asks), never an unwanted document.
 

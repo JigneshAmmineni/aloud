@@ -65,6 +65,7 @@ from agent.providers import (
     LLMDone,
     LLMTextDelta,
     LLMToolCall,
+    LLMUsage,
 )
 from agent.tools import Tool, ToolContext, registry_schemas
 
@@ -79,10 +80,16 @@ TOOL_TIMEOUT_S = 10.0
 FILLER_DELAY_MS = 800
 # FR-43's named lever for the atomic-delivery branch, deliberately
 # DISENGAGED: the FR-48 spike measured ~1.0s of pre-call dead air for a
-# typical create_document — inside NFR-1's 3s — so no blind deadline runs
-# and a slow PLAIN turn never gets filler (the no-tool-turn mandate). If
-# artifact sizes ever push the gap past budget, this is the knob the spec
-# names, with its false positive accepted knowingly.
+# typical create_document ON GEMINI — inside NFR-1's 3s — so no blind
+# deadline runs and a slow PLAIN turn never gets filler (the no-tool-turn
+# mandate). On Claude Sonnet 5.5 that gap is past budget (2026-11-12:
+# 3.0s for an 800-character document in a live session, 34s for an
+# 11,700-character one in a probe; the call arrives whole only once its
+# input is fully written). This knob is still the wrong fix there: plain
+# turns reach their first token at ~1.4s, so a 700ms blind deadline
+# would fire on every one of them. The planned fix arms the filler at
+# the tool call's START, which Claude announces within ~1.6s — carried
+# in ROADMAP §3.3 for the decision-gates PR.
 FILLER_DEADLINE_MS = 700
 
 
@@ -420,7 +427,9 @@ class AgentLoopProcessor(FrameProcessor):
             ) as stream:
                 async for event in stream:
                     elapsed_ms = round((time.monotonic() - state.t0) * 1000)
-                    if state.ttfb_ms is None and not isinstance(event, LLMDone):
+                    if state.ttfb_ms is None and not isinstance(
+                        event, (LLMDone, LLMUsage)
+                    ):
                         state.ttfb_ms = elapsed_ms
                     if isinstance(event, LLMTextDelta):
                         state.step_text += event.text
@@ -433,16 +442,24 @@ class AgentLoopProcessor(FrameProcessor):
                         if not state.calls and tool_choice != "none":
                             await self._maybe_filler(state, elapsed_ms)
                         state.calls.append(event)
+                    elif isinstance(event, LLMUsage):
+                        # reported ahead of the output on providers that
+                        # can: a barge-in or a dropped stream after this
+                        # point still records the input it was billed for
+                        state.usage = event
                     elif isinstance(event, LLMDone):
                         finish = event.finish_reason
-                        state.usage = event.usage
+                        # None from a stream that never reported: keep
+                        # whatever arrived early
+                        state.usage = event.usage or state.usage
         except Exception:
             # FR-49: EVERY call writes a row — a provider drop after 40
             # deltas is precisely the call a trace is for (review round 3).
             # No finish reason ever arrived, so "error" is the loop-level
             # spelling for a call that raised (FR-48's vocabulary describes
-            # streams that returned); Gemini reports usage only on the
-            # final chunk, so a dropped stream genuinely has none.
+            # streams that returned). Usage is whatever arrived before
+            # the drop: Claude's input count (reported up front), or
+            # nothing on Gemini, which reports only on its final chunk.
             self._instrument_call(
                 state,
                 "error",

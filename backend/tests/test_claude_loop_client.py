@@ -22,6 +22,7 @@ from agent.providers import (
     LLMDone,
     LLMTextDelta,
     LLMToolCall,
+    LLMUsage,
     map_anthropic_finish,
     to_anthropic_messages,
     to_anthropic_tools,
@@ -226,7 +227,10 @@ class _FakeStream:
 
     async def __aiter__(self):
         for event in self._events:
-            yield event
+            if isinstance(event, (int, float)):
+                await asyncio.sleep(event)  # the stream goes quiet
+            else:
+                yield event
 
 
 class _FakeAnthropic:
@@ -296,11 +300,12 @@ def test_tool_call_is_yielded_whole_with_claudes_own_id():
         ]
     )
     events = _collect(client, messages=_USER, tools=_TOOLS)
-    assert len(events) == 2  # the partial-JSON delta yields nothing
-    call = events[0]
+    # early usage, the call, done: the partial-JSON delta yields nothing
+    assert [type(e) for e in events] == [LLMUsage, LLMToolCall, LLMDone]
+    call = events[1]
     assert isinstance(call, LLMToolCall)
     assert (call.name, call.arguments, call.id) == ("create_document", {"title": "t"}, "toolu_abc")
-    assert events[1].finish_reason == FINISH_STOP
+    assert events[2].finish_reason == FINISH_STOP
 
 
 def test_between_tool_call_notes_are_neither_spoken_nor_counted_as_output():
@@ -316,8 +321,8 @@ def test_between_tool_call_notes_are_neither_spoken_nor_counted_as_output():
         ]
     )
     events = _collect(client, messages=_USER)
-    assert len(events) == 1
-    assert events[0].finish_reason == FINISH_BLOCKED
+    assert [type(e) for e in events] == [LLMUsage, LLMDone]  # no text, no call
+    assert events[1].finish_reason == FINISH_BLOCKED
 
 
 def test_sonnet_request_shape():
@@ -400,8 +405,12 @@ def test_sdk_client_is_bounded_and_shared_across_sessions():
     loop_llm = ClaudeLoopClient(api_key="a_fake", model="claude-sonnet-5-5", effort="medium")
     judge_llm = ClaudeLoopClient(api_key="a_fake", model="claude-haiku-5-5", effort="low")
     sdk = loop_llm._client
-    assert sdk.timeout == 15.0
-    assert sdk.max_retries == 1
+    # no retry: for a voice turn the spoken fallback is the retry
+    assert sdk.max_retries == 0
+    # the read timeout must outlast Claude's silence while it writes a
+    # long tool input (34s measured); the tight bound is on the START
+    # of a response and lives in stream()
+    assert (sdk.timeout.read, sdk.timeout.connect) == (120.0, 5.0)
     # one connection pool per key: nothing leaks per session, and the
     # judge's first call rides a connection the loop already warmed
     assert judge_llm._client is sdk
@@ -416,3 +425,78 @@ def test_unknown_tool_choice_fails_instead_of_meaning_auto(tool_choice):
     with pytest.raises(ValueError, match="tool_choice"):
         _collect(client, messages=_USER, tools=_TOOLS, tool_choice=tool_choice)
     assert fake.request == {}  # nothing was sent
+
+
+# ---- PR #24 round 2 ----
+
+
+def test_input_tokens_are_handed_over_before_any_output():
+    # Claude reports the input count at message_start; a consumer that
+    # abandons the stream right after (barge-in) must already hold it
+    client, fake = _client_with([_start(input_tokens=6172), _text("Mm-"), _text("hmm."), _end()])
+
+    async def run():
+        seen = []
+        async with aclosing(client.stream(messages=_USER)) as stream:
+            async for event in stream:
+                seen.append(event)
+                if isinstance(event, LLMTextDelta):
+                    break  # cut mid-reply
+        return seen
+
+    seen = asyncio.run(run())
+    assert seen[0] == LLMUsage(prompt_tokens=6172, completion_tokens=0)
+    assert not any(isinstance(e, LLMDone) for e in seen)
+    assert fake.stream_obj.closed
+
+
+def test_a_response_that_never_starts_times_out(monkeypatch):
+    # stalled or rate-limited: nothing else speaks during this wait, so
+    # the call must fail into the loop's spoken fallback
+    import agent.providers as providers
+
+    monkeypatch.setattr(providers, "_CLAUDE_FIRST_EVENT_TIMEOUT_S", 0.05)
+    client, _ = _client_with([30, _start(), _text("too late"), _end()])
+    with pytest.raises(TimeoutError):
+        _collect(client, messages=_USER)
+
+
+def test_silence_after_the_response_started_does_not_time_out(monkeypatch):
+    # Claude sends nothing while it writes a long tool input: the start
+    # deadline must be lifted by the first event, not run for the stream
+    import agent.providers as providers
+
+    monkeypatch.setattr(providers, "_CLAUDE_FIRST_EVENT_TIMEOUT_S", 0.05)
+    client, _ = _client_with(
+        [
+            _start(),
+            0.3,  # six deadlines' worth of quiet, mid-stream
+            _block_stop(type="tool_use", id="toolu_1", name="create_document", input={"content": "long"}),
+            _end("tool_use"),
+        ]
+    )
+    events = _collect(client, messages=_USER, tools=_TOOLS)
+    assert [type(e) for e in events] == [LLMUsage, LLMToolCall, LLMDone]
+
+
+@pytest.mark.parametrize(
+    ("result", "is_error"),
+    [
+        ({"status": "error", "error": "content is required"}, True),
+        ({"status": "timeout"}, True),
+        ({"status": "edited"}, False),
+        # the gate's refusal is steering to follow, not a failure to retry
+        ({"status": "refused", "error": "gate: ..."}, False),
+        ("plain text", False),
+    ],
+)
+def test_failed_tool_results_are_marked_as_errors(result, is_error):
+    _, messages = to_anthropic_messages(
+        [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "a", "name": "t", "arguments": {}}]},
+            {"role": "tool", "tool_call_id": "a", "name": "t", "content": result},
+        ]
+    )
+    block = messages[2]["content"][0]
+    assert block.get("is_error", False) is is_error

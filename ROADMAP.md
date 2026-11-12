@@ -562,7 +562,15 @@ forgotten:
   wrap-up instruction is hoisted to the front of the system prompt
   instead of arriving last — keep it in place as a mid-conversation
   system message when the context is restructured for caching
-  (feature 5).
+  (feature 5); (6) from review round 2, with measurements: a step
+  that goes straight to a tool call is SILENT until Claude has
+  written the whole call (3.0s for an 800-character document in the
+  live session, 34s for an 11,700-character one in a probe), and
+  the filler only arms when the call arrives. FILLER_DEADLINE_MS is
+  the wrong lever (it would fire on every plain turn). Fix: Claude
+  announces a tool call at its START (`content_block_start`, ~1.6s
+  in) — add that as an event in the FR-48 contract and arm the
+  filler there, FR-43's first-delta trigger.
 
 - **Questions and instructions never get "Hmm."** — lean talkative over
   unresponsive: a QUESTION always gets a real answer, a misheard one

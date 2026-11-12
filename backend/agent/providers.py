@@ -7,6 +7,7 @@ neutral contract defined here. Swapping a provider = add a branch here +
 set an env var.
 """
 
+import asyncio
 import functools
 import json
 import uuid
@@ -89,6 +90,11 @@ class LLMTextDelta:
 
 @dataclass
 class LLMUsage:
+    """Token counts. Carried by LLMDone; a client MAY also yield one
+    on its own, earlier, when the provider reports the input count up
+    front (Claude does) — LLMDone's supersedes it. An early one is not
+    model output: it does not mark the first token."""
+
     prompt_tokens: int
     completion_tokens: int
 
@@ -383,6 +389,10 @@ def to_anthropic_messages(messages: list[dict]) -> tuple[str | None, list[dict]]
                 if isinstance(result, str)
                 else json.dumps(result, ensure_ascii=False, default=str),
             }
+            # Failures only. A gate refusal (status "refused") is
+            # steering to follow, not an error to retry.
+            if isinstance(result, dict) and result.get("status") in ("error", "timeout"):
+                block["is_error"] = True
             if out and _is_tool_result_message(out[-1]):
                 out[-1]["content"].append(block)
             else:
@@ -409,12 +419,19 @@ _CLAUDE_MODELS = {
     "claude-haiku-5-5": {"thinking": {"type": "disabled"}},
 }
 
-# Voice budget, not SDK defaults (600s, 2 retries). The timeout bounds
-# each wait for bytes, not the whole stream: a stalled or rate-limited
-# call must fail into the loop's spoken fallback, because nothing else
-# covers that silence (the filler arms only on a tool call).
-_CLAUDE_TIMEOUT_S = 15.0
-_CLAUDE_MAX_RETRIES = 1
+# Voice budget, not SDK defaults (600s, 2 retries). Two different waits:
+#
+# - For the response to START: bounded tightly, with no retry. A stalled
+#   or rate-limited call must fail fast into the loop's spoken fallback,
+#   because nothing else covers that silence (the filler arms only on a
+#   tool call), and a retry lands in a conversation that has moved on.
+# - Between bytes once it has started: generous. Claude buffers a tool
+#   call's input and sends NOTHING while writing it — measured 34s of
+#   silence for an 11,700-character document (2026-11-12), and a read
+#   timeout shorter than that gap kills the call (verified at 8s).
+_CLAUDE_FIRST_EVENT_TIMEOUT_S = 10.0
+_CLAUDE_READ_TIMEOUT_S = 120.0
+_CLAUDE_CONNECT_TIMEOUT_S = 5.0
 
 
 @functools.lru_cache(maxsize=None)
@@ -424,7 +441,11 @@ def _anthropic_client(api_key: str) -> anthropic.AsyncAnthropic:
     the judge's separate pool was cold on the first gated create of
     every session."""
     return anthropic.AsyncAnthropic(
-        api_key=api_key, timeout=_CLAUDE_TIMEOUT_S, max_retries=_CLAUDE_MAX_RETRIES
+        api_key=api_key,
+        timeout=anthropic.Timeout(
+            _CLAUDE_READ_TIMEOUT_S, connect=_CLAUDE_CONNECT_TIMEOUT_S
+        ),
+        max_retries=0,
     )
 
 
@@ -462,8 +483,11 @@ class ClaudeLoopClient:
         max_output_tokens: int | None = None,
     ):
         """Same contract as GeminiLoopClient.stream: LLMTextDelta /
-        LLMToolCall events, then exactly one LLMDone. A tool call is
-        yielded when its block completes, carrying Claude's own id."""
+        LLMToolCall events, then exactly one LLMDone — plus one early
+        LLMUsage carrying the input-token count. A tool call is
+        yielded when its block completes, carrying Claude's own id.
+        Raises TimeoutError if the response has not started within
+        _CLAUDE_FIRST_EVENT_TIMEOUT_S."""
         _check_tool_choice(tool_choice)
         system, claude_messages = to_anthropic_messages(messages)
         request = {
@@ -484,32 +508,43 @@ class ClaudeLoopClient:
         stop_reason = None
         prompt_tokens = None
         completion_tokens = 0
-        async with self._client.beta.messages.stream(**request) as stream:
-            async for event in stream:
-                if event.type == "content_block_delta":
-                    if event.delta.type == "text_delta" and event.delta.text:
-                        produced = True
-                        yield LLMTextDelta(event.delta.text)
-                elif event.type == "content_block_stop":
-                    block = event.content_block
-                    if block.type == "tool_use":
-                        produced = True
-                        yield LLMToolCall(
-                            name=block.name, arguments=dict(block.input), id=block.id
-                        )
-                    elif block.type == "thinking" and block.thinking:
-                        # Count only: the note's text is conversation
-                        # content and must not reach INFO logs (FR-39).
-                        self._log.bind(
-                            event="llm.thinking_discarded",
-                            model=self._model,
-                            chars=len(block.thinking),
-                        ).info("between-tool-call note discarded (not spoken)")
-                elif event.type == "message_start":
-                    prompt_tokens = event.message.usage.input_tokens
-                elif event.type == "message_delta":
-                    stop_reason = event.delta.stop_reason
-                    completion_tokens = event.usage.output_tokens
+        # The deadline covers only the wait for the response to START (the
+        # request, its headers, the first event) and is lifted as soon as
+        # anything arrives.
+        async with asyncio.timeout(_CLAUDE_FIRST_EVENT_TIMEOUT_S) as first_event:
+            async with self._client.beta.messages.stream(**request) as stream:
+                async for event in stream:
+                    first_event.reschedule(None)
+                    if event.type == "content_block_delta":
+                        if event.delta.type == "text_delta" and event.delta.text:
+                            produced = True
+                            yield LLMTextDelta(event.delta.text)
+                    elif event.type == "content_block_stop":
+                        block = event.content_block
+                        if block.type == "tool_use":
+                            produced = True
+                            yield LLMToolCall(
+                                name=block.name,
+                                arguments=dict(block.input),
+                                id=block.id,
+                            )
+                        elif block.type == "thinking" and block.thinking:
+                            # Count only: the note's text is conversation
+                            # content and must not reach INFO logs (FR-39).
+                            self._log.bind(
+                                event="llm.thinking_discarded",
+                                model=self._model,
+                                chars=len(block.thinking),
+                            ).info("between-tool-call note discarded (not spoken)")
+                    elif event.type == "message_start":
+                        prompt_tokens = event.message.usage.input_tokens
+                        # Claude reports (and bills) the input before the
+                        # first token: hand it over now so an interrupted
+                        # call still records what it spent.
+                        yield LLMUsage(prompt_tokens=prompt_tokens, completion_tokens=0)
+                    elif event.type == "message_delta":
+                        stop_reason = event.delta.stop_reason
+                        completion_tokens = event.usage.output_tokens
         usage = (
             LLMUsage(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
             if prompt_tokens is not None

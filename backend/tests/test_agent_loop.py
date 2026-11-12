@@ -501,6 +501,44 @@ def test_interrupt_mid_stream_records_spoken_prefix_with_sentinel():
     assert "First sentence." in trace.output
 
 
+def test_interrupted_call_still_records_the_input_it_was_billed_for():
+    """PR #24 round 2: Claude reports input tokens before the first
+    output token. A barge-in used to drop them (usage only ever left the
+    client on the final event), so the usage record under-counted exactly
+    the turns that were cut."""
+    h = make_loop([[LLMUsage(6172, 0), LLMTextDelta("First sentence. "), 60]])
+
+    async def run():
+        task = asyncio.create_task(h.loop._run_turn("talk"))
+        h.loop._turn_task = task
+        await asyncio.sleep(0.1)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        h.loop._turn_task = None
+        h.loop._finalize_interrupted_turn()
+
+    asyncio.run(run())
+    trace = _queued(h.traces, LLMTrace)[0]
+    assert trace.finish_reason == "interrupted"
+    assert (trace.prompt_tokens, trace.completion_tokens) == (6172, 0)
+    assert any(
+        e.stage == "llm" and e.quantity == 6172 for e in _queued(h.recorder, UsageEvent)
+    )
+
+
+def test_early_usage_does_not_count_as_the_first_token():
+    """The early usage event arrives with the response headers; time to
+    first token must still be measured to real output."""
+    h = make_loop([[LLMUsage(100, 0), 0.15, LLMTextDelta("Hello."), _done()]])
+
+    asyncio.run(h.loop._run_turn("hi"))
+
+    trace = _queued(h.traces, LLMTrace)[0]
+    assert trace.ttfb_ms >= 140
+    # LLMDone carried no usage here: the early count is kept, not erased
+    assert trace.prompt_tokens == 100
+
+
 def test_interrupt_mid_chain_write_finishes_reads_abandoned_no_new_step():
     """The mandated mid-chain interrupt: the write completes and updates
     its in_progress placeholder IN PLACE, cancelled reads get terminal
@@ -1735,6 +1773,32 @@ def test_last_assistant_text_skips_tool_call_step_entries():
         provider.last_assistant_text()
         == "Do you want a new document for this?"
     )
+
+
+def test_last_assistant_text_never_returns_an_offer_from_before_an_earlier_turn():
+    """PR #24 round 2 blocker: the judge is told this text is what the
+    latest turn responds to. An offer the user DECLINED two turns ago,
+    followed by a turn that left no spoken reply (barge-in during the
+    tool round), must not be paired with a later unrelated 'yeah'."""
+    provider = ContextProvider("base", session_id="s-t")
+    provider.append_user("capture the hiring plan")
+    provider.append_assistant("No existing document fits. Do you want a new document for this?")
+    provider.append_user("no, add it to the launch plan")
+    provider.append_step(
+        "",
+        [LLMToolCall(name="edit_document", arguments={"document_id": 1}, id="c1")],
+        [{"status": "in_progress"}],
+        interrupted=True,
+    )
+    provider.append_user("yeah, that's fine")
+    assert provider.last_assistant_text() is None
+    # and still None once the current turn's own tool step is in
+    provider.append_step(
+        "One moment. ",
+        [LLMToolCall(name="list_documents", arguments={}, id="c2")],
+        [{"status": "ok"}],
+    )
+    assert provider.last_assistant_text() is None
 
 
 def test_last_assistant_text_keeps_the_end_of_a_long_reply():

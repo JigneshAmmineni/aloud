@@ -125,10 +125,23 @@ Two models sit behind the one FR-48 seam (`agent/providers.py`,
 - **One SDK client per process.** Every `ClaudeLoopClient` (one for the
   loop and one for the judge, per session) wraps the same
   `AsyncAnthropic`, so there is one connection pool and the judge's
-  first call rides a connection the loop already opened. It is set to
-  a 15s wait-for-bytes timeout and 1 retry instead of the SDK's 600s
-  and 2: a stalled or rate-limited call fails into the loop's spoken
-  fallback rather than leaving the user in silence.
+  first call rides a connection the loop already opened. No retries
+  (the SDK default is 2), and two separate time bounds: 10s for a
+  response to START, enforced in `ClaudeLoopClient.stream`, so a
+  stalled or rate-limited call fails into the loop's spoken fallback;
+  and 120s between bytes once it has started. The second must be
+  generous: Claude buffers a tool call's input and sends nothing while
+  writing it (measured: 34s of silence for an 11,700-character
+  document), and a shorter read timeout kills the call mid-document.
+- **Usage arrives early.** Claude reports input tokens when a response
+  starts; the client hands that to the loop at once (an early
+  `LLMUsage` event), so an interrupted or dropped call still records
+  the input it was billed for. Gemini reports usage only at the end.
+- **Known gap: silence before a tool call.** A step that goes straight
+  to a tool call is silent until the whole call has been written (3.0s
+  for an 800-character document live, far longer for a long one), and
+  the filler arms only when the call arrives. Carried in ROADMAP §3.3:
+  arm it when Claude announces the call, about 1.6s in.
 - **Server-side fallback (Sonnet only).** Sonnet requests carry the
   `server-side-fallback-2026-07-01` beta with `fallbacks: "default"`: a
   request Sonnet 5.5 declines in the `cyber` or `frontier_llm` category is
