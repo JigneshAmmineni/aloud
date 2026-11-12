@@ -589,7 +589,11 @@ FR-7 still governs: the agent acts when the user asks.
   own) takes the same spoken-fallback path, distinguished via the
   **finish reason FR-48's client exposes**, and **no empty assistant
   message is ever appended** — an empty-content message 400s every later
-  request on the Claude swap. Mandated tests: (a) a model that keeps calling tools terminates
+  request on the Claude swap. **Tool calls from a blocked or truncated
+  step never execute**: the generation is incomplete, so its tool input
+  may be half-written or belong to output the provider says to discard;
+  the step takes the same spoken-fallback path and ends the turn, and
+  text already spoken in that step stays in the context. Mandated tests: (a) a model that keeps calling tools terminates
   at the cap with a spoken, text-only turn — never silence, never an
   unbounded chain; (b) a handler hanging past the timeout yields a timeout
   result the next step sees, and the turn still speaks; (c) a handler that

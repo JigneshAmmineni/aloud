@@ -7,6 +7,7 @@ neutral contract defined here. Swapping a provider = add a branch here +
 set an env var.
 """
 
+import functools
 import json
 import uuid
 from dataclasses import dataclass, field
@@ -108,6 +109,14 @@ _GEMINI_FINISH_MAP = {
     "STOP": FINISH_STOP,
     "MAX_TOKENS": FINISH_TRUNCATED,
 }
+
+
+def _check_tool_choice(tool_choice: str) -> None:
+    """FR-48 names a silent mistranslation of this directive as what
+    would unguard the greeting: any spelling other than the two the
+    loop uses must fail loudly, never fall through to "auto"."""
+    if tool_choice not in ("auto", "none"):
+        raise ValueError(f"unknown tool_choice: {tool_choice!r}")
 
 
 def map_gemini_finish(raw: object, produced_output: bool) -> str:
@@ -230,6 +239,7 @@ class GeminiLoopClient:
         step; spike-verified against the live API). `max_output_tokens`
         bounds short classifier calls (the FR-60 judge); None leaves the
         model default."""
+        _check_tool_choice(tool_choice)
         config = genai_types.GenerateContentConfig(
             thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
         )
@@ -330,7 +340,12 @@ def _is_tool_result_message(message: dict) -> bool:
 def to_anthropic_messages(messages: list[dict]) -> tuple[str | None, list[dict]]:
     """Neutral messages → (system, messages).
 
-    System messages hoist into the top-level system prompt. An assistant
+    System messages hoist into the top-level system prompt — including
+    the forced final step's ephemeral wrap-up line, which therefore
+    lands ahead of the conversation instead of last (accepted, PR #24
+    round 1: tool_choice none is the hard guarantee on that call;
+    keeping it in place as a mid-conversation system message belongs
+    with the prompt-caching restructure, ROADMAP feature 5). An assistant
     step becomes one message of a text block (when it has speakable text —
     Claude rejects empty and whitespace-only text blocks) plus one tool_use
     block per call. Every result of that step lands in ONE user message of
@@ -394,6 +409,25 @@ _CLAUDE_MODELS = {
     "claude-haiku-5-5": {"thinking": {"type": "disabled"}},
 }
 
+# Voice budget, not SDK defaults (600s, 2 retries). The timeout bounds
+# each wait for bytes, not the whole stream: a stalled or rate-limited
+# call must fail into the loop's spoken fallback, because nothing else
+# covers that silence (the filler arms only on a tool call).
+_CLAUDE_TIMEOUT_S = 15.0
+_CLAUDE_MAX_RETRIES = 1
+
+
+@functools.lru_cache(maxsize=None)
+def _anthropic_client(api_key: str) -> anthropic.AsyncAnthropic:
+    """One SDK client, and so one connection pool, per key for the
+    life of the process. Per-session clients were never closed, and
+    the judge's separate pool was cold on the first gated create of
+    every session."""
+    return anthropic.AsyncAnthropic(
+        api_key=api_key, timeout=_CLAUDE_TIMEOUT_S, max_retries=_CLAUDE_MAX_RETRIES
+    )
+
+
 # The cap when the caller sets none. Sized for a whole document arriving as
 # one create_document input, not for a spoken reply.
 _CLAUDE_MAX_TOKENS = 64000
@@ -402,22 +436,23 @@ _CLAUDE_MAX_TOKENS = 64000
 class ClaudeLoopClient:
     """FR-48's thin streaming client, Claude branch.
 
-    One long-lived AsyncAnthropic per instance (per session), so calls
-    reuse its connection pool. Thinking blocks are never yielded and never
+    A thin per-session wrapper over the process-wide SDK client.
+    Thinking blocks are never yielded and never
     replayed: with thinking off the only ones that arrive are Sonnet's
     longer between-tool-call notes, and the context this client is fed is
     edited in place between calls (FR-46, FR-61), which replayed thinking
     blocks do not survive."""
 
-    def __init__(self, api_key: str, model: str, effort: str):
+    def __init__(self, api_key: str, model: str, effort: str, session_id: str = ""):
         if model not in _CLAUDE_MODELS:
             raise ValueError(
                 f"Unsupported Anthropic model: {model!r} — supported: "
                 + ", ".join(_CLAUDE_MODELS)
             )
-        self._client = anthropic.AsyncAnthropic(api_key=api_key)
+        self._client = _anthropic_client(api_key)
         self._model = model
         self._effort = effort
+        self._log = logger.bind(session_id=session_id, component="agent.llm")
 
     async def stream(
         self,
@@ -429,6 +464,7 @@ class ClaudeLoopClient:
         """Same contract as GeminiLoopClient.stream: LLMTextDelta /
         LLMToolCall events, then exactly one LLMDone. A tool call is
         yielded when its block completes, carrying Claude's own id."""
+        _check_tool_choice(tool_choice)
         system, claude_messages = to_anthropic_messages(messages)
         request = {
             "model": self._model,
@@ -464,7 +500,7 @@ class ClaudeLoopClient:
                     elif block.type == "thinking" and block.thinking:
                         # Count only: the note's text is conversation
                         # content and must not reach INFO logs (FR-39).
-                        logger.bind(
+                        self._log.bind(
                             event="llm.thinking_discarded",
                             model=self._model,
                             chars=len(block.thinking),
@@ -482,22 +518,40 @@ class ClaudeLoopClient:
         yield LLMDone(map_anthropic_finish(stop_reason, produced), usage)
 
 
-def _make_llm(settings: Settings, model: str, effort: str):
+def _make_llm(settings: Settings, model: str, effort: str, session_id: str):
     if settings.llm_provider == "anthropic":
         return ClaudeLoopClient(
-            api_key=settings.anthropic_api_key, model=model, effort=effort
+            api_key=settings.anthropic_api_key,
+            model=model,
+            effort=effort,
+            session_id=session_id,
         )
     if settings.llm_provider == "google":
+        if model.startswith("claude"):
+            # the swap-back's leftover line (JUDGE_MODEL is the easy one
+            # to miss): a judge that 404s refuses every create, silently
+            raise ValueError(
+                f"Anthropic model {model!r} configured under LLM_PROVIDER=google"
+            )
         return GeminiLoopClient(api_key=settings.google_api_key, model=model)
     raise ValueError(f"Unknown LLM_PROVIDER: {settings.llm_provider}")
 
 
-def make_loop_llm(settings: Settings):
+def make_loop_llm(settings: Settings, session_id: str = ""):
     """FR-48 factory: the streaming client the agent loop calls through."""
-    return _make_llm(settings, settings.llm_model, settings.llm_effort)
+    return _make_llm(settings, settings.llm_model, settings.llm_effort, session_id)
 
 
-def make_judge_llm(settings: Settings):
+def make_judge_llm(settings: Settings, session_id: str = ""):
     """The FR-60 gate's client: same seam, the smaller judge model. A
     one-word verdict needs no more than the lowest effort."""
-    return _make_llm(settings, settings.judge_model, "low")
+    return _make_llm(settings, settings.judge_model, "low", session_id)
+
+
+def validate_llm_config(settings: Settings) -> None:
+    """Boot-time check (app/main.py): build both clients once so a
+    provider/model pair no client can run stops the container from
+    starting. Left to session start, the same mistake boots clean,
+    passes the deploy health check, and then fails every session."""
+    make_loop_llm(settings)
+    make_judge_llm(settings)

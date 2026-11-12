@@ -59,7 +59,9 @@ from agent.prompts import (
     WRAP_UP_INSTRUCTION,
 )
 from agent.providers import (
+    FINISH_BLOCKED,
     FINISH_INTERRUPTED,
+    FINISH_TRUNCATED,
     LLMDone,
     LLMTextDelta,
     LLMToolCall,
@@ -142,8 +144,11 @@ class AgentLoopProcessor(FrameProcessor):
         emit,
         write_registry: set,
         greeting_trigger: str,  # required: dropping it must not pass a green suite
-        judge_llm=None,
-        judge_model_name: str | None = None,
+        # required for the same reason: defaulted to the loop's own
+        # client, a dropped kwarg would run every verdict on the loop
+        # model, at its price and latency, under a green suite
+        judge_llm,
+        judge_model_name: str,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -154,10 +159,9 @@ class AgentLoopProcessor(FrameProcessor):
         self._session_id = session_id
         self._user_id = user_id
         self._model_name = model_name
-        # FR-60: the gate's judge may run on a smaller model than the loop;
-        # unset, it shares the loop's client.
-        self._judge_llm = judge_llm or llm
-        self._judge_model_name = judge_model_name or model_name
+        # FR-60: the gate's judge runs on its own (smaller) model
+        self._judge_llm = judge_llm
+        self._judge_model_name = judge_model_name
         self._recorder = recorder
         self._traces = traces
         self._emit = emit
@@ -479,6 +483,21 @@ class AgentLoopProcessor(FrameProcessor):
                 "model returned neither text nor tool calls"
             )
             await self._speak_fallback(state, reason=finish or "empty")
+            return True
+
+        if state.calls and finish in (FINISH_TRUNCATED, FINISH_BLOCKED):
+            # A cut or declined generation is not a complete one: its
+            # tool input may be half-written (a length cut mid-call) or
+            # belong to output the provider says to discard (a refusal
+            # after partial output). Run nothing — a truncated document
+            # must never be written — and say so via the fallback.
+            log.bind(
+                event="agent.incomplete_step_tools_skipped",
+                calls=len(state.calls),
+                finish_reason=finish,
+            ).warning("tool calls from an incomplete generation were not run")
+            state.tools_done = True  # the armed filler's round is over
+            await self._speak_fallback(state, reason=f"{finish}_tool_calls")
             return True
 
         if state.calls and tool_choice == "none":

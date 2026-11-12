@@ -508,7 +508,14 @@ forgotten:
   the loop speaks it ("I'll add that to the document", "the gate
   refused again") — decide between a prompt fix and not speaking a
   step's text when that step calls a tool; (3) the judge ran over
-  its ~1s bar twice (1.2s, 1.9s).
+  its ~1s bar twice (1.2s, 1.9s); (4) from PR #24's review: run an
+  `LLM_EFFORT=low` A/B — the recommended level for chat-shaped
+  turns, no code needed, and it may cut first-token time and reply
+  length together; (5) from the same review: on Claude the forced
+  wrap-up instruction is hoisted to the front of the system prompt
+  instead of arriving last — keep it in place as a mid-conversation
+  system message when the context is restructured for caching
+  (feature 5).
 
 - **Questions and instructions never get "Hmm."** — lean talkative over
   unresponsive: a QUESTION always gets a real answer, a misheard one

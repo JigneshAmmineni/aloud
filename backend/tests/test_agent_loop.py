@@ -17,6 +17,7 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import pytest
 from pipecat.frames.frames import LLMTextFrame
 from pipecat.observers.base_observer import FramePushed
 from pipecat.processors.frame_processor import FrameDirection
@@ -118,9 +119,13 @@ def make_loop(scripts, tools=(), current_turn=2, **loop_kwargs):
         emitted.append(data)
 
     provider = ContextProvider("base prompt", session_id="s-1")
+    llm = FakeLLM(scripts)
+    # one scripted client serves both roles unless a test splits them
+    loop_kwargs.setdefault("judge_llm", llm)
+    loop_kwargs.setdefault("judge_model_name", "test-model")
     loop = AgentLoopProcessor(
         context=provider,
-        llm=FakeLLM(scripts),
+        llm=llm,
         registry=list(tools),
         session_id="s-1",
         user_id="uid-a",
@@ -925,6 +930,71 @@ def test_provider_error_mid_stream_still_writes_a_trace_row():
     assert "Recovered." in _pushed_text(h)
 
 
+@pytest.mark.parametrize("finish", ["truncated", "blocked"])
+def test_tool_calls_from_an_incomplete_generation_are_not_run(finish):
+    """PR #24 round 1: a length-cut or declined generation can carry a
+    half-written tool input, or one the provider says to discard. The
+    write must not run; the turn says so and ends."""
+    executed = []
+
+    async def spy(args, ctx):
+        executed.append(args)
+        return {"status": "created"}
+
+    tool = Tool(
+        name="save",
+        description="test write tool",
+        parameters={"type": "object", "properties": {}},
+        handler=spy,
+        is_write=True,
+    )
+    scripts = [
+        [
+            LLMTextDelta("Writing that up."),
+            LLMToolCall(name="save", arguments={"content": "half a docu"}, id="c1"),
+            LLMDone(finish, None),
+        ],
+        [LLMTextDelta("Recovered."), _done()],
+    ]
+    h = make_loop(scripts, tools=[tool])
+
+    async def run():
+        await h.loop._run_turn("write it up")
+        await h.loop._run_turn("again")
+
+    asyncio.run(run())
+
+    assert executed == []  # nothing was written
+    assert any(line in _pushed_text(h) for line in FALLBACK_LINES)
+    built = h.ctx.build()
+    # no tool round entered the context; the words already spoken did
+    assert not any(m["role"] == "tool" for m in built)
+    assert any(
+        m["role"] == "assistant" and "Writing that up." in m["content"] for m in built
+    )
+    assert "Recovered." in _pushed_text(h)  # the session carries on
+
+
+def test_loop_cannot_be_built_without_its_judge_client():
+    """PR #24 round 1: with a default of 'the loop's own client', a
+    dropped kwarg would run every verdict on the loop model under a
+    green suite."""
+    with pytest.raises(TypeError, match="judge_llm"):
+        AgentLoopProcessor(
+            context=ContextProvider("base", session_id="s-1"),
+            llm=FakeLLM([]),
+            registry=[],
+            session_id="s-1",
+            user_id="uid-a",
+            model_name="test-model",
+            recorder=UsageRecorder("s-1", "uid-a"),
+            traces=TraceRecorder("s-1", "uid-a"),
+            emit=None,
+            write_registry=set(),
+            greeting_trigger=GREETING_TRIGGER,
+        )
+
+
 def test_wrap_up_call_returning_tools_never_executes_them():
     """Round-3 should-fix 4: tool_choice none is a request — a wrap-up
     that comes back with tool calls must not run them or end silently."""
@@ -1665,6 +1735,21 @@ def test_last_assistant_text_skips_tool_call_step_entries():
         provider.last_assistant_text()
         == "Do you want a new document for this?"
     )
+
+
+def test_last_assistant_text_keeps_the_end_of_a_long_reply():
+    """PR #24 round 1: a reply explains first and asks last. Capped from
+    the head, a long one reached the judge without its offer — the same
+    refusal the evidence reordering fixed."""
+    provider = ContextProvider("base", session_id="s-t")
+    provider.append_user("capture the supplier research")
+    reply = "None of your documents cover this. " * 12 + "Do you want a new document for this?"
+    assert len(reply) > 300
+    provider.append_assistant(reply)
+    provider.append_user("yeah")
+    text = provider.last_assistant_text()
+    assert len(text) == 300
+    assert text.endswith("Do you want a new document for this?")
 
 
 def test_entry_sentences_released_before_append_still_vouch_and_truncate():

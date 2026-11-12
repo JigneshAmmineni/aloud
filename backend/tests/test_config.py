@@ -94,6 +94,16 @@ def test_required_llm_key_follows_the_provider(monkeypatch):
     assert s.anthropic_api_key == ""
 
 
+@pytest.mark.parametrize("effort", ["xhigh", "max", "Medium", "fast"])
+def test_llm_effort_outside_the_thinking_off_range_fails_at_boot(monkeypatch, effort):
+    # xhigh and max are real API values, but the API rejects every call
+    # at them while thinking is off (PR #24 round 1)
+    _clear_optional(monkeypatch)
+    monkeypatch.setenv("LLM_EFFORT", effort)
+    with pytest.raises(RuntimeError, match="LLM_EFFORT"):
+        load_settings()
+
+
 def test_env_overrides(monkeypatch):
     _clear_optional(monkeypatch)
     monkeypatch.setenv("LLM_MODEL", "gemini-2.5-flash-lite")

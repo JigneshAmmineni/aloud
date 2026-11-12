@@ -9,6 +9,7 @@ from agent.providers import (
     make_loop_llm,
     make_stt,
     make_tts,
+    validate_llm_config,
 )
 from agent.sanitizer import make_text_filters
 from app.config import Settings
@@ -83,6 +84,44 @@ def test_anthropic_provider_rejects_a_model_it_has_no_request_shape_for():
     # LLM_MODEL line in .env under LLM_PROVIDER=anthropic
     with pytest.raises(ValueError, match="gemini-2.5-flash"):
         make_loop_llm(_settings(llm_model="gemini-2.5-flash"))
+
+
+def test_boot_validation_rejects_every_pair_no_client_can_run():
+    """PR #24 round 1: these mistakes used to boot clean and fail (or,
+    for the judge, silently refuse) per session."""
+    validate_llm_config(_settings())  # the shipped defaults pass
+    validate_llm_config(
+        _settings(llm_provider="google", llm_model="gemini-2.5-flash", judge_model="gemini-2.5-flash")
+    )
+    # swap to Claude with the Gemini model line left behind
+    with pytest.raises(ValueError, match="gemini-2.5-flash"):
+        validate_llm_config(_settings(llm_model="gemini-2.5-flash"))
+    # a judge model the provider cannot run
+    with pytest.raises(ValueError, match="claude-opus-5-5"):
+        validate_llm_config(_settings(judge_model="claude-opus-5-5"))
+    # swap back to Gemini with the Claude judge line left behind
+    with pytest.raises(ValueError, match="claude-haiku-5-5"):
+        validate_llm_config(_settings(llm_provider="google", llm_model="gemini-2.5-flash"))
+
+
+def test_app_refuses_to_boot_on_a_model_the_provider_cannot_run():
+    """The check has to run at import of app.main (where the deploy
+    health check can see it fail), not at the first session."""
+    import os
+    import subprocess
+    import sys
+
+    env = dict(os.environ, LLM_PROVIDER="anthropic", LLM_MODEL="gemini-2.5-flash")
+    env.pop("JUDGE_MODEL", None)
+    result = subprocess.run(
+        [sys.executable, "-c", "import app.main"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode != 0
+    assert "Unsupported Anthropic model" in result.stderr
 
 
 def test_unknown_providers_raise():

@@ -14,6 +14,9 @@ _REQUIRED = (
 # here and fails in the providers.py factory, which names it.
 _LLM_KEY = {"anthropic": "ANTHROPIC_API_KEY", "google": "GOOGLE_API_KEY"}
 _DEFAULT_LLM_MODEL = {"anthropic": "claude-sonnet-5-5", "google": "gemini-2.5-flash"}
+# The loop runs with thinking off, and the API rejects every call at a
+# higher effort than these when thinking is off.
+_LLM_EFFORTS = ("low", "medium", "high")
 
 # Public Cartesia voice used in Pipecat examples; override with CARTESIA_VOICE_ID.
 _DEFAULT_VOICE_ID = "71a7ad14-091c-4e8e-a314-022ece01c121"
@@ -73,6 +76,11 @@ def load_settings() -> Settings:
             + ", ".join(missing)
             + " — add them to .env (see .env.example)."
         )
+    llm_effort = os.getenv("LLM_EFFORT") or "medium"
+    if llm_effort not in _LLM_EFFORTS:
+        raise RuntimeError(
+            f"LLM_EFFORT must be one of {', '.join(_LLM_EFFORTS)} — got {llm_effort!r}."
+        )
     llm_model = os.getenv("LLM_MODEL") or _DEFAULT_LLM_MODEL.get(llm_provider, "")
     default_judge = "claude-haiku-5-5" if llm_provider == "anthropic" else llm_model
     return Settings(
@@ -83,7 +91,7 @@ def load_settings() -> Settings:
         cartesia_voice_id=os.getenv("CARTESIA_VOICE_ID") or _DEFAULT_VOICE_ID,
         llm_model=llm_model,
         judge_model=os.getenv("JUDGE_MODEL") or default_judge,
-        llm_effort=os.getenv("LLM_EFFORT") or "medium",
+        llm_effort=llm_effort,
         stt_provider=os.getenv("STT_PROVIDER") or "deepgram_flux",
         llm_provider=llm_provider,
         tts_provider=os.getenv("TTS_PROVIDER") or "cartesia",

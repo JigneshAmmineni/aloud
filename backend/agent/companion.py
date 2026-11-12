@@ -238,12 +238,12 @@ class CompanionAgent:
 
         loop_stage = AgentLoopProcessor(
             context=context_provider,
-            llm=make_loop_llm(self._settings),
+            llm=make_loop_llm(self._settings, session_id),
             registry=build_registry(),
             session_id=session_id,
             user_id=self._user_id,
             model_name=self._settings.llm_model,
-            judge_llm=make_judge_llm(self._settings),
+            judge_llm=make_judge_llm(self._settings, session_id),
             judge_model_name=self._settings.judge_model,
             recorder=recorder,
             traces=traces,

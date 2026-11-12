@@ -112,9 +112,23 @@ Two models sit behind the one FR-48 seam (`agent/providers.py`,
   provider — no second vendor.
 - **Per-model request fields** live in one table, `_CLAUDE_MODELS`. The two
   models spell "thinking off" differently and each answers 400 to the
-  other's spelling, so a model missing from that table is rejected when
-  the client is constructed rather than at the first call. Adding a model
-  means adding its row.
+  other's spelling, so a model missing from that table is rejected
+  outright. Adding a model means adding its row.
+- **Checked at boot.** `app/main.py` calls `validate_llm_config` right
+  after loading settings: it builds both clients once, so a
+  provider/model pair no client can run (a Gemini `LLM_MODEL` left
+  under `LLM_PROVIDER=anthropic`, or a Claude `JUDGE_MODEL` left under
+  `google`) stops the container from starting, where the deploy health
+  check sees it. `LLM_EFFORT` outside `low | medium | high` fails the
+  same way in `load_settings` (higher levels are rejected by the API
+  while thinking is off).
+- **One SDK client per process.** Every `ClaudeLoopClient` (one for the
+  loop and one for the judge, per session) wraps the same
+  `AsyncAnthropic`, so there is one connection pool and the judge's
+  first call rides a connection the loop already opened. It is set to
+  a 15s wait-for-bytes timeout and 1 retry instead of the SDK's 600s
+  and 2: a stalled or rate-limited call fails into the loop's spoken
+  fallback rather than leaving the user in silence.
 - **Server-side fallback (Sonnet only).** Sonnet requests carry the
   `server-side-fallback-2026-07-01` beta with `fallbacks: "default"`: a
   request Sonnet 5.5 declines in the `cyber` or `frontier_llm` category is
@@ -231,8 +245,8 @@ separate hand-maintained files; deploys never sync them)**
 - [ ] The provider selector / model env (`STT_PROVIDER`, `LLM_PROVIDER`,
   `LLM_MODEL`, `JUDGE_MODEL`, `LLM_EFFORT`, `TTS_PROVIDER`) and the new
   provider's API key. A model line left over from the old provider
-  boots fine and then fails every session at start (the client rejects
-  a model it has no request shape for) — `scripts/smoke_llm.py` shows it.
+  stops the backend from booting, with an error naming the model
+  (`validate_llm_config`).
 - [ ] **The matching `RATE_*` values — rates are the OLD provider's prices
   until you change them, and every admin cost figure quietly becomes wrong
   the moment the swap deploys.**

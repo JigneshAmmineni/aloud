@@ -389,3 +389,30 @@ def test_abandoning_the_stream_closes_the_provider_connection():
 def test_unsupported_model_fails_at_construction():
     with pytest.raises(ValueError, match="claude-sonnet-5-5"):
         ClaudeLoopClient(api_key="a_fake", model="claude-opus-5-5", effort="medium")
+
+
+# ---- PR #24 round 1 ----
+
+
+def test_sdk_client_is_bounded_and_shared_across_sessions():
+    # SDK defaults are a 600s timeout and 2 retries: a stalled or
+    # rate-limited call would be silence the filler never covers
+    loop_llm = ClaudeLoopClient(api_key="a_fake", model="claude-sonnet-5-5", effort="medium")
+    judge_llm = ClaudeLoopClient(api_key="a_fake", model="claude-haiku-5-5", effort="low")
+    sdk = loop_llm._client
+    assert sdk.timeout == 15.0
+    assert sdk.max_retries == 1
+    # one connection pool per key: nothing leaks per session, and the
+    # judge's first call rides a connection the loop already warmed
+    assert judge_llm._client is sdk
+    assert ClaudeLoopClient(api_key="other", model="claude-haiku-5-5", effort="low")._client is not sdk
+
+
+@pytest.mark.parametrize("tool_choice", ["None", "NONE", "required", ""])
+def test_unknown_tool_choice_fails_instead_of_meaning_auto(tool_choice):
+    # FR-48: a silent mistranslation here is what would open the greeting
+    # to tool calls
+    client, fake = _client_with([_start(), _text("hi"), _end()])
+    with pytest.raises(ValueError, match="tool_choice"):
+        _collect(client, messages=_USER, tools=_TOOLS, tool_choice=tool_choice)
+    assert fake.request == {}  # nothing was sent

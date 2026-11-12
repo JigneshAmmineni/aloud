@@ -50,6 +50,7 @@ from pipecat.transports.smallwebrtc.request_handler import (
 )
 
 from agent.companion import CompanionAgent, drain_live_sessions
+from agent.providers import validate_llm_config
 from agent.registry import notify_document_deleted, notify_document_updated
 from app import admin, auth
 from app.auth import AuthedUser, get_current_user_checked, get_current_user_id
@@ -85,6 +86,7 @@ from db.sessions_repo import session_is_active, sweep_orphaned_sessions
 from db.users_repo import provision_user
 
 settings = load_settings()  # fail fast at boot, naming any missing env vars
+validate_llm_config(settings)  # ...and any model the provider cannot run
 
 
 def _install_sigterm_goodbye() -> None:

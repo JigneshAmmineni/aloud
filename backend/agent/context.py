@@ -258,7 +258,9 @@ class ContextProvider:
         """FR-60 round 2: the judge's evidence must include the assistant's
         own preceding reply — after the gate's branch (3) asks "do you
         want a new document?", the user's bare "yes" has no referent
-        without the question it answers."""
+        without the question it answers. The cap keeps the TAIL: a reply
+        explains first and asks last, so the head of a long one is the
+        part without the offer (PR #24 round 1)."""
         for m in reversed(self._messages):
             # skip tool-call step entries: their content is the FR-43
             # filler whenever the round was slow, and "One moment." next
@@ -267,7 +269,7 @@ class ContextProvider:
             if m.get("role") == "assistant" and not m.get("tool_calls"):
                 content = m.get("content") or ""
                 if content.strip():
-                    return content.strip()[:max_chars]
+                    return content.strip()[-max_chars:]
         return None
 
     def recent_user_texts(self, n: int = 4) -> list[str]:
