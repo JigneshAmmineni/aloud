@@ -75,4 +75,24 @@ under discussion:
 
 ## Results
 
-_(append after the owner's run — needs `ANTHROPIC_API_KEY` in `.env`)_
+### Part 1 — smoke: PASS (2026-11-12)
+
+`provider=anthropic loop=claude-sonnet-5-5 judge=claude-haiku-5-5`, `OK`
+on two consecutive runs. The API accepted both request shapes: thinking
+`between_tools` plus the server-side fallback beta on Sonnet, thinking
+`disabled` on Haiku.
+
+| Run | Loop TTFB | Loop usage (in / out) | Judge duration | Judge usage (in / out) | Verdict |
+|---|---|---|---|---|---|
+| 1 | 1748 ms | 407 / 14 | 701 ms | 343 / 4 | YES |
+| 2 | 2043 ms | 407 / 14 | 815 ms | 343 / 4 | YES |
+
+For comparison, the same script on Gemini 2.5 Flash an hour earlier:
+loop TTFB 531 ms, judge 574 ms. Every smoke run is a new process, so
+these numbers include opening the connection and are a worst case; a
+session reuses one client, and Part 2's `step.1.ttfb.llm` is the figure
+that counts. They do say the first-token time is the thing to watch.
+
+### Parts 2 and 3
+
+_(append after the owner's live session)_
