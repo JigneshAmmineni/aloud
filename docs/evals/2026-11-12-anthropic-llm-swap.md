@@ -93,6 +93,57 @@ these numbers include opening the connection and are a worst case; a
 session reuses one client, and Part 2's `step.1.ttfb.llm` is the figure
 that counts. They do say the first-token time is the thing to watch.
 
-### Parts 2 and 3
+### Parts 2 and 3 — first live session (owner, 2026-11-12)
 
-_(append after the owner's live session)_
+Session `c0ced259…`, 10 turns, about 6 minutes, one unrelated document
+in the account. Not the scripted rows; an ordinary working session.
+Owner verdict: noticeably smarter than Gemini, latency not a noticeable
+problem, and it knew when to keep listening and when to answer.
+
+**Latency (Part 2).**
+
+| Measure | Recorded |
+|---|---|
+| `step.1.ttfb.llm`, plain turns (n=5) | 1432–1504 ms |
+| end-of-speech → first audio, plain turns | 2096–2321 ms |
+| end-of-speech → first audio, tool turns (n=4) | 3604–4496 ms as recorded |
+| `step.N.gate.create_document` (n=4) | 685, 976, 1230, 1884 ms — two over the ~1s bar |
+| `llm.thinking_discarded` | 0 — no between-tool-call note was dropped |
+
+First-token time is about 0.15–0.2s over the Gemini baseline; plain turns
+stay under the soft 3s target, tool turns do not.
+
+**Tokens.** Sonnet: 79,764 in / 2,308 out over 17 calls. Haiku: 2,046 in /
+16 out over 4 calls. About $0.18 for the session, nearly all of it input:
+every call resends a context that starts at 3,470 tokens (system prompt
+plus tool definitions) and reached 7,036.
+
+**Finding 1 — the gate refused a confirmed create. FIXED in this PR.**
+The agent asked "No existing document fits this. Do you want a new
+document for this?", the owner said "Yeah.", and the Haiku judge answered
+NO twice in that turn. The judge's evidence listed the assistant's reply
+AHEAD of the user turns, so nothing tied the bare "Yeah." to the offer.
+Fix: the reply now follows the user turns and is described as what the
+latest turn responds to, and the judge's instructions name a plain yes to
+a new-document offer as a YES. Replayed live against Haiku, 12 cases x 3
+runs: before 33/36 (the owner's exact turn failed 3/3), after 36/36,
+including yes-to-an-EDIT-offer, a declined offer, and a stale offer,
+which must stay NO.
+
+**Finding 2 — tool work is narrated aloud. Carried to the next PR.**
+Sonnet writes a short sentence before most tool calls and the loop speaks
+it: "I'll write it up as a cleaned-up idea document.", "I'll add that to
+the document.", and, after the refusals above, "The gate refused again,
+even after the user's yes. Per the instructions, I'll check for an
+existing document to write to." The prompt's "work silently" rule does
+not hold on this model. These stayed `text` (short), which is why nothing
+was discarded as a thinking block.
+
+**Finding 3 — answers run long. Carried to the next PR.** "What are
+options for getting the suppliers?" got 344 tokens: a good first two
+sentences, then every option with its details. The prompt says "keep
+replies brief" next to "answer directly and completely", with no concrete
+bound; Sonnet resolves that toward complete.
+
+Part 3's scripted rows (A–C and the two 2026-10-11 scripts) are still
+unrun.

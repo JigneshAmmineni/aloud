@@ -449,3 +449,28 @@ loop (no new vendor), fails closed, and its worst failure mode is one
 extra voice turn. Decision trail: docs/evals/2026-10-10-* (the failed
 description fix), REQUIREMENTS §4.13/FR-60, the 2026-10-11 sections
 above.
+
+### The judge that could not hear "yeah" (2026-11-12)
+
+The create gate's recovery path is: gate refuses, agent asks "do you
+want a new document for this?", user says yes, gate allows the retry.
+After the judge moved from Gemini Flash to Claude Haiku it refused the
+retry — three times out of three on the same input — and the agent ended
+up telling the user "the system keeps refusing it".
+
+Nothing was wrong with the rule; the judge's instructions already said a
+yes to the offer counts. The evidence was laid out badly: the assistant's
+question was printed FIRST, then the list of user turns, so the question
+and the "Yeah." that answered it were four lines apart with older turns
+in between. One model bridged that gap; the other read "Yeah." as a
+stray word. Moving the question below the user turns and labelling it
+"which the user's latest turn responds to" fixed it without touching
+the rule.
+
+Lessons: (1) a classifier prompt is a document with a reading order —
+put the two things that must be related next to each other, in the order
+they happened. (2) A judge prompt is tuned to a model whether you meant
+to or not; swapping the model re-opens every verdict. (3) Keep the real
+failing input: the fix was proven by replaying the exact trace row, plus
+the near-miss cases that must stay NO (yes to a different offer, a
+declined offer, an offer the user already moved past).

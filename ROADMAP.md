@@ -500,6 +500,16 @@ docs/evals/2026-10-11-voice-behavior-fixes.md). The LLM swap's eval
 one live session can close all three. The list, so nothing is
 forgotten:
 
+- **Carried from the first Claude session (2026-11-12) into the
+  decision-gates PR:** (1) replies run long — give the prompt a
+  concrete bound (two or three sentences, then offer to go deeper)
+  instead of "keep replies brief" beside "answer completely";
+  (2) Sonnet narrates before tool calls and after refusals, and
+  the loop speaks it ("I'll add that to the document", "the gate
+  refused again") — decide between a prompt fix and not speaking a
+  step's text when that step calls a tool; (3) the judge ran over
+  its ~1s bar twice (1.2s, 1.9s).
+
 - **Questions and instructions never get "Hmm."** — lean talkative over
   unresponsive: a QUESTION always gets a real answer, a misheard one
   gets "say that again?", and never two "Hmm."s in a row.

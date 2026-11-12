@@ -119,9 +119,15 @@ def test_evidence_includes_the_assistants_offer_for_the_yes_to_answer():
     user_block = msgs[1]["content"]
     assert "Do you want a new document for this?" in user_block
     assert "'yes'" in user_block
+    # the offer comes AFTER the user turns and is tied to the latest one:
+    # listed ahead of them, the live judge read a bare "Yeah." as
+    # unrelated to the offer and refused a confirmed create (2026-11-12)
+    assert user_block.index("'yes'") < user_block.index("Do you want a new")
+    assert "which the user's latest turn responds to" in user_block
+    assert "say yes to the assistant's offer" in user_block
     # and without one, the block simply omits the line
     bare = judge_messages("create_document", {}, ["yes"])[1]["content"]
-    assert "preceding reply" not in bare
+    assert "most recent reply" not in bare
 
 
 def test_blocked_or_truncated_judge_reports_its_real_finish():

@@ -67,8 +67,10 @@ _SYSTEM = (
     "user's recent spoken turns, decide one thing: did the user "
     "explicitly ask for a NEW or SEPARATE document? Explicit means the "
     "DOCUMENT framing itself — 'create/make/start a new document', "
-    "'write that up as its own doc', or a clear yes to the assistant's "
-    "offer of a new document. Asking to create, make, note, save, add, "
+    "'write that up as its own doc' — or a yes of any kind ('yes', "
+    "'yeah', 'sure', 'go ahead') in the user's LATEST turn when the "
+    "assistant's most recent reply asked whether they want a new "
+    "document. Asking to create, make, note, save, add, "
     "update, list, or summarize CONTENT — including 'make a list' or "
     "'create two lists' — while an existing document or topic is under "
     "discussion is NOT a request for a new document: that content "
@@ -93,17 +95,22 @@ def _evidence(
     # (round-2 review: without the offer, the ask-then-yes recovery the
     # refusal promises could never pass the gate). Its length is owned by
     # ContextProvider.last_assistant_text (300 chars) — no second cap.
+    # It sits AFTER the user turns and is tied to the latest one in words:
+    # listed ahead of them, the judge could not tell that a bare "Yeah."
+    # answered it, and refused a confirmed create (2026-11-12 live trace).
     offer = (
-        f"The assistant's own preceding reply (data): {assistant_text!r}\n\n"
+        "The assistant's most recent reply, which the user's latest turn "
+        f"responds to (data): {assistant_text!r}\n\n"
         if assistant_text
         else ""
     )
     title = str(args.get("title", ""))[:120]
     want = tool_name + (f" titled {title!r}" if title else "")
     return (
-        f"{offer}Recent user turns, oldest first:\n{quoted}\n\n"
+        f"Recent user turns, oldest first:\n{quoted}\n\n{offer}"
         f"The assistant now wants: {want}.\n"
-        "YES or NO: did the user explicitly ask for this new document?"
+        "YES or NO: did the user explicitly ask for this new document, or "
+        "say yes to the assistant's offer of one?"
     )
 
 
