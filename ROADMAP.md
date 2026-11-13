@@ -238,45 +238,13 @@ and no retry, since either adds latency. Which mode a turn gets is
 exactly what the intent decider above classifies, so the two ship
 together; an `LLM_EFFORT=low` A/B belongs in the same eval.
 
-**Long work with a live conversation, and "too slow" as an eval instead
-of a timeout (owner direction, 2026-11-12).** The goal: the agent can
-run a long autonomous task and still take questions, new information
-and steering while it works, answering and then carrying on (the way a
-coding agent does), instead of the user waiting or cancelling it.
-Nothing that is working as intended is cut off for taking long. First
-step, shipped with the LLM swap: no time limit on a Claude response once
-it has started (only the 10s wait for it to START remains, which is a
-liveness check). What still stands in the way, for the spec:
-
-- A new user turn CANCELS the running one (barge-in). Interleaving needs
-  the task to keep running while a second, short turn answers, and a way
-  to hand the task what the user just said. This is the real work; no
-  timeout change gets it.
-- `MAX_STEPS = 5` ends a turn after five tool rounds, and
-  `TOOL_TIMEOUT_S = 10` fails any tool that runs longer. Both are FR-42
-  bounds sized for a quick voice turn; a long task needs its own budget.
-- The 4s judge timeout stays: it bounds a yes/no call, not work.
-- Turning on eager input streaming (off today) would make Claude send a
-  tool call's input as it writes it. A working call is then never
-  silent, so a short between-bytes timeout could come back as a true
-  dead-connection check, and the client could report progress on a long
-  write. The trade: the client must then validate inputs itself.
-
-Evals that replace the timeout, all computable from `llm_traces` as it
-is today (`ttfb_ms`, `duration_ms`, `completion_tokens`):
-
-- **Rate, not duration.** A call is healthy when its time is explained
-  by its output: flag a slow start (`ttfb_ms` well over the ~1.5s norm
-  on a text turn) and a low output rate (tokens per second of
-  `duration_ms - ttfb_ms`, against the ~90/s measured on Sonnet). A
-  32-second call that wrote 10,000 characters passes; a 12-second call
-  that wrote one sentence fails.
-- **Expected class per turn.** The answer modes above give each turn a
-  duration class (silent execution and summary: seconds; explain or a
-  long write: as long as the output). A scripted eval set labels each
-  turn's class and fails a turn that lands in a slower one.
-- A call cancelled by barge-in with no output after several seconds is
-  the signature of a hang; count those per session.
+**Duration class per turn (eval, ships with the answer modes).** Each
+mode implies how long a turn should take: silent execution and summary
+finish in seconds; explain, recite, or a long write take as long as
+their output. The scripted eval set labels each turn with its class and
+fails a turn that lands in a slower one. This is the "too slow" check
+that replaces a time limit for ordinary turns; the checks for long
+tasks are in feature 10.
 
 Two capabilities the 2026-10-11 live sessions showed the agent lacks, both
 deferred to their own spec (they change the agent's core behavior, not one
@@ -535,6 +503,93 @@ when picked up. The named concerns it must cover:
   NFR-5), logs and traces (NFR-9 and the 🔒-column discipline exist;
   this layer decides detection/redaction on top), and any future
   third-party surface.
+
+### 10. Long tasks with a live conversation — new input while old input is still being processed
+
+Owner direction (2026-11-12). Position in the order is not decided: it
+builds on the loop (3) and probably wants the context engine (5) first.
+
+**Vision.** The user hands the agent a long piece of work (research,
+restructuring several documents, a long write) and keeps talking. While
+the task runs they can ask a question, add information, or change the
+task, and the agent answers and carries on, the way a coding agent takes
+messages mid-task. Nothing that is working as intended is cut off for
+taking long; the less hands-on the user wants to be, the longer the
+agent runs on its own.
+
+**Where it stands today.** One turn at a time, sized for a quick voice
+exchange. Shipped with the LLM swap as a first step: a Claude response
+has no time limit once it has started (only the 10s wait for it to
+START remains, which is a liveness check and never fires on a working
+call).
+
+**What stands in the way (the two blockers, then the rest):**
+
+- **A new user turn cancels the running one.** Barge-in ends the turn
+  task: writes in flight finish, reads are abandoned, no further step
+  runs. Taking input during a task needs the opposite: the task keeps
+  running while a second, short turn answers, plus a way to hand the
+  task what the user just said. The design questions this opens: which
+  of the two speaks when both have something to say; whether "stop" and
+  "also do X" are told apart by the model or by a decider; how a
+  steering message enters the task's context (queued until its next
+  step, the way coding agents do it, is the simplest); and what the
+  user hears when the task finishes in the middle of their sentence.
+- **Turn budgets sized for a quick exchange.** `MAX_STEPS = 5` ends a
+  turn after five tool rounds (then one forced wrap-up call), and
+  `TOOL_TIMEOUT_S = 10` fails any tool that runs longer. Both are FR-42
+  bounds and both are right for a conversational turn. A task needs its
+  own budget, not a raised global one: the quick turn keeps its bounds
+  and the task gets a step and tool budget of its own, with FR-42
+  amended to say so.
+- The 4s judge timeout stays. It bounds a yes/no call, not work.
+- No tool today takes long. Research needs tools that do (web search,
+  reading long sources), which is where the 10s tool bound starts to
+  matter.
+- Silence during a long write. Claude sends nothing while it writes a
+  tool call's input. Eager input streaming (off today) makes it send the
+  input as it is written: the client could then report progress, and a
+  short between-bytes timeout could come back as a true dead-connection
+  check, since a working call would never be silent. The trade: the
+  client must validate inputs itself.
+
+**Thinking.** Not required for a long task: a task is a chain of tool
+calls, and the loop runs those with thinking off today. It is likely
+worth turning on FOR THE TASK'S CALLS, because planning and re-planning
+across many steps is where it helps most, while the spoken turn stays
+off (thinking delays the first audible word). So the spec should assume
+two call profiles: conversational (thinking off, low latency) and task
+(thinking on, no latency budget). Decide by eval at spec time, not by
+assumption. The cost of turning it on is already written down in
+CURRENT-ARCHITECTURE.md, "What turning thinking on would take"; the
+hard part is that history must become append-only, which is also what
+prompt caching (feature 5) wants.
+
+**"Too slow" is an eval, not a timeout.** All from `llm_traces` as it
+is today (`ttfb_ms`, `duration_ms`, `completion_tokens`):
+
+- **Output rate per call.** Tokens per second, not characters, and per
+  LLM call, not per task. `completion_tokens` counts everything the
+  model generates in that call: spoken text, tool call inputs, and
+  thinking tokens when thinking is on (they are billed as output, so
+  they are already in the count). A call is healthy when its time is
+  explained by its output: about 90 tokens/s measured on Sonnet. A
+  32-second call that wrote a long document passes; a 12-second call
+  that wrote one sentence fails. Time a task spends inside tools is
+  outside every LLM call and is judged per tool, against that tool's
+  own expected duration.
+- **Slow start.** `ttfb_ms` well over the ~1.5s norm. With thinking on
+  this must be measured to the first event of any kind, since the first
+  spoken word arrives late by design.
+- **Hang signature.** With no time limit, a call that stops producing
+  never "hits" anything: it ends only when the user speaks over it or
+  the session ends. So count calls that ended as interrupted, had run
+  for several seconds, and had produced no output. It is a lead to
+  investigate, not proof: a user who interrupts a long silent write
+  looks the same until eager input streaming makes the write visible.
+- Per task rather than per call: steps taken, total time, and whether
+  the user had to ask "are you still working?" (the conversational
+  version of the same signal).
 
 ## Process infrastructure
 

@@ -136,7 +136,7 @@ Two models sit behind the one FR-48 seam (`agent/providers.py`,
   document), so a between-bytes timeout would cap document length. A
   connection that dies mid-stream therefore ends only at barge-in or
   session end; slow calls are meant to be found from `llm_traces`
-  (duration against output tokens), not cut off (ROADMAP §3.3).
+  (duration against output tokens), not cut off (ROADMAP feature 10).
 - **Usage arrives early.** Claude reports input tokens when a response
   starts; the client hands that to the loop at once (an early
   `LLMUsage` event), so an interrupted or dropped call still records
