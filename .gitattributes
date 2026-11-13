@@ -1,0 +1,2 @@
+# Shell scripts run on the Linux VM and under Git Bash: LF endings always.
+*.sh text eol=lf

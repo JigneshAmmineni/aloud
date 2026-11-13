@@ -282,7 +282,9 @@ money, docs, and environments too. When swapping ANY of STT / LLM / TTS
   $/1M characters). Same units, different prices = env change only.
 
 **Config (BOTH the local `.env` AND the VM's `~/aloud/.env` — they are
-separate hand-maintained files; deploys never sync them)**
+separate files and deploys never sync them; `scripts/sync-env.sh`
+copies the local one to the VM on request, keeping the VM's database
+password, domain, email and log level)**
 - [ ] The provider selector / model env (`STT_PROVIDER`, `LLM_PROVIDER`,
   `LLM_MODEL`, `JUDGE_MODEL`, `LLM_EFFORT`, `TTS_PROVIDER`) and the new
   provider's API key. A model line left over from the old provider
@@ -387,6 +389,9 @@ Caddyfile, docker-compose.yml (dev; the backend runs
               Windows bind mounts emit no inotify events in-container and
               uvicorn --reload silently serves stale code),
               docker-compose.prod.yml (prod)
+scripts/            sync-env.sh (run from a dev machine: copies the local
+              .env to the VM over IAP, with a names-only preview and a
+              backup; nothing runs it automatically)
 ```
 
 Two architectural seams everything hangs on:

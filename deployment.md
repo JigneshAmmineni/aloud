@@ -558,8 +558,14 @@ gcloud compute ssh aloud --zone=us-west1-b --tunnel-through-iap \
   --command="docker exec aloud-db-1 pg_dump -U aloud aloud | gzip > ~/aloud/pre-migration-$(date +%Y%m%d).sql.gz"
 ```
 
-**Before a deploy that adds or changes a required env var:** edit the
-VM's `~/aloud/.env` FIRST. Deploys never sync it, and the backend
+**Before a deploy that adds or changes a required env var:** update the
+VM's `~/aloud/.env` FIRST, by hand or with `bash scripts/sync-env.sh`
+from your machine. The script uploads the local `.env`, prints which
+keys would be added, changed and removed (names only), asks, then
+replaces the VM's file and leaves the old one as `.env.bak-<time>`.
+The VM keeps its own `POSTGRES_PASSWORD`, `ALOUD_DOMAIN`, `ALOUD_EMAIL`
+and `LOG_LEVEL`. It restarts nothing, so run it right before the
+deploy. Deploys never sync it, and the backend
 refuses to boot on a missing key or on a model the configured provider
 cannot run, so the old `.env` under new code takes the app down until
 it is edited. Compare against `.env.example` at the commit being
