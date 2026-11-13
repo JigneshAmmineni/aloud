@@ -713,7 +713,20 @@ forgotten:
   retries only `cyber` and `frontier_llm`; `general_harms` (which
   ordinary work can trip) gets no retry, and all of them are the
   one word `blocked` in `llm_traces`. Log the category from the
-  client (never the text).
+  client (never the text);
+  (9) from the 2026-11-12 filler-removal eval, run 2: a reply cut
+  INSIDE ITS FIRST SENTENCE is recorded as fully heard. FR-61 learns
+  what played one released sentence at a time; with none released
+  yet it cannot tell that cut from a broken signal and changes
+  nothing, so a four-sentence answer the owner heard one second of
+  stayed in the context whole, and the agent then insisted it had
+  said it. Fix: once the session has seen released sentences (the
+  signal works), a cut with none released for this reply keeps only
+  the first sentence, marked as cut. Also worth a column or event:
+  how much of a reply was heard is in the context and one log line
+  only, not in the database;
+  (10) same run: it answered a trailing thought ("Probably…") with
+  advice. The keep-listening decision this PR's decider exists for.
 
 - **Questions and instructions never get "Hmm."** — lean talkative over
   unresponsive: a QUESTION always gets a real answer, a misheard one
@@ -723,7 +736,9 @@ forgotten:
 - **Minimal confirmations** — never "it's on your screen", "I have
   written that to the document", "the document has been updated".
   One acknowledgment per piece of work (2026-11-12, enforced in the
-  loop): "Done." only when the agent said nothing else in the turn.
+  loop): no "Done." directly after a sentence the agent just spoke,
+  and none in the middle of chained work; a turn that worked
+  silently still ends with one.
 - **Create-gate redirection (FR-60)** — a blocked create silently picks
   the existing document from recent conversation (usually the one under
   discussion), writes without asking; only with no fitting document

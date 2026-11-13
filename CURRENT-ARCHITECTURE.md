@@ -153,13 +153,15 @@ Two models sit behind the one FR-48 seam (`agent/providers.py`,
   so it landed right before the answer). The turn's metrics row marks
   such a step with a `step.N.tool_first` stage entry (the length of
   the silence until the call arrived), which is what tells an expected
-  slow turn from a regression in the admin drill-down. A wait
+  slow turn from a regression in the admin drill-down (shown as ⏳
+  beside the turn's latency). A wait
   indicator comes back, in a deliberate form, with long tasks (ROADMAP
   feature 10).
 - **One acknowledgment per piece of work.** The loop also REMOVES one
-  thing the model writes: a leading bare "Done." in a step that
-  directly follows a step that spoke (it ran into the sentence before
-  it: "…to the document.Done."). It is not spoken and not put in the
+  thing the model writes: a leading bare "Done." that is premature
+  (its step says nothing else and goes on to call a tool) or redundant
+  (the step directly before it spoke, so it ran into that sentence:
+  "…to the document.Done."). It is not spoken and not put in the
   context, but `llm_traces` keeps the model's full output, so a trace
   row can read "Done." where the transcript has none; each drop logs
   `agent.confirmation_dropped`. A confirmation that does not directly
@@ -433,7 +435,7 @@ Two architectural seams everything hangs on:
    in tasks outside pipeline cancellation and always finish); tool steps
    append atomically and loop (MAX 5 steps + one forced tool-free wrap-up
    call); a silent tool round stays silent — the loop speaks no line of
-   its own, and drops a bare "Done." that directly follows a spoken step
+   its own, and drops a bare "Done." that is premature or redundant
    (FR-43); any loop error degrades to a spoken canned fallback. The
    greeting is one tool-forbidden step with no user turn, carrying the
    FR-24 preferred name on its ephemeral trigger — one bounded (1s)

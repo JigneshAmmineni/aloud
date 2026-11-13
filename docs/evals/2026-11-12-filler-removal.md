@@ -144,9 +144,105 @@ that evening): a blank line before a tool call counted as speech, so a
 turn could end with no audio at all; and on chained edits the "Done."
 in the middle was spoken while the last one was dropped. Both fixed:
 the rule now applies only to the step directly after one that spoke.
+Round 3 found the chained case still inverted when the turn began
+silently (commit `32ad8b8`); the rule was then restated whole: a
+"Done." is dropped when it is premature (its step goes on to call a
+tool) or redundant (the step before it spoke). Run 2 should include
+one turn that asks for two separate notes in one breath.
 Anything heard on `73be1d8` does not count as run 2.
 
-Still to run: the same script again on the merged build, to hear the
+Run 2 below covers this.
+
+Originally still to run: the same script again on the merged build, to hear the
 confirmation rule and to exercise row 9's ask-then-yes path with a
 trigger that is not an explicit ask (for example, with one document
 open, "jot down my grocery list: eggs and milk").
+
+### Run 2 — owner, local dev server, 2026-11-12 (session `cd514be0…`)
+
+Run on commit `32ad8b8` (the round-2 form of the confirmation rule; the
+one shape round 3 later fixed did not occur). 36 turns, 53 LLM calls. A
+new script: 17 core rows meant to stay the same from eval to eval, then
+6 rows for this PR's changes. Topic: a camping trip. Speech recognition
+again changed several lines ("Poke holes in this plan" arrived as "Borg
+Hall and Somersbourne", "Stop." as "Stroke.", "Add a packing list" as "I
+had a packing list").
+
+Core:
+
+| # | Spoken turn | Outcome |
+|---|---|---|
+| 1 | (connect) | PASS. "Hey." |
+| 2 | "What's a good temperature rating for a sleeping bag in spring?" | PASS. Direct answer, no document. Four sentences. |
+| 3 | thinking aloud, trailing off ("…maybe two nights? Probably…") | HALF. "Mm-hmm." and "Hmm." to the first fragments, then on "Probably" it answered with advice ("Okay, two nights sounds manageable. A 20 to 30 degree bag would cover you.") while the owner was pausing to think. |
+| 4 | "Create a new document called Camping Trip Plan with what I've said so far." | PASS. One document (judge YES, 966ms). Silent, then "Done." 5.4s to first audio. |
+| 5 | "Add that we need to book the campsite by Friday." | PASS. Heard "cam sign", read it as campsite, edited without asking. |
+| 6 | "Give me a quick summary of the plan." | PASS. Spoken, nothing written. Four sentences. |
+| 7 | "Organize the plan into three sections: gear, food, and schedule." | PASS. Restructured. |
+| 8 | "What am I missing?" | PASS. Spoken, no write. Five sentences. |
+| 9 | "Poke holes in this plan." | VOID. Heard as two unknown names; it asked what they were. |
+| 10 | "Rename the document to Lake Weekend Plan." | PASS. One rename, "Done." |
+| 11 | "Which of my documents mention a budget?" | PASS. Silent search, then the answer. |
+| 12 | "Change the line about the canoe rental to a kayak rental." | PASS. Two sentences, no tool names, offered to add it instead. |
+| 13 | "Actually, never mind. Let's go back to the trip." | PASS. "Okay." No tool. |
+| 14 | "Walk me through the whole plan in detail." / "Hold on." / "Okay. Continue." | PASS. Cut 25s in; the entry was trimmed to 63 of 108 words and it resumed at "Food". |
+| 15 | "Stop." mid-reply | VOID. The reply had already ended, and "Stop" was heard as "Stroke", then "store". |
+| 16 | "Can you put the…" | PASS. "Put the what? Go ahead." It did not guess. |
+| 17 | "That's all for now." | PASS. "Okay." |
+
+This PR's changes:
+
+| # | Spoken turn | Outcome |
+|---|---|---|
+| 18 | "Add a packing list with a tent and a lantern." | PASS. (First heard as a statement; it asked, the owner repeated.) Silent edit, then "Done." alone. |
+| 19 | "Remove the lantern." | PASS. Silent edit, "Done." |
+| 20 | "Add sunscreen to the packing list, and also change the trip to three nights." | PASS. One read, two edits in one step, "Done." once at the end. |
+| 21 | "Jot down an idea for my sister's birthday: a pottery class." | PASS. It asked "a new document, or added to the lake weekend plan?"; the owner asked for a new one; created (judge YES, 741ms). Never said "gate". |
+| 22 | "What should we cook the first night?" then at once "And also, what about breakfast?" | FAIL. See finding 4. |
+| 23 | "Read me the gear section." | As expected today: it described the section fully in its own words, not word for word. |
+
+Against the acceptance bar:
+
+- **No canned wait line: PASS.** No fallback or empty-step event either.
+- **One acknowledgment per piece of work: PASS.** The two narrated tool
+  turns (rows 5 and 7) ended without "Done." (`agent.confirmation_dropped`
+  twice); the six silent ones ended with "Done." alone; the chained one
+  said it once. The owner did not report a welded "Done." in this run.
+- **Narration: 2 of 9 tool turns**, down from 7 of 9 in run 1. One
+  session each, so this is an observation, not a trend.
+- **Tool-first marker: PASS.** All eight turns whose first step went
+  straight to a tool call carry `step.1.tool_first`. Their time to first
+  audio: 5415, 2905, 3131, 3291, 3246, 2943, 5734, 3984 ms. Plain turns:
+  1591–2566 ms.
+- **Reply length, recorded:** rows 2, 6 and 8 ran four to five sentences.
+- Tokens: 269,555 in / 3,425 out on Sonnet, 1,015 / 8 on Haiku.
+
+**Finding 4 — a reply cut inside its first sentence is recorded as fully
+heard. Carried.** In row 22 the dinner answer finished generating in 2.1s
+and began to play; the owner started the breakfast question about a
+second later, inside the first sentence. FR-61 learns what was heard one
+sentence at a time, when the audio transport releases each sentence. None
+had been released yet, and in that state it cannot tell "cut inside the
+first sentence" from "the release signal is broken", so by design it
+changes nothing (`fr61.signal_suspect`). The whole four-sentence answer
+stayed in the context as heard. The model then answered only breakfast,
+and when asked insisted it had already given the dinner suggestions. Row
+14 worked because its cut came 25 seconds in, after several sentences had
+been released. Fix carried to the roadmap: when sentences HAVE been
+released earlier in the session (so the signal is known to work), a cut
+with none released for this reply should keep only the first sentence,
+marked as cut.
+
+**Finding 5 — it answers a trailing thought. Carried** (row 3). This is
+the keep-listening decision the decision-gates PR exists for.
+
+**What the records do and do not hold.** The trace row holds everything
+the model generated for a call. When a reply is cut while it is still
+generating, the row is marked `interrupted` and holds what had been
+generated by then. How much was HEARD is not in the trace: it shows only
+in the context (the entry trimmed to the heard part, with a cut mark) and
+in a log line (`context.playback_cut`, kept and total words). Nothing in
+the database records heard against unheard.
+
+Still open: rows 9 and 15 (voided by speech recognition both times they
+were tried).

@@ -77,24 +77,40 @@ TOOL_TIMEOUT_S = 10.0
 # turn with a bare "Done." even after a sentence that already said what
 # it was doing, and the two run together in speech ("I'll add that to
 # the document.Done." — 2026-11-12 live session; a prompt rule did not
-# stop it, 3 of 3 in a live probe). So in a step that DIRECTLY follows a
-# step that spoke, a LEADING bare confirmation is not spoken — that is
-# the only place it runs into the sentence before it. Anywhere else it
-# is the turn's acknowledgment and is spoken: after silent work, after
-# silent steps in between, and always in the forced wrap-up call, which
-# exists to speak. Punctuation is required mid-stream: "Done with the
-# first list" is a sentence, not a confirmation.
+# stop it, 3 of 3 in a live probe). A LEADING bare confirmation is wrong
+# for exactly two reasons, and is not spoken in exactly those cases:
+#   PREMATURE — nothing else was said and the same step goes on to call
+#     a tool: nothing is done yet, and the step that finishes will say so.
+#   REDUNDANT — the step directly before it spoke: it would run into
+#     that sentence.
+# Anywhere else it is the turn's acknowledgment and is spoken: after
+# silent work, after silent steps in between, and always in the forced
+# wrap-up call, which exists to speak. Whether it is premature cannot be
+# known when it arrives, so every step holds back text that could still
+# be only a confirmation (a few characters) and decides at the next
+# event. Punctuation is required mid-stream ("Done with the first list"
+# is a sentence); at the end of a stream a bare "Done" counts too.
 _CONFIRMATION_WORDS = ("done", "all done")
 _BARE_CONFIRMATIONS = tuple(w + p for w in _CONFIRMATION_WORDS for p in ".!")
-_LEADING_CONFIRMATION = re.compile(r"\s*(?:all\s+)?done[.!]+\s*", re.IGNORECASE)
+_LEADING_CONFIRMATION = re.compile(
+    r"\s*(?:%s)[.!]+\s*"
+    % "|".join(re.escape(w).replace(r"\ ", r"\s+") for w in _CONFIRMATION_WORDS),
+    re.IGNORECASE,
+)
 
 
 def _may_be_only_a_confirmation(text: str) -> bool:
     """True while streamed `text` could still turn out to be nothing but
     a bare confirmation — the loop holds it back that long (a few
-    characters) instead of speaking it."""
-    so_far = text.strip().lower()
+    characters) instead of speaking it. Blank text qualifies."""
+    so_far = " ".join(text.lower().split())
     return any(c.startswith(so_far) for c in _BARE_CONFIRMATIONS)
+
+
+def _is_bare_confirmation(text: str) -> bool:
+    """The whole of `text` is a confirmation and nothing else ("Done.",
+    "All done!", and at the end of a stream an unpunctuated "Done")."""
+    return " ".join(text.lower().split()).rstrip(".!") in _CONFIRMATION_WORDS
 
 
 class _TurnState:
@@ -401,9 +417,9 @@ class AgentLoopProcessor(FrameProcessor):
             msgs=lambda: json.dumps(messages, ensure_ascii=False, default=str),
         )
 
-        # One acknowledgment per piece of work: only a step that directly
-        # follows a spoken one can have its leading confirmation dropped.
-        holding = follows_speech and not wrap_up
+        # One acknowledgment per piece of work (rule above). While
+        # `holding`, nothing of this step has been spoken yet.
+        holding = not wrap_up
         dropped = 0  # leading characters of step_text not spoken
         await self.push_frame(LLMFullResponseStartFrame())
         try:
@@ -423,23 +439,34 @@ class AgentLoopProcessor(FrameProcessor):
                         if holding and _may_be_only_a_confirmation(state.step_text):
                             pass  # held: it may be all this step says
                         elif holding:
-                            # more than a confirmation: speak the rest
+                            # more than a confirmation: release it, minus a
+                            # leading confirmation that would be redundant
                             holding = False
-                            match = _LEADING_CONFIRMATION.match(state.step_text)
-                            dropped = match.end() if match else 0
-                            await self.push_frame(
-                                LLMTextFrame(state.step_text[dropped:])
-                            )
+                            if follows_speech:
+                                match = _LEADING_CONFIRMATION.match(state.step_text)
+                                dropped = match.end() if match else 0
+                            if state.step_text[dropped:]:
+                                await self.push_frame(
+                                    LLMTextFrame(state.step_text[dropped:])
+                                )
                         else:
                             await self.push_frame(LLMTextFrame(event.text))
                     elif isinstance(event, LLMToolCall):
-                        if not state.calls and (
-                            holding or not state.step_text.strip()
+                        if holding:
+                            # work follows and nothing else was said:
+                            # whatever is held is premature (or blank)
+                            holding = False
+                            dropped = len(state.step_text)
+                        if (
+                            not state.calls
+                            and tool_choice != "none"
+                            and not state.step_text[dropped:].strip()
                         ):
                             # NFR-1's known exception, made findable: this
                             # step spoke nothing before its first tool
-                            # call (text still held back was not spoken).
-                            # The value is how long that silence had
+                            # call. Not for a call that will be refused
+                            # (selection forbidden): that turn speaks at
+                            # once. The value is how long the silence had
                             # lasted when the call arrived. No advisory:
                             # the same wait is already this step's TTFB.
                             self._recorder.record_step_stage(
@@ -473,8 +500,10 @@ class AgentLoopProcessor(FrameProcessor):
                 round((time.monotonic() - state.t0) * 1000),
                 purpose,
             )
-            if holding:
-                state.step_text = ""  # held back, never spoken: not heard
+            # only what was spoken counts as heard: nothing while still
+            # holding, and never a dropped leading confirmation
+            state.step_text = "" if holding else state.step_text[dropped:]
+            dropped = 0
             # close the frame pair before degrading — a dangling
             # LLMFullResponseStartFrame stalls downstream aggregation.
             # (CancelledError skips this: every cancel path broadcasts an
@@ -483,16 +512,24 @@ class AgentLoopProcessor(FrameProcessor):
             await self.push_frame(LLMFullResponseEndFrame())
             raise
         if holding:
-            # the stream ended with nothing spoken but what was held back
-            held = state.step_text.strip().lower().rstrip(".!")
-            if held in _CONFIRMATION_WORDS:
-                # all the step said. Dropped whether or not it goes on
-                # to call tools: with more work coming, nothing is done
-                # yet, and the step that finishes it will say so.
-                dropped = len(state.step_text)
-            elif state.step_text:
-                # a word cut short by the stream's end: speak it as it is
+            # the stream ended, no tool call came, and the held text is
+            # all this step said
+            if _is_bare_confirmation(state.step_text) and not follows_speech:
+                # the turn's acknowledgment: speak it
                 await self.push_frame(LLMTextFrame(state.step_text))
+            else:
+                # redundant after speech — or not a confirmation at all:
+                # blank, or a word the stream cut short ("Do"), which
+                # is better left unspoken than voiced as a syllable
+                dropped = len(state.step_text)
+        # The step said only a confirmation the step before it had made
+        # redundant: a clean ending, not an empty (failed) step.
+        redundant_ending = (
+            follows_speech
+            and not state.calls
+            and dropped == len(state.step_text)
+            and _is_bare_confirmation(state.step_text)
+        )
         await self.push_frame(LLMFullResponseEndFrame())
 
         duration_ms = round((time.monotonic() - state.t0) * 1000)
@@ -513,11 +550,12 @@ class AgentLoopProcessor(FrameProcessor):
         if dropped:
             # after the trace row above, which keeps what the model wrote:
             # the context records only what was spoken
-            log.bind(event="agent.confirmation_dropped", chars=dropped).info(
-                "leading confirmation directly after speech not spoken"
-            )
+            if state.step_text[:dropped].strip():
+                log.bind(event="agent.confirmation_dropped", chars=dropped).info(
+                    "premature or redundant leading confirmation not spoken"
+                )
             state.step_text = state.step_text[dropped:]
-            if not state.step_text.strip() and not state.calls:
+            if redundant_ending:
                 # the step before it already said what was being done
                 return True
 
