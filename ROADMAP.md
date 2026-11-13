@@ -612,7 +612,11 @@ live. Still to add, roughly when its prerequisite feature lands:
   keywords, a response produced, tool fired, latency within budget) — plus a
   manual talk-through. (The deploy itself is done: the "Deploy to
   production" workflow ships any chosen main commit — and rolls back — at a
-  click; this gate would run inside it before the VM step.)
+  click; this gate would run inside it before the VM step.) Last
+  promotion: 2026-11-13, `f051bdb`, six PRs at once (#19–#25, the
+  first deploy since 2026-09-15) with no gate but the health check and
+  a model smoke test from the production container; the manual
+  talk-through on the live site is still owed.
 - **Evals** (retrieval recall, response quality) join the scheduled/nightly
   lane once features 6–7 provide the data they run on.
 
@@ -726,7 +730,21 @@ forgotten:
   how much of a reply was heard is in the context and one log line
   only, not in the database;
   (10) same run: it answered a trailing thought ("Probably…") with
-  advice. The keep-listening decision this PR's decider exists for.
+  advice. The keep-listening decision this PR's decider exists for;
+  (11) from PR #25's last review, all in the "Done." rule and its
+  marker (none blocking, none fixed): a "Done." written AFTER a
+  tool call in the same step is spoken mid-work and the closing one
+  dropped (not reproduced on Sonnet; the Gemini client can
+  interleave that way); `step.N.tool_first` is recorded without
+  the slow-stage advisory even when held text came first, which
+  hides the one wait nothing else in the row measures (use
+  `advisory=bool(step_text.strip())`); the confirmation vocabulary
+  is only "done" / "all done" with `.` or `!` — a deliberately
+  narrow bet from two live runs, so "All set." and "Got it." still
+  run into the sentence before them; and `fmtStages` /
+  `isToolFirst` on the admin session page have no vitest coverage.
+  The answer modes below rework what a tool turn says, so settle
+  these there rather than patching the rule again.
 
 - **Questions and instructions never get "Hmm."** — lean talkative over
   unresponsive: a QUESTION always gets a real answer, a misheard one

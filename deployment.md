@@ -581,8 +581,8 @@ Deploys never sync it, and the backend
 refuses to boot on a missing key or on a model the configured provider
 cannot run, so the old `.env` under new code takes the app down until
 it is edited. Compare against `.env.example` at the commit being
-deployed. The LLM swap to Claude (PR #24) is the first such deploy; it
-needs:
+deployed. The LLM swap to Claude (PR #24) was the first such deploy
+(shipped 2026-11-13, with the script above); it needed:
 ```
 ANTHROPIC_API_KEY=...
 LLM_PROVIDER=anthropic

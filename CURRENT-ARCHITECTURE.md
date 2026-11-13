@@ -153,8 +153,10 @@ Two models sit behind the one FR-48 seam (`agent/providers.py`,
   so it landed right before the answer). The turn's metrics row marks
   such a step with a `step.N.tool_first` stage entry (the length of
   the silence until the call arrived), which is what tells an expected
-  slow turn from a regression in the admin drill-down (shown as ⏳
-  beside the turn's latency). A wait
+  slow turn from a regression in the admin drill-down. The page shows
+  ⏳ beside the turn's latency when the turn's FIRST step is marked
+  (the case NFR-1 is about); a later step's marker is recorded but
+  not displayed. A wait
   indicator comes back, in a deliberate form, with long tasks (ROADMAP
   feature 10).
 - **One acknowledgment per piece of work.** The loop also REMOVES one
