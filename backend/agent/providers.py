@@ -419,18 +419,23 @@ _CLAUDE_MODELS = {
     "claude-haiku-5-5": {"thinking": {"type": "disabled"}},
 }
 
-# Voice budget, not SDK defaults (600s, 2 retries). Two different waits:
+# Not the SDK defaults (600s, 2 retries). Two different waits:
 #
-# - For the response to START: bounded tightly, with no retry. A stalled
-#   or rate-limited call must fail fast into the loop's spoken fallback,
+# - For the response to START: bounded tightly, with no retry. This is
+#   a liveness check, not a limit on work: the first event arrives in
+#   about 1.5s however long the response will be. A stalled or
+#   rate-limited call must fail fast into the loop's spoken fallback,
 #   because nothing else covers that silence (the filler arms only on a
 #   tool call), and a retry lands in a conversation that has moved on.
-# - Between bytes once it has started: generous. Claude buffers a tool
+# - Once it has started: NO time limit (owner decision, 2026-11-12). A
+#   response takes as long as its output needs. Claude buffers a tool
 #   call's input and sends NOTHING while writing it — measured 34s of
-#   silence for an 11,700-character document (2026-11-12), and a read
-#   timeout shorter than that gap kills the call (verified at 8s).
+#   silence for an 11,700-character document — so any between-bytes
+#   timeout is a cap on document length in disguise (8s killed that
+#   call). A call that is slow for its output is found from its trace
+#   (duration against tokens), not cut off; a connection that dies
+#   mid-stream ends at barge-in or session end.
 _CLAUDE_FIRST_EVENT_TIMEOUT_S = 10.0
-_CLAUDE_READ_TIMEOUT_S = 120.0
 _CLAUDE_CONNECT_TIMEOUT_S = 5.0
 
 
@@ -442,9 +447,7 @@ def _anthropic_client(api_key: str) -> anthropic.AsyncAnthropic:
     every session."""
     return anthropic.AsyncAnthropic(
         api_key=api_key,
-        timeout=anthropic.Timeout(
-            _CLAUDE_READ_TIMEOUT_S, connect=_CLAUDE_CONNECT_TIMEOUT_S
-        ),
+        timeout=anthropic.Timeout(None, connect=_CLAUDE_CONNECT_TIMEOUT_S),
         max_retries=0,
     )
 

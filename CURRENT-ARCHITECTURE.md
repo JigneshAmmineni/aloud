@@ -126,13 +126,17 @@ Two models sit behind the one FR-48 seam (`agent/providers.py`,
   loop and one for the judge, per session) wraps the same
   `AsyncAnthropic`, so there is one connection pool and the judge's
   first call rides a connection the loop already opened. No retries
-  (the SDK default is 2), and two separate time bounds: 10s for a
-  response to START, enforced in `ClaudeLoopClient.stream`, so a
-  stalled or rate-limited call fails into the loop's spoken fallback;
-  and 120s between bytes once it has started. The second must be
-  generous: Claude buffers a tool call's input and sends nothing while
-  writing it (measured: 34s of silence for an 11,700-character
-  document), and a shorter read timeout kills the call mid-document.
+  (the SDK default is 2), and one time bound: 10s for a response to
+  START, enforced in `ClaudeLoopClient.stream`, so a stalled or
+  rate-limited call fails into the loop's spoken fallback. It is a
+  liveness check, not a limit on work (a response starts in about 1.5s
+  however long it will run). Once a response has started there is no
+  time limit: Claude buffers a tool call's input and sends nothing
+  while writing it (measured: 34s of silence for an 11,700-character
+  document), so a between-bytes timeout would cap document length. A
+  connection that dies mid-stream therefore ends only at barge-in or
+  session end; slow calls are meant to be found from `llm_traces`
+  (duration against output tokens), not cut off (ROADMAP §3.3).
 - **Usage arrives early.** Claude reports input tokens when a response
   starts; the client hands that to the loop at once (an early
   `LLMUsage` event), so an interrupted or dropped call still records

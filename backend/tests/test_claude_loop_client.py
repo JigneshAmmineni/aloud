@@ -407,10 +407,11 @@ def test_sdk_client_is_bounded_and_shared_across_sessions():
     sdk = loop_llm._client
     # no retry: for a voice turn the spoken fallback is the retry
     assert sdk.max_retries == 0
-    # the read timeout must outlast Claude's silence while it writes a
-    # long tool input (34s measured); the tight bound is on the START
-    # of a response and lives in stream()
-    assert (sdk.timeout.read, sdk.timeout.connect) == (120.0, 5.0)
+    # no limit once a response has started: Claude is silent while it
+    # writes a long tool input (34s measured), so a read timeout caps
+    # document length. The only time bound is on the START of a
+    # response and lives in stream()
+    assert (sdk.timeout.read, sdk.timeout.connect) == (None, 5.0)
     # one connection pool per key: nothing leaks per session, and the
     # judge's first call rides a connection the loop already warmed
     assert judge_llm._client is sdk

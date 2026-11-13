@@ -238,6 +238,46 @@ and no retry, since either adds latency. Which mode a turn gets is
 exactly what the intent decider above classifies, so the two ship
 together; an `LLM_EFFORT=low` A/B belongs in the same eval.
 
+**Long work with a live conversation, and "too slow" as an eval instead
+of a timeout (owner direction, 2026-11-12).** The goal: the agent can
+run a long autonomous task and still take questions, new information
+and steering while it works, answering and then carrying on (the way a
+coding agent does), instead of the user waiting or cancelling it.
+Nothing that is working as intended is cut off for taking long. First
+step, shipped with the LLM swap: no time limit on a Claude response once
+it has started (only the 10s wait for it to START remains, which is a
+liveness check). What still stands in the way, for the spec:
+
+- A new user turn CANCELS the running one (barge-in). Interleaving needs
+  the task to keep running while a second, short turn answers, and a way
+  to hand the task what the user just said. This is the real work; no
+  timeout change gets it.
+- `MAX_STEPS = 5` ends a turn after five tool rounds, and
+  `TOOL_TIMEOUT_S = 10` fails any tool that runs longer. Both are FR-42
+  bounds sized for a quick voice turn; a long task needs its own budget.
+- The 4s judge timeout stays: it bounds a yes/no call, not work.
+- Turning on eager input streaming (off today) would make Claude send a
+  tool call's input as it writes it. A working call is then never
+  silent, so a short between-bytes timeout could come back as a true
+  dead-connection check, and the client could report progress on a long
+  write. The trade: the client must then validate inputs itself.
+
+Evals that replace the timeout, all computable from `llm_traces` as it
+is today (`ttfb_ms`, `duration_ms`, `completion_tokens`):
+
+- **Rate, not duration.** A call is healthy when its time is explained
+  by its output: flag a slow start (`ttfb_ms` well over the ~1.5s norm
+  on a text turn) and a low output rate (tokens per second of
+  `duration_ms - ttfb_ms`, against the ~90/s measured on Sonnet). A
+  32-second call that wrote 10,000 characters passes; a 12-second call
+  that wrote one sentence fails.
+- **Expected class per turn.** The answer modes above give each turn a
+  duration class (silent execution and summary: seconds; explain or a
+  long write: as long as the output). A scripted eval set labels each
+  turn's class and fails a turn that lands in a slower one.
+- A call cancelled by barge-in with no output after several seconds is
+  the signature of a hang; count those per session.
+
 Two capabilities the 2026-10-11 live sessions showed the agent lacks, both
 deferred to their own spec (they change the agent's core behavior, not one
 tool):
