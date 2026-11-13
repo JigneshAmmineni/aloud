@@ -156,6 +156,15 @@ Two models sit behind the one FR-48 seam (`agent/providers.py`,
   slow turn from a regression in the admin drill-down. A wait
   indicator comes back, in a deliberate form, with long tasks (ROADMAP
   feature 10).
+- **One acknowledgment per piece of work.** The loop also REMOVES one
+  thing the model writes: a leading bare "Done." in a step that
+  directly follows a step that spoke (it ran into the sentence before
+  it: "…to the document.Done."). It is not spoken and not put in the
+  context, but `llm_traces` keeps the model's full output, so a trace
+  row can read "Done." where the transcript has none; each drop logs
+  `agent.confirmation_dropped`. A confirmation that does not directly
+  follow speech is spoken, and the forced wrap-up call is never
+  trimmed.
 - **Server-side fallback (Sonnet only).** Sonnet requests carry the
   `server-side-fallback-2026-07-01` beta with `fallbacks: "default"`: a
   request Sonnet 5.5 declines in the `cyber` or `frontier_llm` category is
@@ -424,7 +433,8 @@ Two architectural seams everything hangs on:
    in tasks outside pipeline cancellation and always finish); tool steps
    append atomically and loop (MAX 5 steps + one forced tool-free wrap-up
    call); a silent tool round stays silent — the loop speaks no line of
-   its own (FR-43); any loop error degrades to a spoken canned fallback. The
+   its own, and drops a bare "Done." that directly follows a spoken step
+   (FR-43); any loop error degrades to a spoken canned fallback. The
    greeting is one tool-forbidden step with no user turn, carrying the
    FR-24 preferred name on its ephemeral trigger — one bounded (1s)
    `users` read at session setup, degrading to a nameless greeting on

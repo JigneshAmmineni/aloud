@@ -77,11 +77,15 @@ TOOL_TIMEOUT_S = 10.0
 # turn with a bare "Done." even after a sentence that already said what
 # it was doing, and the two run together in speech ("I'll add that to
 # the document.Done." — 2026-11-12 live session; a prompt rule did not
-# stop it, 3 of 3 in a live probe). So in a step that follows speech in
-# the same turn, a LEADING bare confirmation is not spoken. Punctuation
-# is required: "Done with the first list" is a sentence, not a
-# confirmation.
-_BARE_CONFIRMATIONS = ("done.", "done!", "all done.", "all done!")
+# stop it, 3 of 3 in a live probe). So in a step that DIRECTLY follows a
+# step that spoke, a LEADING bare confirmation is not spoken — that is
+# the only place it runs into the sentence before it. Anywhere else it
+# is the turn's acknowledgment and is spoken: after silent work, after
+# silent steps in between, and always in the forced wrap-up call, which
+# exists to speak. Punctuation is required mid-stream: "Done with the
+# first list" is a sentence, not a confirmation.
+_CONFIRMATION_WORDS = ("done", "all done")
+_BARE_CONFIRMATIONS = tuple(w + p for w in _CONFIRMATION_WORDS for p in ".!")
 _LEADING_CONFIRMATION = re.compile(r"\s*(?:all\s+)?done[.!]+\s*", re.IGNORECASE)
 
 
@@ -104,7 +108,6 @@ class _TurnState:
         self.step = 1
         self.messages: list[dict] = []  # built list for the current call
         self.step_text = ""  # model text streamed this step
-        self.turn_spoke = False  # some step of this turn spoke model text
         self.calls: list[LLMToolCall] = []  # current step's tool calls
         self.results: list[dict | None] = []
         self.write_tasks: dict[str, asyncio.Task] = {}  # call.id -> task
@@ -371,6 +374,9 @@ class AgentLoopProcessor(FrameProcessor):
             messages = messages + [
                 {"role": "user", "content": self._greeting_trigger}
             ]
+        # read before the reset below: what the PREVIOUS step of this turn
+        # spoke (after any drop), empty on a turn's first step
+        follows_speech = bool(state.step_text.strip())
         state.purpose = purpose
         state.messages = messages
         state.step_text = ""
@@ -395,9 +401,9 @@ class AgentLoopProcessor(FrameProcessor):
             msgs=lambda: json.dumps(messages, ensure_ascii=False, default=str),
         )
 
-        # One acknowledgment per piece of work: only a step that follows
-        # speech in this turn can have its leading confirmation dropped.
-        holding = state.turn_spoke
+        # One acknowledgment per piece of work: only a step that directly
+        # follows a spoken one can have its leading confirmation dropped.
+        holding = follows_speech and not wrap_up
         dropped = 0  # leading characters of step_text not spoken
         await self.push_frame(LLMFullResponseStartFrame())
         try:
@@ -425,18 +431,22 @@ class AgentLoopProcessor(FrameProcessor):
                                 LLMTextFrame(state.step_text[dropped:])
                             )
                         else:
-                            state.turn_spoke = True
                             await self.push_frame(LLMTextFrame(event.text))
                     elif isinstance(event, LLMToolCall):
-                        if not state.calls and not state.step_text.strip():
+                        if not state.calls and (
+                            holding or not state.step_text.strip()
+                        ):
                             # NFR-1's known exception, made findable: this
                             # step spoke nothing before its first tool
-                            # call. The value is how long that silence
-                            # had lasted when the call arrived.
+                            # call (text still held back was not spoken).
+                            # The value is how long that silence had
+                            # lasted when the call arrived. No advisory:
+                            # the same wait is already this step's TTFB.
                             self._recorder.record_step_stage(
                                 state.turn_id,
                                 f"step.{state.step}.tool_first",
                                 elapsed_ms,
+                                advisory=False,
                             )
                         state.calls.append(event)
                     elif isinstance(event, LLMUsage):
@@ -473,12 +483,16 @@ class AgentLoopProcessor(FrameProcessor):
             await self.push_frame(LLMFullResponseEndFrame())
             raise
         if holding:
-            # the stream ended with nothing but what was held
-            if state.calls or state.step_text.strip().lower() not in _BARE_CONFIRMATIONS:
-                # a cut-short word, or more work follows: speak it as it is
-                await self.push_frame(LLMTextFrame(state.step_text))
-            else:
+            # the stream ended with nothing spoken but what was held back
+            held = state.step_text.strip().lower().rstrip(".!")
+            if held in _CONFIRMATION_WORDS:
+                # all the step said. Dropped whether or not it goes on
+                # to call tools: with more work coming, nothing is done
+                # yet, and the step that finishes it will say so.
                 dropped = len(state.step_text)
+            elif state.step_text:
+                # a word cut short by the stream's end: speak it as it is
+                await self.push_frame(LLMTextFrame(state.step_text))
         await self.push_frame(LLMFullResponseEndFrame())
 
         duration_ms = round((time.monotonic() - state.t0) * 1000)
@@ -500,11 +514,12 @@ class AgentLoopProcessor(FrameProcessor):
             # after the trace row above, which keeps what the model wrote:
             # the context records only what was spoken
             log.bind(event="agent.confirmation_dropped", chars=dropped).info(
-                "leading confirmation after speech not spoken"
+                "leading confirmation directly after speech not spoken"
             )
             state.step_text = state.step_text[dropped:]
             if not state.step_text.strip() and not state.calls:
-                return True  # the turn already said what it did
+                # the step before it already said what was being done
+                return True
 
         if not state.step_text.strip() and not state.calls:
             # FR-42: an empty step is a failure, not an ending — blocked or

@@ -54,7 +54,10 @@ open rows of `2026-11-12-anthropic-llm-swap.md` (A–C) and the two
   "gate".
 - From run 2 on: no "Done." directly after a sentence in which the
   agent said what it was doing; a turn that said nothing else still
-  ends with a short confirmation.
+  ends with a short confirmation. Listen for the other side of that
+  too: a turn whose last audio is the narration ("I'll add that to
+  the document.") with nothing after the work lands. Is that enough
+  of an acknowledgment?
 - Narration before tool calls is recorded, not gated: is there more or
   less of it than in the 2026-11-12 session ("I'll add that to the
   document")? More is a finding for the decision-gates PR.
@@ -134,6 +137,14 @@ tool-call-start event it shares a seam with.
 **Finding 3 — row 5's ideas are written but not spoken. Carried** to the
 answer modes (decision-gates PR): the model treats "create two lists and
 give me your ideas" as one write.
+
+Review round 2 then found two defects in that first version of the
+rule (commit `73be1d8`, which the owner's local stack ran for a while
+that evening): a blank line before a tool call counted as speech, so a
+turn could end with no audio at all; and on chained edits the "Done."
+in the middle was spoken while the last one was dropped. Both fixed:
+the rule now applies only to the step directly after one that spoke.
+Anything heard on `73be1d8` does not count as run 2.
 
 Still to run: the same script again on the merged build, to hear the
 confirmation rule and to exercise row 9's ask-then-yes path with a

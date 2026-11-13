@@ -125,15 +125,19 @@ class UsageRecorder:
 
     # -- FR-47 per-turn metrics buffer (loop + latency observer) -----------
 
-    def record_step_stage(self, turn_id: int | None, key: str, ms: int) -> None:
+    def record_step_stage(
+        self, turn_id: int | None, key: str, ms: int, *, advisory: bool = True
+    ) -> None:
         """A step-indexed stage entry from the loop (step.N.ttfb.llm,
         step.N.tool.name, step.N.tool_first) against the turn EXPLICITLY named
         by the step that measured it. C-1's over-1s advisory transfers
-        here from the displaced breakdown handler."""
+        here from the displaced breakdown handler; advisory=False is
+        for a MARKER whose value repeats a stage already advised
+        (step.N.tool_first is the same wait as that step's TTFB)."""
         if turn_id is None:
             return  # no turn identity (tracker unavailable) — logs only
         self._turn_stages.setdefault(turn_id, {})[key] = ms
-        if ms > STEP_STAGE_WARN_MS:
+        if advisory and ms > STEP_STAGE_WARN_MS:
             self._log.bind(
                 event="turn.stage_slow", turn_id=turn_id, stage=key, duration_ms=ms
             ).warning(f"stage {key} took {ms}ms (over {STEP_STAGE_WARN_MS}ms, C-1)")

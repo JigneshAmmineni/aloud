@@ -625,17 +625,24 @@ FR-7 still governs: the agent acts when the user asks.
   entry carries no words the system invented (the only text the
   provider adds is FR-46's cut-off mark). Such a step is marked in the
   turn's metrics row (`step.N.tool_first`, FR-47). One acknowledgment
-  per piece of work: in a step that follows speech in the same turn, a
-  leading bare confirmation ("Done.") is not spoken and not recorded
-  in the context, and if it was all the step said the turn ends there
-  without a fallback; a turn that said nothing else keeps its
-  confirmation. The trace row keeps the model's full output. The
+  per piece of work: in a step that directly follows a step that spoke,
+  a leading bare confirmation ("Done.") is not spoken and not recorded
+  in the context, whether or not that step goes on to call tools; if
+  it was all the step said and no tool call follows, the turn ends
+  there without a fallback. Anywhere else the confirmation is spoken:
+  after a turn that worked silently, after silent steps in between,
+  and always in the forced wrap-up call (FR-42). Whitespace is not
+  speech. The trace row keeps the model's full output. The
   system prompt directs the model to work without narrating its steps. Mandated
   tests: a silent tool round pushes no text and stamps only that
   marker beyond its measurements; text streamed before a tool call is
   spoken, recorded on that step's entry, and not marked; a closing
   "Done." after a spoken sentence is dropped, a lone one is spoken, and
-  a sentence that merely starts with the word is left whole. The no-tool turn — the overwhelming common case — is
+  a sentence that merely starts with the word is left whole; on
+  chained work the confirmation in the middle is dropped and the one
+  that closes the work is spoken; a newline before a tool call does
+  not make the turn's only confirmation disappear; the wrap-up line
+  survives. The no-tool turn — the overwhelming common case — is
   one LLM call with no added synchronous work (NFR-10 applies to the
   loop itself; anything the loop does beyond the call and the
   enqueue-only recorders is hot-path budget). Later steps' text streams
@@ -940,7 +947,8 @@ FR-7 still governs: the agent acts when the user asks.
   was. Stage entries use **step-indexed keys** (`step.1.ttfb.llm`,
   `step.2.tool.read_artifact`, and `step.N.tool_first` on a step that
   spoke nothing before its first tool call — its value is the silence
-  until the call arrived) so multi-step turns and repeated tools cannot silently overwrite
+  until the call arrived, recorded without the slow-stage advisory
+  because that wait is already the step's TTFB) so multi-step turns and repeated tools cannot silently overwrite
   each other in a flat dict. FR-33's no-first-audio rule is unchanged (a
   turn interrupted before any audio still writes no row; its step
   timings live in `agent.step` logs only). **CLAUDE.md's escalation rule
