@@ -128,10 +128,11 @@ Two models sit behind the one FR-48 seam (`agent/providers.py`,
   first call rides a connection the loop already opened (the Gemini
   client shares one `genai.Client` the same way). No retries
   (the SDK default is 2), and one time bound: 10s for a response to
-  START, enforced in `ClaudeLoopClient.stream`, so a stalled or
-  rate-limited call fails into the loop's spoken fallback. It is a
-  liveness check, not a limit on work (a response starts in about 1.5s
-  however long it will run). Once a response has started there is no
+  START, enforced in `ClaudeLoopClient.stream`, so a stalled call
+  fails into the loop's spoken fallback (a rate-limited or overloaded
+  one fails there at once, because retries are off). It is a liveness
+  check, not a limit on work (a response starts in 1.4–2.0s however
+  long it will run). Once a response has started there is no
   time limit: Claude buffers a tool call's input and sends nothing
   while writing it (measured: 34s of silence for an 11,700-character
   document), so a between-bytes timeout would cap document length. A
@@ -156,7 +157,10 @@ Two models sit behind the one FR-48 seam (`agent/providers.py`,
   request Sonnet 5.5 declines in the `cyber` or `frontier_llm` category is
   re-run on Claude Sonnet 5 by the API. Haiku has no fallback and rejects
   the field. Any other decline arrives as finish reason `blocked` and takes
-  the loop's spoken-fallback path.
+  the loop's spoken-fallback path. Known gap: nothing records that a
+  fallback happened. The trace row names the configured model even when
+  Sonnet 5 answered, the declined attempt's tokens are not counted, and
+  a refusal's category is not logged (ROADMAP, carried list).
 - **No forced tool choice.** Sonnet 5.5 rejects `tool_choice` `any` / `tool`
   with a 400; only `auto` and `none` exist. The loop uses exactly those two.
   Anything that must restrict what the model can do (the planned
