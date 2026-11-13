@@ -130,6 +130,11 @@ runs: before 33/36 (the owner's exact turn failed 3/3), after 36/36,
 including yes-to-an-EDIT-offer, a declined offer, and a stale offer,
 which must stay NO.
 
+Review round 4 found a second route to the same refusal, fixed here
+too: an offer spoken in the SAME step as a tool call was dropped from
+the judge's evidence (the code assumed a tool-call step's text is only
+filler, which Finding 2 below refutes). Unit-tested, not re-run live.
+
 **Finding 2 — tool work is narrated aloud. Carried to the next PR.**
 Sonnet writes a short sentence before most tool calls and the loop speaks
 it: "I'll write it up as a cleaned-up idea document.", "I'll add that to
@@ -137,7 +142,11 @@ the document.", and, after the refusals above, "The gate refused again,
 even after the user's yes. Per the instructions, I'll check for an
 existing document to write to." The prompt's "work silently" rule does
 not hold on this model. These stayed `text` (short), which is why nothing
-was discarded as a thinking block.
+was discarded as a thinking block. One part is fixed in this PR: the
+refusal text handed to the model opened with "gate:", which is where
+the spoken "the gate refused" came from. It no longer names the
+mechanism. That the model narrates at all is still carried. Not re-run
+live.
 
 **Finding 3 — answers run long. Carried to the next PR.** "What are
 options for getting the suppliers?" got 344 tokens: a good first two

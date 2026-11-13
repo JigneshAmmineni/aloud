@@ -1857,6 +1857,46 @@ def test_last_assistant_text_skips_tool_call_step_entries():
     )
 
 
+def test_last_assistant_text_keeps_an_offer_spoken_in_a_tool_call_step():
+    """PR #24 round 4 blocker: Sonnet speaks before tool calls, so the
+    offer can sit in the same step entry as a call. The user answers over
+    the tool round; skipping the entry left the judge with no offer and
+    the bare 'Yeah.' with no referent — the refused-after-yes bug again."""
+    provider = ContextProvider("base", session_id="s-t")
+    provider.append_user("note that down")
+    provider.append_step(
+        "",
+        [LLMToolCall(name="create_document", arguments={"title": "x"}, id="c1")],
+        [{"status": "refused"}],
+    )
+    provider.append_step(
+        "One moment. Nothing here fits. Do you want a new document for this?",
+        [LLMToolCall(name="list_documents", arguments={}, id="c2")],
+        [{"status": "cancelled"}],
+        interrupted=True,
+    )
+    provider.append_user("Yeah.")
+    text = provider.last_assistant_text()
+    assert "Do you want a new document for this?" in text
+    assert not text.startswith("One moment.")  # the filler is not the referent
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_last_assistant_text_ignores_a_step_that_spoke_only_filler(interrupted):
+    """...and the round-3 rule still holds: 'One moment.' (cut or not) is
+    nothing the user could be answering."""
+    provider = ContextProvider("base", session_id="s-t")
+    provider.append_user("what do I have?")
+    provider.append_step(
+        "One moment. ",
+        [LLMToolCall(name="list_documents", arguments={}, id="c1")],
+        [{"status": "cancelled"}],
+        interrupted=interrupted,
+    )
+    provider.append_user("yeah")
+    assert provider.last_assistant_text() is None
+
+
 def test_last_assistant_text_never_returns_an_offer_from_before_an_earlier_turn():
     """PR #24 round 2 blocker: the judge is told this text is what the
     latest turn responds to. An offer the user DECLINED two turns ago,

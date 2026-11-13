@@ -219,17 +219,26 @@ def to_gemini_contents(
     return ("\n\n".join(system_parts) or None), contents
 
 
+@functools.lru_cache(maxsize=None)
+def _genai_client(api_key: str) -> genai.Client:
+    """One SDK client per key for the life of the process, as on the
+    Claude branch: a session builds two loop clients (loop and judge)
+    and per-session SDK clients were never closed."""
+    return genai.Client(api_key=api_key)
+
+
 class GeminiLoopClient:
     """FR-48's thin streaming client, Gemini branch.
 
-    One long-lived genai.Client per instance (per session): an unreferenced
-    client is garbage-collected mid-stream while the lazy generator still
-    runs — the spike's RuntimeError. Thinking is pinned off (ADR #4): the
+    A thin per-session wrapper over the process-wide genai.Client (a
+    client that goes unreferenced is garbage-collected mid-stream while
+    the lazy generator still runs — the spike's RuntimeError — which a
+    process-lifetime client cannot be). Thinking is pinned off (ADR #4): the
     raw API defaults it ON for 2.5 Flash, costing ~5s TTFB and hidden
     tokens."""
 
     def __init__(self, api_key: str, model: str):
-        self._client = genai.Client(api_key=api_key)
+        self._client = _genai_client(api_key)
         self._model = model
 
     async def stream(
@@ -303,6 +312,8 @@ _CLAUDE_FINISH_MAP = {
     "end_turn": FINISH_STOP,
     "tool_use": FINISH_STOP,
     "max_tokens": FINISH_TRUNCATED,
+    # the window filled before max_tokens was reached: also a cut
+    "model_context_window_exceeded": FINISH_TRUNCATED,
     "refusal": FINISH_BLOCKED,
 }
 
@@ -375,8 +386,8 @@ def to_anthropic_messages(messages: list[dict]) -> tuple[str | None, list[dict]]
             out.append({"role": "user", "content": msg["content"]})
         elif role == "assistant":
             blocks: list[dict] = []
-            if (msg.get("content") or "").strip():
-                blocks.append({"type": "text", "text": msg["content"]})
+            if text := (msg.get("content") or "").strip():
+                blocks.append({"type": "text", "text": text})
             for call in msg.get("tool_calls", []):
                 blocks.append(
                     {
@@ -434,12 +445,19 @@ _CLAUDE_MODELS = {
 
 # Not the SDK defaults (600s, 2 retries). Two different waits:
 #
-# - For the response to START: bounded tightly, with no retry. This is
-#   a liveness check, not a limit on work: the first event arrives in
-#   about 1.5s however long the response will be. A stalled or
-#   rate-limited call must fail fast into the loop's spoken fallback,
-#   because nothing else covers that silence (the filler arms only on a
-#   tool call), and a retry lands in a conversation that has moved on.
+# - For the response to START: bounded, with no retry. This is a
+#   liveness check, not a limit on work: the first event arrives in
+#   1.4–2.0s however long the response will be. A stalled call must
+#   fail into the loop's spoken fallback, because nothing else covers
+#   that silence (the filler arms only on a tool call), and a retry
+#   lands in a conversation that has moved on. Why 10s and not the
+#   4–5s the measurements would allow (PR #24 round 4, advisory): a
+#   rate limit or overload already raises at once with retries off,
+#   so this bound only ever decides when to give up on a slow start,
+#   and giving up on a call that would have answered is the worse
+#   error (owner stance: never cut off what is working). Start time
+#   will also grow with the context and with a server-side fallback
+#   retry.
 # - Once it has started: NO time limit (owner decision, 2026-11-12). A
 #   response takes as long as its output needs. Claude buffers a tool
 #   call's input and sends NOTHING while writing it — measured 34s of
@@ -511,11 +529,12 @@ class ClaudeLoopClient:
         _check_tool_choice(tool_choice)
         system, claude_messages = to_anthropic_messages(messages)
         request = {
+            **_CLAUDE_MODELS[self._model],
+            # after the row: a row can never override these four
             "model": self._model,
             "max_tokens": max_output_tokens or _CLAUDE_MAX_TOKENS,
             "messages": claude_messages,
             "output_config": {"effort": self._effort},
-            **_CLAUDE_MODELS[self._model],
         }
         if system:
             request["system"] = system

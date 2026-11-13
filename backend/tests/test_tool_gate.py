@@ -114,6 +114,13 @@ def test_early_usage_is_kept_when_the_final_event_carries_none():
     assert usage == LLMUsage(340, 0)
 
 
+def test_refusal_text_never_names_the_mechanism():
+    # PR #24 round 4: the model repeats what it reads, and it told the
+    # user "the gate refused again". Nothing model-visible may name it.
+    text = gate_mod.GATE_REFUSAL["error"].lower()
+    assert "gate" not in text and "judge" not in text
+
+
 def test_evidence_is_bounded_and_quotes_only_recent_turns():
     # the CALLER owns the window (round 3) — mirror the loop's slice
     from agent.gate import JUDGE_RECENT_TURNS

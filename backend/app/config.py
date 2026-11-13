@@ -71,7 +71,8 @@ class Settings:
 
 def load_settings() -> Settings:
     llm_provider = os.getenv("LLM_PROVIDER") or "anthropic"
-    required = _REQUIRED + ((_LLM_KEY[llm_provider],) if llm_provider in _LLM_KEY else ())
+    llm_key = _LLM_KEY.get(llm_provider)
+    required = _REQUIRED + ((llm_key,) if llm_key else ())
     missing = [name for name in required if not os.getenv(name)]
     if missing:
         raise RuntimeError(

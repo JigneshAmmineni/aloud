@@ -184,6 +184,8 @@ def test_finish_reason_vocabulary():
     assert map_anthropic_finish("end_turn", True) == FINISH_STOP
     assert map_anthropic_finish("tool_use", True) == FINISH_STOP
     assert map_anthropic_finish("max_tokens", True) == FINISH_TRUNCATED
+    # a full context window is a length cut, not a refusal
+    assert map_anthropic_finish("model_context_window_exceeded", True) == FINISH_TRUNCATED
     for raw in ("refusal", "something_new"):
         assert map_anthropic_finish(raw, True) == FINISH_BLOCKED
     assert map_anthropic_finish(None, produced_output=False) == FINISH_BLOCKED
@@ -361,6 +363,32 @@ def test_haiku_request_shape_has_no_fallback_fields():
     # Haiku has no server-side fallback and rejects the field
     assert "fallbacks" not in request and "betas" not in request
     assert "system" not in request and "tools" not in request
+
+
+def test_a_model_row_cannot_override_the_fields_the_client_owns(monkeypatch):
+    # adding a row is how a model is added; a stray max_tokens there must
+    # not lift the judge's 8-token cap
+    import agent.providers as providers
+
+    monkeypatch.setitem(
+        providers._CLAUDE_MODELS,
+        "claude-haiku-5-5",
+        {"thinking": {"type": "disabled"}, "max_tokens": 64000, "model": "other"},
+    )
+    client, fake = _client_with([_start(), _text("YES"), _end()], model="claude-haiku-5-5", effort="low")
+    _collect(client, messages=_USER, max_output_tokens=8)
+    assert (fake.request["max_tokens"], fake.request["model"]) == (8, "claude-haiku-5-5")
+
+
+def test_assistant_text_is_sent_stripped():
+    _, messages = to_anthropic_messages(
+        [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "Done. \n"},
+            {"role": "user", "content": "ok"},
+        ]
+    )
+    assert messages[1]["content"] == [{"type": "text", "text": "Done."}]
 
 
 def test_tool_choice_none_declares_tools_but_forbids_selection():

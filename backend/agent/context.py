@@ -15,7 +15,7 @@ translation, this seam owns assembly and bookkeeping.
 
 from loguru import logger
 
-from agent.prompts import render_documents_block
+from agent.prompts import FILLER_LINES, render_documents_block
 from agent.providers import LLMToolCall
 
 # FR-46: the interrupted mark's wire form — a sentinel suffix on the
@@ -268,7 +268,12 @@ class ContextProvider:
         must never be passed off as adjacent. A turn can leave no spoken
         reply at all (a barge-in during a tool round, a fallback that
         spoke nothing), and a later bare "yeah" would then confirm an
-        offer the user had already declined."""
+        offer the user had already declined.
+
+        A tool-call step's text counts (round 4): the model speaks
+        before tool calls, and an offer made in the same step as a
+        call is still the offer. Only the FR-43 filler the loop
+        prefixed is removed, since "One moment." is no referent."""
         latest_user_seen = False
         for m in reversed(self._messages):
             if m.get("role") == "user":
@@ -278,14 +283,20 @@ class ContextProvider:
                 continue
             if not latest_user_seen:
                 continue  # the current turn's own entries
-            # skip tool-call step entries: their content is the FR-43
-            # filler whenever the round was slow, and "One moment." next
-            # to a bare "yes" is exactly the no-antecedent input the
-            # offer exists to fix (round 3)
-            if m.get("role") == "assistant" and not m.get("tool_calls"):
-                content = m.get("content") or ""
-                if content.strip():
-                    return content.strip()[-max_chars:]
+            if m.get("role") == "assistant":
+                content = (m.get("content") or "").strip()
+                if m.get("tool_calls"):
+                    # drop the filler prefix, keep the model's own
+                    # speech; a step that spoke only filler (cut or
+                    # not) spoke nothing the user could answer
+                    for filler in FILLER_LINES:
+                        if content.startswith(filler):
+                            content = content[len(filler) :].strip()
+                            break
+                    if content == INTERRUPTED_SUFFIX.strip():
+                        content = ""
+                if content:
+                    return content[-max_chars:]
         return None
 
     def recent_user_texts(self, n: int = 4) -> list[str]:

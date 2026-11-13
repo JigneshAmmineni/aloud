@@ -44,10 +44,14 @@ JUDGE_MAX_OUTPUT_TOKENS = 8
 JUDGE_RECENT_TURNS = 4
 _TURN_MAX_CHARS = 600
 
+# Model-visible, and this model repeats what it reads (2026-11-12: it
+# said "the gate refused again" to the user). The text never names the
+# mechanism: no "gate", no "judge".
 GATE_REFUSAL = {
     "status": "refused",
     "error": (
-        "gate: the user has not explicitly asked for a new document. "
+        "A new document was not created: the user has not explicitly "
+        "asked for one. "
         "Redirect — and speak NONE of this reasoning out loud. (1) If "
         "they wanted a spoken answer (a summary, an opinion, a "
         "readback), answer out loud and write nothing. (2) Otherwise, "
@@ -56,7 +60,7 @@ GATE_REFUSAL = {
         "there with edit_document NOW, structured sensibly, without "
         "asking. (3) ONLY if no existing document fits, ask the user "
         "'do you want a new document for this?' — their verbal yes "
-        "passes this gate on your next create_document call, or their "
+        "is enough on your next create_document call, or their "
         "answer names the document to write to; either way, then write "
         "silently."
     ),

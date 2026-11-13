@@ -77,6 +77,9 @@ def test_google_provider_still_constructs_for_loop_and_judge():
     judge = make_judge_llm(s)
     assert isinstance(judge, GeminiLoopClient)
     assert judge._model == "gemini-2.5-flash-lite"
+    # one SDK client per process on the swap-back path too: a session
+    # builds two loop clients and neither is ever closed
+    assert judge._client is make_loop_llm(s)._client
 
 
 def test_anthropic_provider_rejects_a_model_it_has_no_request_shape_for():

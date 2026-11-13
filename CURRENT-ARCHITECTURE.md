@@ -125,7 +125,8 @@ Two models sit behind the one FR-48 seam (`agent/providers.py`,
 - **One SDK client per process.** Every `ClaudeLoopClient` (one for the
   loop and one for the judge, per session) wraps the same
   `AsyncAnthropic`, so there is one connection pool and the judge's
-  first call rides a connection the loop already opened. No retries
+  first call rides a connection the loop already opened (the Gemini
+  client shares one `genai.Client` the same way). No retries
   (the SDK default is 2), and one time bound: 10s for a response to
   START, enforced in `ClaudeLoopClient.stream`, so a stalled or
   rate-limited call fails into the loop's spoken fallback. It is a

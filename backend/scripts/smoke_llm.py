@@ -78,6 +78,7 @@ async def main() -> int:
         t0 = time.monotonic()
         ttfb_ms = None
         text = ""
+        saw_call = False
         done = None
         try:
             async for event in loop_llm.stream(messages, tools=_TOOLS, tool_choice=tool_choice):
@@ -86,6 +87,7 @@ async def main() -> int:
                 if isinstance(event, LLMTextDelta):
                     text += event.text
                 elif isinstance(event, LLMToolCall):
+                    saw_call = True
                     print(f"  tool call: {event.name}({event.arguments})")
                 elif isinstance(event, LLMDone):
                     done = event
@@ -99,7 +101,9 @@ async def main() -> int:
             continue
         print(f"loop [{label}]: ttfb={ttfb_ms}ms finish={done.finish_reason} usage={done.usage}")
         print(f"       {text!r}")
-        ok = ok and done.finish_reason == FINISH_STOP and bool(text)
+        # the question is whether the API accepted the request, not
+        # whether the model chose words over a tool call
+        ok = ok and done.finish_reason == FINISH_STOP and (bool(text) or saw_call)
 
     t0 = time.monotonic()
     allowed, usage, verdict, finish = await judge_allows(
