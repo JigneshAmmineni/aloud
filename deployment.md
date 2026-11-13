@@ -558,8 +558,26 @@ gcloud compute ssh aloud --zone=us-west1-b --tunnel-through-iap \
   --command="docker exec aloud-db-1 pg_dump -U aloud aloud | gzip > ~/aloud/pre-migration-$(date +%Y%m%d).sql.gz"
 ```
 
-**Before a deploy that adds or changes a required env var:** edit the
-VM's `~/aloud/.env` FIRST. Deploys never sync it, and the backend
+**Before a deploy that adds or changes a required env var:** update the
+VM's `~/aloud/.env` FIRST, by hand or with `bash scripts/sync-env.sh`
+from your machine. The script uploads the local `.env`, prints which
+keys would be added, changed and removed (names only), asks, then
+replaces the VM's file. The VM keeps its own `POSTGRES_PASSWORD`,
+`ALOUD_DOMAIN`, `ALOUD_EMAIL` and `LOG_LEVEL`. It restarts nothing, so
+run it right before the deploy.
+
+Every replaced `.env` stays on the VM as `~/aloud/.env.<commit>`, named
+after the commit that was in production when it was replaced (the VM
+checkout's HEAD, which each deploy resets to the commit it ships).
+`bash scripts/sync-env.sh --list` shows them. **Before a rollback**,
+run `bash scripts/sync-env.sh --restore <sha>` with the commit you are
+rolling back to, then run the deploy with that SHA: it puts back the
+`.env` that commit ran with. A commit deployed without an env change
+has no file of its own; the script picks the saved version that
+covers it. The names are only right if `.env` is changed through the
+script, not edited by hand.
+
+Deploys never sync it, and the backend
 refuses to boot on a missing key or on a model the configured provider
 cannot run, so the old `.env` under new code takes the app down until
 it is edited. Compare against `.env.example` at the commit being

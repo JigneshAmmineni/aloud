@@ -282,7 +282,10 @@ money, docs, and environments too. When swapping ANY of STT / LLM / TTS
   $/1M characters). Same units, different prices = env change only.
 
 **Config (BOTH the local `.env` AND the VM's `~/aloud/.env` — they are
-separate hand-maintained files; deploys never sync them)**
+separate files and deploys never sync them; `scripts/sync-env.sh`
+copies the local one to the VM on request, keeping the VM's database
+password, domain, email and log level, and leaves each replaced
+version on the VM as `.env.<commit it ran with>`)**
 - [ ] The provider selector / model env (`STT_PROVIDER`, `LLM_PROVIDER`,
   `LLM_MODEL`, `JUDGE_MODEL`, `LLM_EFFORT`, `TTS_PROVIDER`) and the new
   provider's API key. A model line left over from the old provider
@@ -387,6 +390,11 @@ Caddyfile, docker-compose.yml (dev; the backend runs
               Windows bind mounts emit no inotify events in-container and
               uvicorn --reload silently serves stale code),
               docker-compose.prod.yml (prod)
+scripts/            sync-env.sh (run from a dev machine: copies the local
+              .env to the VM over IAP with a names-only preview; each
+              replaced version stays on the VM as .env.<commit it ran
+              with>; --list shows them, --restore <sha> puts one back
+              before a rollback; nothing runs it automatically)
 ```
 
 Two architectural seams everything hangs on:
@@ -626,7 +634,10 @@ production" → Run workflow** (`.github/workflows/deploy.yml`):
 UTC in the name). Two caveats: DB schema
 migrations are **not** reversed (rolling back past a release that changed the
 schema may need manual DB attention first), and in-flight voice sessions die
-when the backend container restarts (true of every deploy).
+when the backend container restarts (true of every deploy). The VM's `.env`
+is not rolled back by the button either: when it changed since that
+commit, run `bash scripts/sync-env.sh --restore <sha>` first, which puts
+back the version that commit ran with.
 
 **Revoking CD access** if a secret ever leaks: delete the two GitHub secrets,
 delete the `aloud-deployer` SA (GCP console → IAM → Service Accounts), and
