@@ -206,6 +206,8 @@ These generalize to any tool-calling agent implementation:
   **deterministic backstop in the loop**: if nothing has been spoken when
   a step-1 tool round starts, the loop itself speaks a canned filler line.
   General principle: latency guarantees live in code, not prompts.
+  (That backstop was removed on 2026-11-12: see the blog seed "The
+  filler that arrived after the wait" at the end of this file.)
 - **Forcing a text-only step requires omitting tools from the request**
   (or `tool_choice: none`) — a plain "wrap up now" instruction can still
   come back as a tool call, and then your step cap has no teeth. Also:

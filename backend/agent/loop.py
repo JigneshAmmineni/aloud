@@ -24,6 +24,7 @@ into the recorder, one llm_traces row per call (FR-49).
 import asyncio
 import itertools
 import json
+import re
 import time
 from collections import deque
 from contextlib import aclosing
@@ -32,7 +33,6 @@ from loguru import logger
 from pipecat.frames.frames import (
     AggregatedTextFrame,
     BotStartedSpeakingFrame,
-    BotStoppedSpeakingFrame,
     LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
@@ -73,6 +73,25 @@ from agent.tools import Tool, ToolContext, registry_schemas
 MAX_STEPS = 5
 TOOL_TIMEOUT_S = 10.0
 
+# FR-43, one acknowledgment per piece of work. The model closes a tool
+# turn with a bare "Done." even after a sentence that already said what
+# it was doing, and the two run together in speech ("I'll add that to
+# the document.Done." — 2026-11-12 live session; a prompt rule did not
+# stop it, 3 of 3 in a live probe). So in a step that follows speech in
+# the same turn, a LEADING bare confirmation is not spoken. Punctuation
+# is required: "Done with the first list" is a sentence, not a
+# confirmation.
+_BARE_CONFIRMATIONS = ("done.", "done!", "all done.", "all done!")
+_LEADING_CONFIRMATION = re.compile(r"\s*(?:all\s+)?done[.!]+\s*", re.IGNORECASE)
+
+
+def _may_be_only_a_confirmation(text: str) -> bool:
+    """True while streamed `text` could still turn out to be nothing but
+    a bare confirmation — the loop holds it back that long (a few
+    characters) instead of speaking it."""
+    so_far = text.strip().lower()
+    return any(c.startswith(so_far) for c in _BARE_CONFIRMATIONS)
+
 
 class _TurnState:
     """Live state for one turn — what the interruption handler finalizes
@@ -85,6 +104,7 @@ class _TurnState:
         self.step = 1
         self.messages: list[dict] = []  # built list for the current call
         self.step_text = ""  # model text streamed this step
+        self.turn_spoke = False  # some step of this turn spoke model text
         self.calls: list[LLMToolCall] = []  # current step's tool calls
         self.results: list[dict | None] = []
         self.write_tasks: dict[str, asyncio.Task] = {}  # call.id -> task
@@ -264,9 +284,8 @@ class AgentLoopProcessor(FrameProcessor):
     def note_user_speech_start(self) -> None:
         self._await_user_speech = False
 
-    def note_bot_speaking(self, speaking: bool) -> None:
-        if speaking:
-            self._bot_spoke_this_turn = True  # FR-61's valve: audio began
+    def note_bot_spoke(self) -> None:
+        self._bot_spoke_this_turn = True  # FR-61's valve: audio began
 
     def note_spoken_sentence(self, text: str) -> None:
         """FR-46: the sentence-level synthesis stream (the same one FR-20
@@ -376,6 +395,10 @@ class AgentLoopProcessor(FrameProcessor):
             msgs=lambda: json.dumps(messages, ensure_ascii=False, default=str),
         )
 
+        # One acknowledgment per piece of work: only a step that follows
+        # speech in this turn can have its leading confirmation dropped.
+        holding = state.turn_spoke
+        dropped = 0  # leading characters of step_text not spoken
         await self.push_frame(LLMFullResponseStartFrame())
         try:
             # aclosing: barge-in cancellation closes the provider stream —
@@ -391,8 +414,30 @@ class AgentLoopProcessor(FrameProcessor):
                         state.ttfb_ms = elapsed_ms
                     if isinstance(event, LLMTextDelta):
                         state.step_text += event.text
-                        await self.push_frame(LLMTextFrame(event.text))
+                        if holding and _may_be_only_a_confirmation(state.step_text):
+                            pass  # held: it may be all this step says
+                        elif holding:
+                            # more than a confirmation: speak the rest
+                            holding = False
+                            match = _LEADING_CONFIRMATION.match(state.step_text)
+                            dropped = match.end() if match else 0
+                            await self.push_frame(
+                                LLMTextFrame(state.step_text[dropped:])
+                            )
+                        else:
+                            state.turn_spoke = True
+                            await self.push_frame(LLMTextFrame(event.text))
                     elif isinstance(event, LLMToolCall):
+                        if not state.calls and not state.step_text.strip():
+                            # NFR-1's known exception, made findable: this
+                            # step spoke nothing before its first tool
+                            # call. The value is how long that silence
+                            # had lasted when the call arrived.
+                            self._recorder.record_step_stage(
+                                state.turn_id,
+                                f"step.{state.step}.tool_first",
+                                elapsed_ms,
+                            )
                         state.calls.append(event)
                     elif isinstance(event, LLMUsage):
                         # reported ahead of the output on providers that
@@ -418,6 +463,8 @@ class AgentLoopProcessor(FrameProcessor):
                 round((time.monotonic() - state.t0) * 1000),
                 purpose,
             )
+            if holding:
+                state.step_text = ""  # held back, never spoken: not heard
             # close the frame pair before degrading — a dangling
             # LLMFullResponseStartFrame stalls downstream aggregation.
             # (CancelledError skips this: every cancel path broadcasts an
@@ -425,6 +472,13 @@ class AgentLoopProcessor(FrameProcessor):
             # fires for silent cancels — which resets downstream itself.)
             await self.push_frame(LLMFullResponseEndFrame())
             raise
+        if holding:
+            # the stream ended with nothing but what was held
+            if state.calls or state.step_text.strip().lower() not in _BARE_CONFIRMATIONS:
+                # a cut-short word, or more work follows: speak it as it is
+                await self.push_frame(LLMTextFrame(state.step_text))
+            else:
+                dropped = len(state.step_text)
         await self.push_frame(LLMFullResponseEndFrame())
 
         duration_ms = round((time.monotonic() - state.t0) * 1000)
@@ -441,6 +495,16 @@ class AgentLoopProcessor(FrameProcessor):
             out=lambda: f"{state.step_text!r} calls="
             f"{[(c.name, c.arguments) for c in state.calls]}",
         )
+
+        if dropped:
+            # after the trace row above, which keeps what the model wrote:
+            # the context records only what was spoken
+            log.bind(event="agent.confirmation_dropped", chars=dropped).info(
+                "leading confirmation after speech not spoken"
+            )
+            state.step_text = state.step_text[dropped:]
+            if not state.step_text.strip() and not state.calls:
+                return True  # the turn already said what it did
 
         if not state.step_text.strip() and not state.calls:
             # FR-42: an empty step is a failure, not an ending — blocked or
@@ -998,7 +1062,7 @@ class AgentLoopProcessor(FrameProcessor):
 class AgentLoopObserver(BaseObserver):
     """The loop's eyes downstream of itself. The loop sits upstream of TTS
     and cannot see playback or synthesis frames for free; this observer
-    feeds it the three signals the spec names: bot-started/stopped speaking
+    feeds it the three signals the spec names: bot-started speaking
     (FR-61's audio-began valve), the sentence-level synthesis stream
     (FR-46's spoken-prefix capture — the same AggregatedTextFrame stream
     FR-20 logs), and user-speech-start (FR-44's straggler boundary)."""
@@ -1032,10 +1096,10 @@ class AgentLoopObserver(BaseObserver):
             if self._already_seen(frame.id):
                 return
             self._loop.note_user_speech_start()
-        elif isinstance(frame, (BotStartedSpeakingFrame, BotStoppedSpeakingFrame)):
+        elif isinstance(frame, BotStartedSpeakingFrame):
             if self._already_seen(frame.id):
                 return
-            self._loop.note_bot_speaking(isinstance(frame, BotStartedSpeakingFrame))
+            self._loop.note_bot_spoke()
         elif isinstance(frame, TTSTextFrame):
             # FR-61: only the OUTPUT TRANSPORT's release counts — it holds
             # text frames behind their preceding audio and discards them

@@ -272,8 +272,9 @@ class ContextProvider:
 
         A tool-call step's text counts (round 4): the model speaks
         before tool calls, and an offer made in the same step as a
-        call is still the offer. Every word in a step entry is the
-        model's own — the loop adds none."""
+        call is still the offer. The loop speaks no line of its own,
+        so the only text in an entry that is not the model's is
+        FR-46's cut-off mark."""
         latest_user_seen = False
         for m in reversed(self._messages):
             if m.get("role") == "user":

@@ -365,7 +365,7 @@ def test_a_silent_tool_round_stays_silent():
     async def run():
         turn = asyncio.create_task(h.loop._run_turn("write it up"))
         await asyncio.sleep(0.05)
-        h.recorder.record_measurement(700)
+        h.recorder.record_measurement(700)  # FR-47: no measurement, no row
         await turn
 
     asyncio.run(run())
@@ -374,7 +374,80 @@ def test_a_silent_tool_round_stays_silent():
     step_msg = next(m for m in h.ctx.build() if m.get("tool_calls"))
     assert step_msg["content"] == ""
     rows = _queued(h.recorder, TurnMetric)
-    assert rows and not any("filler" in k for k in rows[0].stages_ms)
+    # exactly what the two steps measured, plus the marker that makes
+    # NFR-1's known exception findable — no other stage of the loop's own
+    assert rows and set(rows[0].stages_ms) == {
+        "step.1.ttfb.llm",
+        "step.1.tool_first",
+        "step.1.tool.echo",
+        "step.2.ttfb.llm",
+    }
+
+
+def _narrated_tool_turn(closing):
+    """A step that says what it is doing and calls a tool, then `closing`."""
+    return [
+        [
+            LLMTextDelta("I'll add that to the document. "),
+            LLMToolCall(name="echo", arguments={}, id="c1"),
+            _done(),
+        ],
+        [*closing, _done()],
+    ]
+
+
+def test_done_is_not_spoken_after_a_sentence_that_said_what_was_being_done():
+    """2026-11-12 live session: every narrated tool turn ended "...to the
+    document.Done." One acknowledgment per piece of work: the closing
+    bare confirmation is not spoken and not recorded, no fallback line
+    covers the quiet ending, and the trace keeps what the model wrote."""
+    h = make_loop(_narrated_tool_turn([LLMTextDelta("Done.")]), tools=[read_tool()])
+
+    asyncio.run(h.loop._run_turn("note that down"))
+
+    text = _pushed_text(h)
+    assert text == "I'll add that to the document. "
+    assert not any(line in text for line in FALLBACK_LINES)
+    assert not any("Done" in (m.get("content") or "") for m in h.ctx.build())
+    assert [t.output for t in _queued(h.traces, LLMTrace)][-1] == "Done."
+
+
+def test_a_lone_done_is_still_spoken_when_the_turn_said_nothing_else():
+    """The confirmation is the only acknowledgment of silent work: kept."""
+    scripts = [
+        [LLMToolCall(name="echo", arguments={}, id="c1"), _done()],
+        [LLMTextDelta("Done."), _done()],
+    ]
+    h = make_loop(scripts, tools=[read_tool()])
+    asyncio.run(h.loop._run_turn("note that down"))
+    assert _pushed_text(h) == "Done."
+    assert h.ctx.build()[-1]["content"] == "Done."
+
+
+@pytest.mark.parametrize(
+    ("closing", "spoken"),
+    [
+        # a confirmation leading real content: only the confirmation goes
+        ([LLMTextDelta("Done."), LLMTextDelta(" I split it into two lists.")], "I split it into two lists."),
+        ([LLMTextDelta("Done. I split it into two lists.")], "I split it into two lists."),
+        # not a confirmation: a sentence that starts with the same word
+        ([LLMTextDelta("Done"), LLMTextDelta(" with the first list. Want the second?")], "Done with the first list. Want the second?"),
+        # nothing like a confirmation: streams as before
+        ([LLMTextDelta("Added it "), LLMTextDelta("under Timeline.")], "Added it under Timeline."),
+    ],
+)
+def test_only_a_leading_bare_confirmation_is_dropped_from_a_closing_step(closing, spoken):
+    h = make_loop(_narrated_tool_turn(closing), tools=[read_tool()])
+    asyncio.run(h.loop._run_turn("note that down"))
+    assert _pushed_text(h) == "I'll add that to the document. " + spoken
+    assert h.ctx.build()[-1]["content"] == spoken  # the record is what was heard
+
+
+def test_done_as_a_plain_answer_is_spoken():
+    """No earlier speech in the turn: nothing is held or dropped."""
+    h = make_loop([[LLMTextDelta("Done."), _done()]])
+    asyncio.run(h.loop._run_turn("are you done?"))
+    assert _pushed_text(h) == "Done."
 
 
 def test_text_before_a_tool_call_is_spoken_and_kept_with_the_step():
@@ -383,13 +456,23 @@ def test_text_before_a_tool_call_is_spoken_and_kept_with_the_step():
     that step's entry, word for word."""
     scripts = [
         [LLMTextDelta("Sure - "), LLMToolCall(name="echo", arguments={}, id="c1"), _done()],
-        [LLMTextDelta("Done."), _done()],
+        [LLMTextDelta("Here it is."), _done()],
     ]
-    h = make_loop(scripts, tools=[read_tool()])
-    asyncio.run(h.loop._run_turn("go"))
-    assert _pushed_text(h) == "Sure - Done."
+    h = make_loop(scripts, tools=[read_tool(delay=0.05)])
+
+    async def run():
+        turn = asyncio.create_task(h.loop._run_turn("go"))
+        await asyncio.sleep(0.02)
+        h.recorder.record_measurement(700)  # FR-47: no measurement, no row
+        await turn
+
+    asyncio.run(run())
+    assert _pushed_text(h) == "Sure - Here it is."
     step_msg = next(m for m in h.ctx.build() if m.get("tool_calls"))
     assert step_msg["content"] == "Sure - "
+    # it spoke first: not the tool-first exception
+    rows = _queued(h.recorder, TurnMetric)
+    assert rows and not any("tool_first" in k for k in rows[0].stages_ms)
 
 
 # ---------------- FR-44 (iii)/(iv) ----------------
@@ -839,7 +922,7 @@ def test_same_tool_twice_in_one_step_keeps_both_stage_entries():
 
 
 def test_fallback_keeps_model_text_the_user_already_heard():
-    """Nit: a handler crash AFTER step text
+    """FR-42 (heard words never vanish): a handler crash AFTER step text
     streamed must not vanish the heard sentence from the context."""
     scripts = [
         [
@@ -1568,8 +1651,7 @@ def test_fr61_valve_skips_amend_when_audio_played_but_nothing_released():
     scripts = [[LLMTextDelta("A full reply."), _done()]]
     h = make_loop(scripts)
     asyncio.run(h.loop._run_turn("go"))
-    h.loop.note_bot_speaking(True)
-    h.loop.note_bot_speaking(False)
+    h.loop.note_bot_spoke()
 
     asyncio.run(h.loop._start_interruption())
 
@@ -1671,7 +1753,8 @@ def test_an_earlier_steps_audio_never_vouches_for_the_unheard_closing_reply():
     assert last["content"].endswith(INTERRUPTED_SUFFIX)
 
 
-def test_last_assistant_text_ignores_the_current_turns_own_steps():
+@pytest.mark.parametrize("step_text", ["", "Checking what you have. "])
+def test_last_assistant_text_ignores_the_current_turns_own_steps(step_text):
     """What the agent says while working on the user's latest turn is
     not what that turn responded to: a list_documents round before the
     create retry must not replace the offer as the judge's referent."""
@@ -1680,7 +1763,7 @@ def test_last_assistant_text_ignores_the_current_turns_own_steps():
     provider.append_assistant("Do you want a new document for this?")
     provider.append_user("yes")
     provider.append_step(
-        "Checking what you have. ",
+        step_text,  # silent, as a tool step usually is, or narrated
         [LLMToolCall(name="list_documents", arguments={}, id="c9")],
         [{"status": "ok"}],
     )
@@ -1688,6 +1771,25 @@ def test_last_assistant_text_ignores_the_current_turns_own_steps():
         provider.last_assistant_text()
         == "Do you want a new document for this?"
     )
+
+
+def test_last_assistant_text_is_none_after_a_turn_that_only_worked_silently():
+    """A tool step with no speech is now the ordinary shape of a step
+    entry (content ""). A previous turn that left only such an entry said
+    nothing the user could be answering: the judge must get None — never
+    "", and never whatever was said before that turn."""
+    provider = ContextProvider("base", session_id="s-t")
+    provider.append_user("want a new doc for the hiring plan?")
+    provider.append_assistant("Do you want a new document for this?")
+    provider.append_user("no, add milk to the shopping list")
+    provider.append_step(
+        "",
+        [LLMToolCall(name="edit_document", arguments={"document_id": 1}, id="c1")],
+        [{"status": "in_progress"}],
+        interrupted=True,  # cut before the closing "Done."
+    )
+    provider.append_user("yeah")
+    assert provider.last_assistant_text() is None
 
 
 def test_last_assistant_text_keeps_an_offer_spoken_in_a_tool_call_step():

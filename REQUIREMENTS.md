@@ -582,7 +582,9 @@ FR-7 still governs: the agent acts when the user asks.
   model, never an exception). Failure discipline: any loop-internal error
   (LLM call failure, tool handler crash) degrades to a brief spoken
   fallback and a clean end of turn — a broken tool must never kill the
-  session. **An empty step is a failure, not an ending**: a response with
+  session — and text the user already heard in the failing step stays
+  in the context (heard words never vanish). **An empty step is a
+  failure, not an ending**: a response with
   neither text nor tool calls (a blocked or truncated generation —
   Gemini's SAFETY/RECITATION/MAX_TOKENS-with-no-parts outcomes are
   returns, not exceptions, so the error path above never fires on its
@@ -619,12 +621,21 @@ FR-7 still governs: the agent acts when the user asks.
   first streamed sentence of a step reaches TTS immediately (NFR-2), and
   tool execution overlaps speech already playing. A step that produces
   no text before its tool calls is silent until a later step speaks: the
-  loop speaks no line of its own to cover the wait, and every word in
-  the context's assistant entries is the model's. The system prompt
-  directs the model to work without narrating its steps. Mandated
-  tests: a silent tool round pushes no text and stamps no stage of its
-  own; text streamed before a tool call is spoken and recorded on that
-  step's entry. The no-tool turn — the overwhelming common case — is
+  loop speaks no line of its own to cover the wait, so an assistant
+  entry carries no words the system invented (the only text the
+  provider adds is FR-46's cut-off mark). Such a step is marked in the
+  turn's metrics row (`step.N.tool_first`, FR-47). One acknowledgment
+  per piece of work: in a step that follows speech in the same turn, a
+  leading bare confirmation ("Done.") is not spoken and not recorded
+  in the context, and if it was all the step said the turn ends there
+  without a fallback; a turn that said nothing else keeps its
+  confirmation. The trace row keeps the model's full output. The
+  system prompt directs the model to work without narrating its steps. Mandated
+  tests: a silent tool round pushes no text and stamps only that
+  marker beyond its measurements; text streamed before a tool call is
+  spoken, recorded on that step's entry, and not marked; a closing
+  "Done." after a spoken sentence is dropped, a lone one is spoken, and
+  a sentence that merely starts with the word is left whole. The no-tool turn — the overwhelming common case — is
   one LLM call with no added synchronous work (NFR-10 applies to the
   loop itself; anything the loop does beyond the call and the
   enqueue-only recorders is hot-path budget). Later steps' text streams
@@ -927,7 +938,9 @@ FR-7 still governs: the agent acts when the user asks.
   match** (its "written from the breakdowns the latency
   observer already computes" described the old writer), exactly as FR-32
   was. Stage entries use **step-indexed keys** (`step.1.ttfb.llm`,
-  `step.2.tool.read_artifact`) so multi-step turns and repeated tools cannot silently overwrite
+  `step.2.tool.read_artifact`, and `step.N.tool_first` on a step that
+  spoke nothing before its first tool call — its value is the silence
+  until the call arrived) so multi-step turns and repeated tools cannot silently overwrite
   each other in a flat dict. FR-33's no-first-audio rule is unchanged (a
   turn interrupted before any audio still writes no row; its step
   timings live in `agent.step` logs only). **CLAUDE.md's escalation rule
@@ -2672,7 +2685,7 @@ deliberately unchanged (FR-56 states local verification and why).
 ## 5. Non-Functional Requirements
 
 ### 5.1 Latency
-- **NFR-1** The target for time from end-of-user-speech to first audio from the agent is 3 seconds under normal network conditions. It is a target, not a gate: it is measured on every turn and its breaches are counted (§4.9), and where the two conflict, the quality of the response takes precedence over the budget. A turn whose first step goes straight to a tool call is a known exception: it is silent until a later step speaks (FR-43).
+- **NFR-1** The target for time from end-of-user-speech to first audio from the agent is 3 seconds under normal network conditions. It is a target, not a gate: it is measured on every turn and its breaches are counted (§4.9), and where the two conflict, the quality of the response takes precedence over the budget. A turn whose first step goes straight to a tool call is a known exception: it is silent until a later step speaks (FR-43), and its metrics row carries a `step.1.tool_first` stage entry, so these turns can be told apart from a regression among the counted breaches.
 - **NFR-2** Audio must stream as it is generated. The agent must not wait until its full response is ready before speaking.
 - **NFR-10** Measurement must be free: capture (§4.9) adds no synchronous work to the voice hot path. The principle, independent of pipeline architecture: code on the hot path only ever enqueues to memory; background writers batch queues into the database; a failed write logs an error and drops the batch rather than disturbing a live session. Test approach: the same split the transcript-writer tests use — observers/recorders are tested against a fake queue with no database available (proving the enqueue path touches nothing), and writers are exercised separately, including the broken-database case completing without raising. (The FR-20 transcript writer is the exemplar of this discipline, not its definition — it applies equally to a future custom agent loop, where observers become direct recorder calls.)
 

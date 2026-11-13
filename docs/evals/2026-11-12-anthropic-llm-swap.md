@@ -154,14 +154,9 @@ sentences, then every option with its details. The prompt says "keep
 replies brief" next to "answer directly and completely", with no concrete
 bound; Sonnet resolves that toward complete.
 
-**Filler line removed (owner decision, 2026-11-12, after this session).**
-The loop no longer speaks "One moment." (or any line of its own) before
-tool work; the prompt no longer promises one. Expected in the next live
-session, to be checked by the owner: (a) no canned wait line on any
-turn; (b) a tool turn is silent until its reply ("Done."), and that
-silence is tolerable for ordinary edits; (c) whether Sonnet narrates
-MORE before tool calls now that nothing else marks the wait (Finding 2).
-Unit-tested (a silent tool round pushes no text); not run live.
+The filler line was removed after this session (PR #25). Its check is
+its own eval, written before its run:
+`docs/evals/2026-11-12-filler-removal.md`.
 
 Part 3's scripted rows (A–C and the two 2026-10-11 scripts) are still
 unrun.

@@ -649,7 +649,9 @@ Shipped on the create-gate branch but only partially verified live
 docs/evals/2026-10-11-create-gate-judge.md and
 docs/evals/2026-10-11-voice-behavior-fixes.md). The LLM swap's eval
 (docs/evals/2026-11-12-anthropic-llm-swap.md) re-runs both on Claude, so
-one live session can close all three. The list, so nothing is
+one live session can close all three, along with
+docs/evals/2026-11-12-filler-removal.md (the filler line's removal,
+whose script covers the same turns). The list, so nothing is
 forgotten:
 
 - **Carried from the first Claude session (2026-11-12) into the
@@ -687,7 +689,15 @@ forgotten:
   ~1.6s in), which would be a new event in the FR-48 contract; and
   (from review round 3) `llm.thinking_discarded` is logged by the
   client with `session_id` only — hand the discarded count to the
-  loop as a neutral event so it is logged with `turn_id` and step;
+  loop as a neutral event so it is logged with `turn_id` and step.
+  Measured in the 2026-11-12 filler-removal session: a narration
+  sentence before a tool call ("I'll add that to the document.")
+  is not heard when it is generated. It sits in sentence
+  aggregation until the step ends, so it plays AFTER the wait (the
+  two slowest turns, 5.0s and 5.5s to first audio, were narrated
+  ones). Flushing the pending sentence when the model's text block
+  ends would put it at the start of the wait, which is the wait
+  indicator feature 10 asks for, for free;
   (7) from PR #24's last review: a server-side fallback is
   invisible. When Sonnet 5.5 declines and the API re-runs the
   request on Sonnet 5, `message_start` names the model that
@@ -711,8 +721,9 @@ forgotten:
 - **Silent tool work** — no narrated reasoning, steps, or workflow
   ("let me read the document", "okay I have the content").
 - **Minimal confirmations** — never "it's on your screen", "I have
-  written that to the document", "the document has been updated";
-  "Done." is enough.
+  written that to the document", "the document has been updated".
+  One acknowledgment per piece of work (2026-11-12, enforced in the
+  loop): "Done." only when the agent said nothing else in the turn.
 - **Create-gate redirection (FR-60)** — a blocked create silently picks
   the existing document from recent conversation (usually the one under
   discussion), writes without asking; only with no fitting document

@@ -330,8 +330,11 @@ def map_anthropic_finish(raw: str | None, produced_output: bool) -> str:
 def to_anthropic_tools(tools: list[dict]) -> list[dict]:
     """Registry entries → Claude tool definitions (the JSON schema passes
     through as input_schema). eager_input_streaming stays OFF on purpose:
-    without it the server validates each tool input and delivers it whole,
-    which is the atomic-call contract the loop relies on."""
+    without it the API buffers and validates each tool input before the
+    block closes, so a half-written document body never reaches a handler
+    through this client, and the loop's refusal to run a truncated or
+    blocked step's calls is a second guard, not the only one. Turning it
+    on (for progress or latency) means moving that validation here."""
     return [
         {
             "name": t["name"],

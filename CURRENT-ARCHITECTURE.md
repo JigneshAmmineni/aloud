@@ -150,8 +150,12 @@ Two models sit behind the one FR-48 seam (`agent/providers.py`,
   run (3.0s for an 800-character document live, far longer for a long
   one). The loop speaks no line of its own: the canned filler was
   removed on 2026-11-12 (it could only fire once the call had arrived,
-  so it landed right before the answer). A wait indicator comes back,
-  in a deliberate form, with long tasks (ROADMAP feature 10).
+  so it landed right before the answer). The turn's metrics row marks
+  such a step with a `step.N.tool_first` stage entry (the length of
+  the silence until the call arrived), which is what tells an expected
+  slow turn from a regression in the admin drill-down. A wait
+  indicator comes back, in a deliberate form, with long tasks (ROADMAP
+  feature 10).
 - **Server-side fallback (Sonnet only).** Sonnet requests carry the
   `server-side-fallback-2026-07-01` beta with `fallbacks: "default"`: a
   request Sonnet 5.5 declines in the `cyber` or `frontier_llm` category is
