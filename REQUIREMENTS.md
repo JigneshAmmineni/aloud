@@ -582,7 +582,9 @@ FR-7 still governs: the agent acts when the user asks.
   model, never an exception). Failure discipline: any loop-internal error
   (LLM call failure, tool handler crash) degrades to a brief spoken
   fallback and a clean end of turn — a broken tool must never kill the
-  session. **An empty step is a failure, not an ending**: a response with
+  session — and text the user already heard in the failing step stays
+  in the context (heard words never vanish). **An empty step is a
+  failure, not an ending**: a response with
   neither text nor tool calls (a blocked or truncated generation —
   Gemini's SAFETY/RECITATION/MAX_TOKENS-with-no-parts outcomes are
   returns, not exceptions, so the error path above never fires on its
@@ -605,9 +607,8 @@ FR-7 still governs: the agent acts when the user asks.
   produced **and no tool call is made** (the silent-session regression is
   otherwise invisible until launch; the tool-free rule guards FR-7);
   (f) a blocked/empty response → the fallback line is spoken, nothing
-  *from the model* is appended to the context (a spoken filler, if one
-  fired first, is appended per FR-43 — heard words never vanish), and
-  the session takes the next turn normally.
+  *from the model* is appended to the context, and the session takes
+  the next turn normally.
   Implementation MUST begin with a **spike** proving the stage swap: a
   custom processor in the LLM slot streaming text downstream with sentence
   aggregation, TTS, and barge-in interruption all intact. That is the
@@ -615,80 +616,40 @@ FR-7 still governs: the agent acts when the user asks.
   machinery fights a custom stage, the documented fallback is running the
   loop as a session task outside the pipeline with a thin bridge processor,
   and the spike decides.
-- **FR-43** Speak-while-working: multi-step work must never delay first
-  audio. The first streamed sentence of step 1 reaches TTS immediately
-  (NFR-2) and tool execution overlaps speech already playing. The system
-  prompt directs the model to say a short, natural acknowledgment before
-  invoking anything slow ("let me write that up—") — but the prompt is
-  guidance, not the guarantee: Flash routinely emits a tool call as its
-  entire first chunk, and a prompt-only rule would leave the user in
-  silence for up to a full tool timeout. The guarantee is a
-  **deterministic backstop in the loop**, and its trigger must beat the
-  slow part: a tool call's *arguments* stream too — `create_artifact`
-  carries the whole artifact body, 2–6s of generation — so waiting for
-  the completed tool round is already too late. **The trigger is selected
-  by the FR-48 spike's incremental-vs-atomic finding, because the two
-  cases admit different knowledge** (a single rule can't serve both: at
-  T+700ms with zero deltas, a slow plain answer and a pending tool call
-  are indistinguishable, so a blind deadline would speak filler over
-  ordinary slow turns — breaking this FR's own no-tool-turn mandate and
-  stamping `step.N.filler` on healthy turns — while gating on the tool
-  round un-backstops the atomic case). **Incremental delivery** → the
-  trigger is the **first tool-call delta**; the call's name surfaces
-  well before its arguments finish, and no blind deadline exists.
-  **Atomic delivery** → the trigger is the completed call's **arrival,
-  before any handler runs** — the earliest knowable moment — and the
-  residual is stated, not hidden: the call's own generation time is
-  dead air no backstop covers; the spike must **measure** it for a
-  typical `create_artifact`, and if it breaches NFR-1 the named lever
-  is a blind deadline (`FILLER_DEADLINE_MS`, default 700) with its
-  false positive — a filler prefix on a slow plain turn — accepted
-  knowingly and excluded from the no-tool-turn mandate. And the
-  condition is **state-based, not
-  step-numbered**: a filler is owed whenever a tool round is beginning
-  and no speech is playing or queued — a tool-only step 3 after step 1's
-  sentence finished playing is the same dead air as a silent step 1.
-  "Playing or queued" has a named source, because the loop sits
-  *upstream* of TTS and cannot know it for free: the loop derives
-  playback state from the text it has forwarded downstream and the
-  bot-started/stopped-speaking frames flowing back through the pipeline —
-  an explicit FR-42 spike criterion, not an assumption. The
-  filler comes from a small named set (`FILLER_LINES`, varied to avoid
-  repetition; generic and topic-agnostic by design), travels **through
-  the same downstream text-frame path as model text** — never a side
-  channel to TTS, so FR-20's transcript log records it — and enters the
-  context as the **prefix of whichever assistant append closes the
-  turn**: `append_step` on a tool step; `append_assistant` when the
-  deadline lever's accepted false positive fired on a *plain* turn
-  (which never calls `append_step` — the rule must cover the very case
-  the lever creates); and **alone, as the turn's assistant entry, when
-  nothing else is appended** (FR-42's empty-step path — a sentence the
-  user heard must never vanish from the context). FR-46's spoken-prefix
-  capture excludes it **by construction, with a named mechanism**: the
-  loop emitted the filler and knows its exact text, so it subtracts it
-  from the captured stream — the loop owns the dedupe, no marker
-  protocol needed (never a separate append: prefixing keeps one
-  assistant message per step, which is also how the next step knows
-  it already said "let me pull that up"; both providers merge
-  consecutive same-role messages, so a separate append would fuse
-  silently rather than fail).
-  The filler counts as first audio for NFR-1 — dead air is what the user
-  experiences — but it must not launder slow turns as healthy: the FR-47
-  row records a filler-led turn (a `step.N.filler` entry), and **FR-36
-  and FR-37 are amended accordingly** (not merely enabled): the
-  drill-down surfaces filler-led turns, and the breach analysis
-  distinguishes "spoke fast" from "spoke a canned line while 6 seconds
-  of tool work ran." Mandated test — against a *slow*
-  stream, not an instant fake: filler audio is emitted while the step-1
-  stream is still producing tokens (incremental branch) or on call
-  arrival before any handler runs (atomic branch). The no-tool turn — the
-  overwhelming common case — must behave exactly as today: one LLM call,
-  no added synchronous work (NFR-10 applies to the loop itself; anything
-  the loop does beyond the call and the enqueue-only recorders is hot-path
-  budget). Later steps' text streams the same way; NFR-1's 3s budget binds
-  end-of-speech → *first* audio, and per-step latency is instrumented
-  (FR-47) so C-1's one-second-per-stage advisory extends to each step and
-  each tool.
+- **FR-43** Speak-while-working: text the model produces in a step is
+  spoken as it streams, whether or not that step also calls tools. The
+  first streamed sentence of a step reaches TTS immediately (NFR-2), and
+  tool execution overlaps speech already playing. A step that produces
+  no text before its tool calls is silent until a later step speaks: the
+  loop speaks no line of its own to cover the wait, so an assistant
+  entry carries no words the system invented (the only text the
+  provider adds is FR-46's cut-off mark). Such a step is marked in the
+  turn's metrics row (`step.N.tool_first`, FR-47). One acknowledgment
+  per piece of work: a leading bare confirmation ("Done.") is not
+  spoken and not recorded in the context when it is premature (the
+  step said nothing else and goes on to call a tool) or redundant (the
+  step directly before it spoke); if a redundant one was all the step
+  said, the turn ends there without a fallback. Anywhere else the
+  confirmation is spoken: after a turn that worked silently, after
+  silent steps in between, and always in the forced wrap-up call
+  (FR-42). Whitespace is not speech. After a failure the context keeps
+  only what was spoken. The trace row keeps the model's full output. The
+  system prompt directs the model to work without narrating its steps. Mandated
+  tests: a silent tool round pushes no text and stamps only that
+  marker beyond its measurements; text streamed before a tool call is
+  spoken, recorded on that step's entry, and not marked; a closing
+  "Done." after a spoken sentence is dropped, a lone one is spoken, and
+  a sentence that merely starts with the word is left whole; on
+  chained work the confirmation in the middle is dropped and the one
+  that closes the work is spoken, whether the turn began with a
+  sentence or silently; a newline before a tool call does not make
+  the turn's only confirmation disappear; the wrap-up line survives. The no-tool turn — the overwhelming common case — is
+  one LLM call with no added synchronous work (NFR-10 applies to the
+  loop itself; anything the loop does beyond the call and the
+  enqueue-only recorders is hot-path budget). Later steps' text streams
+  the same way; NFR-1's 3s target binds end-of-speech → *first* audio,
+  and per-step latency is instrumented (FR-47) so C-1's
+  one-second-per-stage advisory extends to each step and each tool.
 - **FR-44** Context behind a seam: the loop obtains its messages
   exclusively from a **context provider** (`agent/context.py`) with a
   narrow interface — build the message list; append a user turn; append a
@@ -878,10 +839,7 @@ FR-7 still governs: the agent acts when the user asks.
   model-visible: an extra metadata key is dropped or rejected across
   providers, and an unmarked prefix reads as a complete answer) —
   taken from the sentence-level synthesis stream (the TTS service's
-  output frames, the same stream FR-20 logs as `agent_text`), **with the
-  filler excluded from this capture** — the filler's context entry is
-  owned by FR-43's prefix rule alone, so an interrupted filler-led step
-  records it once, never twice — which is an
+  output frames, the same stream FR-20 logs as `agent_text`) — which is an
   **explicit over-approximation**: it is what was *sent for synthesis*,
   not what was *heard* — playback lags it by the buffered audio that
   barge-in discards, so it can overstate by up to the flushed
@@ -988,8 +946,11 @@ FR-7 still governs: the agent acts when the user asks.
   match** (its "written from the breakdowns the latency
   observer already computes" described the old writer), exactly as FR-32
   was. Stage entries use **step-indexed keys** (`step.1.ttfb.llm`,
-  `step.2.tool.read_artifact`, `step.N.filler` when the FR-43 backstop
-  led) so multi-step turns and repeated tools cannot silently overwrite
+  `step.2.tool.read_artifact`, and `step.N.tool_first` on a step that
+  spoke nothing before its first tool call — its value is the silence
+  until the call arrived, recorded without the slow-stage advisory
+  because that wait is already the step's TTFB, and never for a call
+  refused because tool selection was forbidden) so multi-step turns and repeated tools cannot silently overwrite
   each other in a flat dict. FR-33's no-first-audio rule is unchanged (a
   turn interrupted before any audio still writes no row; its step
   timings live in `agent.step` logs only). **CLAUDE.md's escalation rule
@@ -1038,11 +999,8 @@ FR-7 still governs: the agent acts when the user asks.
   the swap-back. Implementation MUST begin with a
   **spike** proving streamed text + native function calling + usage
   metadata through this client against the live Gemini API before the
-  loop is built on it — and the spike must additionally **determine
-  whether function calls are delivered incrementally or atomically** in
-  the stream: FR-43's first-delta trigger exists only if the former; if
-  the `functionCall` arrives whole, `FILLER_DEADLINE_MS` is the only
-  real backstop and the implementation leans on it knowingly.
+  loop is built on it. A tool call reaches the loop whole, never as
+  partial input: both clients deliver it atomically.
 - **FR-49** Minimal LLM tracing, pulled forward from roadmap feature 7
   by that feature's own clause — the loop is *built through* its trace,
   not traced after the fact. Every LLM call the loop makes writes one
@@ -1124,15 +1082,6 @@ run_turn():
         messages = context.build()            # deterministic, no LLM
         stream  = llm(messages, tools)        # ONE call: text and/or tool calls
         forward text deltas downstream        # TTS starts at first sentence
-        # FR-43 backstop, state-based: on the FIRST tool-call delta (if
-        # the provider streams calls incrementally — FR-48 spike), or
-        # FILLER_DEADLINE_MS with nothing forwarded — if no speech is
-        # playing or queued, emit a FILLER_LINES entry THROUGH the normal
-        # downstream text-frame path (FR-20/FR-46 both read it) and
-        # prefix it onto this step's step_text (one assistant message per
-        # step — never a separate append). Tool ARGUMENTS stream too (an
-        # artifact body is seconds of generation) — waiting for the full
-        # call is too late.
         if stream yielded tool calls:
             results = run handlers            # concurrent; TOOL_TIMEOUT_S each
                                               # writes: loop-owned tasks OUTSIDE
@@ -1182,8 +1131,6 @@ on session end: ONE WRITE_GRACE_S budget, spent once — End-tap/disconnect:
 | `LIST_ARTIFACTS_CAP` (renamed `LIST_DOCUMENTS_CAP` by §4.11) | 20 | `db/` artifacts repo (FR-45 assigns caps to the repo layer) |
 | `READ_ARTIFACT_MAX_CHARS` (renamed `READ_DOCUMENT_MAX_CHARS` by §4.11; also the `edit_artifact` replace-refusal threshold, passed into the repo as `max_replaceable_chars`) | 8,000 | `agent/tools.py` (moves to `db/` documents repo with §4.11's pager; FR-45's tool-owns-the-value division is amended there) |
 | `FALLBACK_LINES` (spoken failure/empty-step lines) | small named set | `agent/prompts.py` |
-| `FILLER_LINES` (speak-first backstop; generic, topic-agnostic by design) | small named set | `agent/prompts.py` |
-| `FILLER_DEADLINE_MS` (speak-by deadline, any silent tool round — state-based per FR-43) | 700 | `agent/loop.py` |
 | `WRITE_GRACE_S` (teardown wait for writes) | 5 total | `agent/companion.py` (the code that awaits: session teardown + the SIGTERM drain; the loop only owns the in-flight set) |
 | Model / provider | `LLM_MODEL` / `LLM_PROVIDER` env | `agent/providers.py` |
 | Voice + tool-use behavior | system prompt | `agent/prompts.py` |
@@ -2660,7 +2607,7 @@ deliberately unchanged (FR-56 states local verification and why).
     no new SDK surface. Evidence is the last 4 user turns (600 chars
     each), the assistant's immediately preceding reply — what it
     last said before the user's latest turn, whether or not that
-    step also called a tool, minus any FR-43 filler; included
+    step also called a tool; included
     only when the user's latest turn directly follows it, and
     omitted otherwise (it is the referent a bare "yes" answers, and
     the prompt tells the judge so: an older reply would let an
@@ -2718,8 +2665,8 @@ deliberately unchanged (FR-56 states local verification and why).
     the playback tail, where the cut lands).
   - An interruption arriving with NO live turn compares the last
     assistant entry against the sentences released SINCE that entry was
-    appended (entry-scoped — an earlier entry's audio, e.g. the FR-43
-    filler, never vouches for the last one): fully heard is a strict
+    appended (entry-scoped — an earlier entry's audio, e.g. a sentence
+    spoken before a tool call, never vouches for the last one): fully heard is a strict
     no-op (every ordinary speech start broadcasts an interruption);
     otherwise the entry truncates to the longest matching word-prefix
     (15-char floor — shorter is coincidence) plus FR-46's cut-off
@@ -2734,7 +2681,8 @@ deliberately unchanged (FR-56 states local verification and why).
     played this turn — a broken transport signal; no-op with one
     `fr61.signal_suspect` WARN per session, never a mark on every turn.
     An entry with no releases of its OWN while earlier audio played
-    (a filler-led turn cut inside the closing reply's first sentence)
+    (a turn that spoke before its tool call, cut inside the closing
+    reply's first sentence)
     is NOT this case: it annotates its intact text — the direction
     amendment always errs.
   - Accepted over-approximation, same direction as FR-46: the sentence
@@ -2747,7 +2695,7 @@ deliberately unchanged (FR-56 states local verification and why).
 ## 5. Non-Functional Requirements
 
 ### 5.1 Latency
-- **NFR-1** The target for time from end-of-user-speech to first audio from the agent is 3 seconds under normal network conditions. It is a target, not a gate: it is measured on every turn and its breaches are counted (§4.9), and where the two conflict, the quality of the response takes precedence over the budget. A turn whose first step goes straight to a tool call is a known exception while the FR-43 backstop arms on the call's arrival rather than its start.
+- **NFR-1** The target for time from end-of-user-speech to first audio from the agent is 3 seconds under normal network conditions. It is a target, not a gate: it is measured on every turn and its breaches are counted (§4.9), and where the two conflict, the quality of the response takes precedence over the budget. A turn whose first step goes straight to a tool call is a known exception: it is silent until a later step speaks (FR-43), and its metrics row carries a `step.1.tool_first` stage entry, so these turns can be told apart from a regression among the counted breaches.
 - **NFR-2** Audio must stream as it is generated. The agent must not wait until its full response is ready before speaking.
 - **NFR-10** Measurement must be free: capture (§4.9) adds no synchronous work to the voice hot path. The principle, independent of pipeline architecture: code on the hot path only ever enqueues to memory; background writers batch queues into the database; a failed write logs an error and drops the batch rather than disturbing a live session. Test approach: the same split the transcript-writer tests use — observers/recorders are tested against a fake queue with no database available (proving the enqueue path touches nothing), and writers are exercised separately, including the broken-database case completing without raising. (The FR-20 transcript writer is the exemplar of this discipline, not its definition — it applies equally to a future custom agent loop, where observers become direct recorder calls.)
 

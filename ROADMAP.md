@@ -119,7 +119,7 @@ it.**
   one, at most one at a time (FR-9 holds), never to keep the conversation
   moving.
 - Where the pieces live is mapped in `agent/prompts.py` (base prompt,
-  documents block, fallback/filler/greeting lines, wrap-up instruction)
+  documents block, fallback/greeting lines, wrap-up instruction)
   and `agent/tools.py` (tool descriptions — the model reads these too).
   All of them get vetted in this pass, with A/B listening tests against
   real brain-dump sessions as the acceptance bar — the test plan, scripted
@@ -552,6 +552,16 @@ call).
   short between-bytes timeout could come back as a true dead-connection
   check, since a working call would never be silent. The trade: the
   client must validate inputs itself.
+- Nothing tells the user that work is in progress. The canned filler
+  line ("One moment.") was removed on 2026-11-12: it armed when a tool
+  call ARRIVED, which on Claude is after the whole call has been
+  written, so it spoke right before the answer instead of during the
+  wait, and its text had to be stripped back out of the context, the
+  interruption capture and the judge's evidence. A long task needs a
+  deliberate replacement, specced with this feature: when it starts
+  (the tool call's start event, not its arrival), what it says, how
+  often it repeats, and a rule that it never lands just before the
+  answer. Quick turns stay silent.
 
 **Thinking.** Not required for a long task: a task is a chain of tool
 calls, and the loop runs those with thinking off today. It is likely
@@ -639,7 +649,9 @@ Shipped on the create-gate branch but only partially verified live
 docs/evals/2026-10-11-create-gate-judge.md and
 docs/evals/2026-10-11-voice-behavior-fixes.md). The LLM swap's eval
 (docs/evals/2026-11-12-anthropic-llm-swap.md) re-runs both on Claude, so
-one live session can close all three. The list, so nothing is
+one live session can close all three, along with
+docs/evals/2026-11-12-filler-removal.md (the filler line's removal,
+whose script covers the same turns). The list, so nothing is
 forgotten:
 
 - **Carried from the first Claude session (2026-11-12) into the
@@ -649,7 +661,10 @@ forgotten:
   (2) Sonnet narrates before tool calls and after refusals, and
   the loop speaks it ("I'll add that to the document", "the gate
   refused again") — decide between a prompt fix and not speaking a
-  step's text when that step calls a tool; (3) the judge ran over
+  step's text when that step calls a tool (from PR #24's last
+  review: a ban like "speak none of this" is the form that fails
+  on this model; say WHEN speech is wanted instead, e.g. "say
+  nothing until the write succeeds, then one short sentence"); (3) the judge ran over
   its ~1s bar twice (1.2s, 1.9s); (4) from PR #24's review: run an
   `LLM_EFFORT=low` A/B — the recommended level for chat-shaped
   turns, no code needed, and it may cut first-token time and reply
@@ -657,19 +672,61 @@ forgotten:
   wrap-up instruction is hoisted to the front of the system prompt
   instead of arriving last — keep it in place as a mid-conversation
   system message when the context is restructured for caching
-  (feature 5); (6) from review round 2, with measurements: a step
+  (feature 5) — or sooner: the last review says Sonnet 5.5 accepts
+  a `system` message inside `messages` when it follows a user
+  message and comes last, which the wrap-up call does, while the
+  fallback model (Sonnet 5) does not; verify live before relying
+  on it; (6) from review round 2, with measurements: a step
   that goes straight to a tool call is SILENT until Claude has
   written the whole call (3.0s for an 800-character document in the
-  live session, 34s for an 11,700-character one in a probe), and
-  the filler only arms when the call arrives. FILLER_DEADLINE_MS is
-  the wrong lever (it would fire on every plain turn). Fix: Claude
-  announces a tool call at its START (`content_block_start`, ~1.6s
-  in) — add that as an event in the FR-48 contract and arm the
-  filler there, FR-43's first-delta trigger. Same seam, same
-  change (from review round 3): `llm.thinking_discarded` is logged
-  by the client with `session_id` only; hand the discarded count
-  to the loop as a neutral event so it is logged with `turn_id`
-  and step.
+  live session, 34s for an 11,700-character one in a probe). The
+  filler line meant to cover it is REMOVED (owner decision,
+  2026-11-12: it could only fire when the call arrived, so it
+  landed right before the answer). The silence is accepted for
+  quick turns; a wait indicator returns, in a deliberate form, with
+  long tasks (feature 10). Kept from this item for that work:
+  Claude announces a tool call at its START (`content_block_start`,
+  ~1.6s in), which would be a new event in the FR-48 contract; and
+  (from review round 3) `llm.thinking_discarded` is logged by the
+  client with `session_id` only — hand the discarded count to the
+  loop as a neutral event so it is logged with `turn_id` and step.
+  Measured in the 2026-11-12 filler-removal session: a narration
+  sentence before a tool call ("I'll add that to the document.")
+  is not heard when it is generated. It sits in sentence
+  aggregation until the step ends, so it plays AFTER the wait (the
+  two slowest turns, 5.0s and 5.5s to first audio, were narrated
+  ones). Flushing the pending sentence when the model's text block
+  ends would put it at the start of the wait, which is the wait
+  indicator feature 10 asks for, for free;
+  (7) from PR #24's last review: a server-side fallback is
+  invisible. When Sonnet 5.5 declines and the API re-runs the
+  request on Sonnet 5, `message_start` names the model that
+  answered, but the client reads only the token count: the trace
+  row says `claude-sonnet-5-5`, and the declined attempt's tokens
+  (in `usage.iterations`) are not counted. First step: read the
+  model at `message_start`, log when it differs, pass it to the
+  trace row. FIRST, test the tail risk live: after a fallback in
+  the middle of a reply the client drops the `fallback` block and
+  the loop replays `tool_use` blocks from before it; if the API
+  enforces its echo rules, every later call in that session fails;
+  (8) same review: a refusal's category is not logged. The API
+  retries only `cyber` and `frontier_llm`; `general_harms` (which
+  ordinary work can trip) gets no retry, and all of them are the
+  one word `blocked` in `llm_traces`. Log the category from the
+  client (never the text);
+  (9) from the 2026-11-12 filler-removal eval, run 2: a reply cut
+  INSIDE ITS FIRST SENTENCE is recorded as fully heard. FR-61 learns
+  what played one released sentence at a time; with none released
+  yet it cannot tell that cut from a broken signal and changes
+  nothing, so a four-sentence answer the owner heard one second of
+  stayed in the context whole, and the agent then insisted it had
+  said it. Fix: once the session has seen released sentences (the
+  signal works), a cut with none released for this reply keeps only
+  the first sentence, marked as cut. Also worth a column or event:
+  how much of a reply was heard is in the context and one log line
+  only, not in the database;
+  (10) same run: it answered a trailing thought ("Probably…") with
+  advice. The keep-listening decision this PR's decider exists for.
 
 - **Questions and instructions never get "Hmm."** — lean talkative over
   unresponsive: a QUESTION always gets a real answer, a misheard one
@@ -677,12 +734,11 @@ forgotten:
 - **Silent tool work** — no narrated reasoning, steps, or workflow
   ("let me read the document", "okay I have the content").
 - **Minimal confirmations** — never "it's on your screen", "I have
-  written that to the document", "the document has been updated";
-  "Done." is enough.
-- **Filler threshold** — the filler phrase only when the agent is
-  genuinely taking long (800ms of dead air), not on every tool call.
-- **Filler round scoping** — a filler armed for a tool round dies with
-  that round; no "One moment." after the result is already visible.
+  written that to the document", "the document has been updated".
+  One acknowledgment per piece of work (2026-11-12, enforced in the
+  loop): no "Done." directly after a sentence the agent just spoke,
+  and none in the middle of chained work; a turn that worked
+  silently still ends with one.
 - **Create-gate redirection (FR-60)** — a blocked create silently picks
   the existing document from recent conversation (usually the one under
   discussion), writes without asking; only with no fitting document

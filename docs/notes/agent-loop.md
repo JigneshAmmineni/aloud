@@ -206,6 +206,8 @@ These generalize to any tool-calling agent implementation:
   **deterministic backstop in the loop**: if nothing has been spoken when
   a step-1 tool round starts, the loop itself speaks a canned filler line.
   General principle: latency guarantees live in code, not prompts.
+  (That backstop was removed on 2026-11-12: see the blog seed "The
+  filler that arrived after the wait" at the end of this file.)
 - **Forcing a text-only step requires omitting tools from the request**
   (or `tool_choice: none`) — a plain "wrap up now" instruction can still
   come back as a tool call, and then your step cap has no teeth. Also:
@@ -474,3 +476,36 @@ to or not; swapping the model re-opens every verdict. (3) Keep the real
 failing input: the fix was proven by replaying the exact trace row, plus
 the near-miss cases that must stay NO (yes to a different offer, a
 declined offer, an offer the user already moved past).
+
+### The filler that arrived after the wait (2026-11-12)
+
+The loop had a backstop for dead air: when a turn went straight to a tool
+call with nothing spoken, it said a canned "One moment." so the user was
+not left in silence. It was built on Gemini, tuned twice (a delay so an
+instant edit did not get "One moment." welded to "Done.", then a rule
+that a filler armed for one tool round dies with that round), and each
+fix added state: a timer task, a playing-or-queued flag fed by frames
+coming back up the pipeline, a prefix rule so the line entered the
+context exactly once, and a subtraction so interruption capture did not
+record it twice.
+
+Then the model changed. The trigger was "the tool call has arrived", and
+Claude delivers a tool call only once it has finished writing it. So the
+whole wait (3 seconds for a short document, far more for a long one)
+passed in silence, and the filler fired at the end of it, right before
+the answer. The backstop now announced a wait that was already over. Its
+text also kept leaking into places that reason about what the agent
+said: the create gate's judge had to strip it to find the real question
+the user was answering.
+
+The fix was deletion: about 150 lines of loop code and ten tests. The
+silence is accepted for quick turns. A wait indicator will come back for
+long-running tasks, designed for that case: triggered by the START of a
+tool call, which the provider does announce early.
+
+Lessons: (1) a latency mask is tuned to one provider's streaming shape;
+"arrival" meant "about a second in" on one model and "after everything"
+on another. (2) Words the system speaks on the model's behalf become
+part of the conversation record, and every consumer of that record then
+has to know which words were not the model's. (3) When a feature has
+needed three patches and a fourth is due, price the removal.

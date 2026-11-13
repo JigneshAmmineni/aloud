@@ -1,6 +1,8 @@
 """FR-48 spike: prove the provider-agnostic client's contract against the
 live Gemini API before the loop is built on it, and answer FR-43's design
-question. Kept as a reference artifact after the client shipped.
+question. Kept as a reference artifact after the client shipped. (The
+filler line that question sized was removed on 2026-11-12; criterion 6
+remains as the measurement of how a provider delivers a tool call.)
 
 STATED EXEMPTION from the provider-seam constraint (CLAUDE.md): this is a
 local-only diagnostic in scripts/, never imported by runtime code — the

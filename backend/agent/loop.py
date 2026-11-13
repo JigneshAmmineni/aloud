@@ -4,8 +4,8 @@ AgentLoopProcessor sits exactly where the provider LLM service sat —
 user-turn text in (LLMContextFrame from the user aggregator, the frame the
 FR-42 spike named), streamed text frames out to the sanitizer → TTS chain.
 Within one turn it can reason, call tools, observe results, and chain
-further calls before and while speaking (FR-42), never delaying first
-audio (FR-43), and surviving barge-in with its in-flight work correctly
+further calls before and while speaking (FR-42), streaming each step's
+text as it arrives (FR-43), and surviving barge-in with its in-flight work correctly
 disposed (FR-46). It is plain Python behind our seams: context from the
 FR-44 provider, tools from the FR-45 registry, LLM through the FR-48
 client — if Pipecat is ever retired, this loop walks away intact.
@@ -24,6 +24,7 @@ into the recorder, one llm_traces row per call (FR-49).
 import asyncio
 import itertools
 import json
+import re
 import time
 from collections import deque
 from contextlib import aclosing
@@ -32,7 +33,6 @@ from loguru import logger
 from pipecat.frames.frames import (
     AggregatedTextFrame,
     BotStartedSpeakingFrame,
-    BotStoppedSpeakingFrame,
     LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
@@ -55,7 +55,6 @@ from agent.gate import (
 from agent.prompts import (
     FALLBACK_GREETING_LINES,
     FALLBACK_LINES,
-    FILLER_LINES,
     WRAP_UP_INSTRUCTION,
 )
 from agent.providers import (
@@ -74,23 +73,44 @@ from agent.tools import Tool, ToolContext, registry_schemas
 MAX_STEPS = 5
 TOOL_TIMEOUT_S = 10.0
 
-# FR-43 amended (2026-10-11 live sessions): the filler SPEAKS only after
-# this much dead air since the step began — an instant edit must not open
-# "One moment." and land "Done" in the same breath.
-FILLER_DELAY_MS = 800
-# FR-43's named lever for the atomic-delivery branch, deliberately
-# DISENGAGED: the FR-48 spike measured ~1.0s of pre-call dead air for a
-# typical create_document ON GEMINI — inside NFR-1's 3s — so no blind
-# deadline runs and a slow PLAIN turn never gets filler (the no-tool-turn
-# mandate). On Claude Sonnet 5.5 that gap is past budget (2026-11-12:
-# 3.0s for an 800-character document in a live session, 34s for an
-# 11,700-character one in a probe; the call arrives whole only once its
-# input is fully written). This knob is still the wrong fix there: plain
-# turns reach their first token at ~1.4s, so a 700ms blind deadline
-# would fire on every one of them. The planned fix arms the filler at
-# the tool call's START, which Claude announces within ~1.6s — carried
-# in ROADMAP §3.3 for the decision-gates PR.
-FILLER_DEADLINE_MS = 700
+# FR-43, one acknowledgment per piece of work. The model closes a tool
+# turn with a bare "Done." even after a sentence that already said what
+# it was doing, and the two run together in speech ("I'll add that to
+# the document.Done." — 2026-11-12 live session; a prompt rule did not
+# stop it, 3 of 3 in a live probe). A LEADING bare confirmation is wrong
+# for exactly two reasons, and is not spoken in exactly those cases:
+#   PREMATURE — nothing else was said and the same step goes on to call
+#     a tool: nothing is done yet, and the step that finishes will say so.
+#   REDUNDANT — the step directly before it spoke: it would run into
+#     that sentence.
+# Anywhere else it is the turn's acknowledgment and is spoken: after
+# silent work, after silent steps in between, and always in the forced
+# wrap-up call, which exists to speak. Whether it is premature cannot be
+# known when it arrives, so every step holds back text that could still
+# be only a confirmation (a few characters) and decides at the next
+# event. Punctuation is required mid-stream ("Done with the first list"
+# is a sentence); at the end of a stream a bare "Done" counts too.
+_CONFIRMATION_WORDS = ("done", "all done")
+_BARE_CONFIRMATIONS = tuple(w + p for w in _CONFIRMATION_WORDS for p in ".!")
+_LEADING_CONFIRMATION = re.compile(
+    r"\s*(?:%s)[.!]+\s*"
+    % "|".join(re.escape(w).replace(r"\ ", r"\s+") for w in _CONFIRMATION_WORDS),
+    re.IGNORECASE,
+)
+
+
+def _may_be_only_a_confirmation(text: str) -> bool:
+    """True while streamed `text` could still turn out to be nothing but
+    a bare confirmation — the loop holds it back that long (a few
+    characters) instead of speaking it. Blank text qualifies."""
+    so_far = " ".join(text.lower().split())
+    return any(c.startswith(so_far) for c in _BARE_CONFIRMATIONS)
+
+
+def _is_bare_confirmation(text: str) -> bool:
+    """The whole of `text` is a confirmation and nothing else ("Done.",
+    "All done!", and at the end of a stream an unpunctuated "Done")."""
+    return " ".join(text.lower().split()).rstrip(".!") in _CONFIRMATION_WORDS
 
 
 class _TurnState:
@@ -104,9 +124,6 @@ class _TurnState:
         self.step = 1
         self.messages: list[dict] = []  # built list for the current call
         self.step_text = ""  # model text streamed this step
-        self.step_filler = ""  # filler spoken this step, not yet appended
-        self.tools_done = False  # this step's tool round has completed
-        self.filler_spoken: list[str] = []  # all filler texts this turn
         self.calls: list[LLMToolCall] = []  # current step's tool calls
         self.results: list[dict | None] = []
         self.write_tasks: dict[str, asyncio.Task] = {}  # call.id -> task
@@ -180,11 +197,6 @@ class AgentLoopProcessor(FrameProcessor):
 
         self._turn_task: asyncio.Task | None = None
         self._state: _TurnState | None = None
-        # FR-43 playback state, fed by AgentLoopObserver: the loop sits
-        # upstream of TTS, so "playing or queued" is derived from the text
-        # it forwarded and the bot-started/stopped frames flowing back.
-        self._bot_speaking = False
-        self._audio_pending = False
         # FR-44 straggler discriminator: a context frame arriving before
         # Flux's next user-speech-start is the consumed turn's leftover.
         self._await_user_speech = False
@@ -199,17 +211,15 @@ class AgentLoopProcessor(FrameProcessor):
         # Abandoned reads still running (session-level): cleanup() cancels
         # them so a wedged read never becomes destroyed-task noise.
         self._live_reads: set[asyncio.Task] = set()
-        self._filler_cycle = itertools.cycle(FILLER_LINES)
-        self._filler_task: asyncio.Task | None = None
         # FR-61: sentences that actually PLAYED (TTSTextFrames released by
         # the output transport after their preceding audio was sent).
         # Reset at turn START, never at turn end - the buffer must span
         # the previous turn's playback tail, where the cut can land.
         self._uttered: list[str] = []
         # round 3: sentences released AFTER the last context append are
-        # the ones that vouch for the last entry — without the mark, a
-        # filler-led turn's filler audio satisfied the mismatch valve and
-        # the unheard closing reply was counted as heard
+        # the ones that vouch for the last entry — without the mark, an
+        # earlier step's audio satisfied the mismatch valve and the
+        # unheard closing reply was counted as heard
         self._uttered_mark = 0
         # FR-61's safety valve (round-2 review): if audio demonstrably
         # played this turn but no uttered sentence ever arrived, the
@@ -258,7 +268,7 @@ class AgentLoopProcessor(FrameProcessor):
             # their placeholder, the trace its interrupted row, the
             # metrics buffer its turn end (review finding). Then broadcast
             # the interruption barge-in would have: this branch exists
-            # BECAUSE none fired, and the abandoned step's queued filler
+            # BECAUSE none fired, and the abandoned step's queued speech
             # must not play over the new turn's answer (round 3).
             task = self._turn_task
             self._turn_task = None
@@ -293,12 +303,8 @@ class AgentLoopProcessor(FrameProcessor):
     def note_user_speech_start(self) -> None:
         self._await_user_speech = False
 
-    def note_bot_speaking(self, speaking: bool) -> None:
-        self._bot_speaking = speaking
-        if speaking:
-            self._bot_spoke_this_turn = True  # FR-61's valve: audio began
-        if not speaking:
-            self._audio_pending = False  # everything queued has played out
+    def note_bot_spoke(self) -> None:
+        self._bot_spoke_this_turn = True  # FR-61's valve: audio began
 
     def note_spoken_sentence(self, text: str) -> None:
         """FR-46: the sentence-level synthesis stream (the same one FR-20
@@ -321,11 +327,6 @@ class AgentLoopProcessor(FrameProcessor):
         purpose = "greeting" if user_text is None else "turn"
         state = self._state = _TurnState(self._recorder.current_turn, purpose)
         log = self._log.bind(turn_id=state.turn_id)
-        # _audio_pending must not LATCH across turns (round 3): a barge-in
-        # after text was forwarded but before playback started sees no
-        # BotStoppedSpeakingFrame, and a stale True would starve the next
-        # silent tool round of its filler. _bot_speaking stays frame-fed.
-        self._audio_pending = False
         try:
             if user_text is not None:
                 self._context.append_user(user_text)
@@ -358,9 +359,7 @@ class AgentLoopProcessor(FrameProcessor):
                 # gather doesn't cancel siblings, so a concurrent write's
                 # result may already be committed AND announced; a context
                 # that records nothing makes the next turn re-create it.
-                self._dispose_tool_round(
-                    state, state.step_filler + state.step_text, interrupted=False
-                )
+                self._dispose_tool_round(state, state.step_text, interrupted=False)
                 state.step_text = ""  # recorded; the fallback won't re-append
             await self._speak_fallback(state, reason="error")
         # Any non-cancelled exit is a turn end (FR-47: flush-or-clear).
@@ -377,10 +376,9 @@ class AgentLoopProcessor(FrameProcessor):
         # this step's own reply begins while the stream is still open, so
         # an append-time mark raced it — the entry's first sentences fell
         # below the mark and the mismatch valve ate the amendment. At
-        # step start nothing of this step has been pushed yet; a filler
-        # released during THIS step belongs to this entry (step_filler
-        # prefixes it), and an earlier step's late sentences merely
-        # prefix `heard`, which the endswith match ignores.
+        # step start nothing of this step has been pushed yet, and an
+        # earlier step's late sentences merely prefix `heard`, which the
+        # endswith match ignores.
         self._uttered_mark = len(self._uttered)
         messages = self._context.build(turn_id=state.turn_id, step=state.step)
         if wrap_up:
@@ -392,13 +390,14 @@ class AgentLoopProcessor(FrameProcessor):
             messages = messages + [
                 {"role": "user", "content": self._greeting_trigger}
             ]
+        # read before the reset below: what the PREVIOUS step of this turn
+        # spoke (after any drop), empty on a turn's first step
+        follows_speech = bool(state.step_text.strip())
         state.purpose = purpose
         state.messages = messages
         state.step_text = ""
-        state.step_filler = ""
         state.calls = []
         state.results = []
-        state.tools_done = False
         state.usage = None
         state.ttfb_ms = None
         state.call_closed = False
@@ -418,6 +417,10 @@ class AgentLoopProcessor(FrameProcessor):
             msgs=lambda: json.dumps(messages, ensure_ascii=False, default=str),
         )
 
+        # One acknowledgment per piece of work (rule above). While
+        # `holding`, nothing of this step has been spoken yet.
+        holding = not wrap_up
+        dropped = 0  # leading characters of step_text not spoken
         await self.push_frame(LLMFullResponseStartFrame())
         try:
             # aclosing: barge-in cancellation closes the provider stream —
@@ -433,14 +436,45 @@ class AgentLoopProcessor(FrameProcessor):
                         state.ttfb_ms = elapsed_ms
                     if isinstance(event, LLMTextDelta):
                         state.step_text += event.text
-                        self._audio_pending = True
-                        await self.push_frame(LLMTextFrame(event.text))
+                        if holding and _may_be_only_a_confirmation(state.step_text):
+                            pass  # held: it may be all this step says
+                        elif holding:
+                            # more than a confirmation: release it, minus a
+                            # leading confirmation that would be redundant
+                            holding = False
+                            if follows_speech:
+                                match = _LEADING_CONFIRMATION.match(state.step_text)
+                                dropped = match.end() if match else 0
+                            if state.step_text[dropped:]:
+                                await self.push_frame(
+                                    LLMTextFrame(state.step_text[dropped:])
+                                )
+                        else:
+                            await self.push_frame(LLMTextFrame(event.text))
                     elif isinstance(event, LLMToolCall):
-                        # no filler when selection is forbidden (review):
-                        # these calls get refused, never executed — a
-                        # mistranslated greeting must not open "One moment."
-                        if not state.calls and tool_choice != "none":
-                            await self._maybe_filler(state, elapsed_ms)
+                        if holding:
+                            # work follows and nothing else was said:
+                            # whatever is held is premature (or blank)
+                            holding = False
+                            dropped = len(state.step_text)
+                        if (
+                            not state.calls
+                            and tool_choice != "none"
+                            and not state.step_text[dropped:].strip()
+                        ):
+                            # NFR-1's known exception, made findable: this
+                            # step spoke nothing before its first tool
+                            # call. Not for a call that will be refused
+                            # (selection forbidden): that turn speaks at
+                            # once. The value is how long the silence had
+                            # lasted when the call arrived. No advisory:
+                            # the same wait is already this step's TTFB.
+                            self._recorder.record_step_stage(
+                                state.turn_id,
+                                f"step.{state.step}.tool_first",
+                                elapsed_ms,
+                                advisory=False,
+                            )
                         state.calls.append(event)
                     elif isinstance(event, LLMUsage):
                         # reported ahead of the output on providers that
@@ -466,6 +500,10 @@ class AgentLoopProcessor(FrameProcessor):
                 round((time.monotonic() - state.t0) * 1000),
                 purpose,
             )
+            # only what was spoken counts as heard: nothing while still
+            # holding, and never a dropped leading confirmation
+            state.step_text = "" if holding else state.step_text[dropped:]
+            dropped = 0
             # close the frame pair before degrading — a dangling
             # LLMFullResponseStartFrame stalls downstream aggregation.
             # (CancelledError skips this: every cancel path broadcasts an
@@ -473,6 +511,25 @@ class AgentLoopProcessor(FrameProcessor):
             # fires for silent cancels — which resets downstream itself.)
             await self.push_frame(LLMFullResponseEndFrame())
             raise
+        if holding:
+            # the stream ended, no tool call came, and the held text is
+            # all this step said
+            if _is_bare_confirmation(state.step_text) and not follows_speech:
+                # the turn's acknowledgment: speak it
+                await self.push_frame(LLMTextFrame(state.step_text))
+            else:
+                # redundant after speech — or not a confirmation at all:
+                # blank, or a word the stream cut short ("Do"), which
+                # is better left unspoken than voiced as a syllable
+                dropped = len(state.step_text)
+        # The step said only a confirmation the step before it had made
+        # redundant: a clean ending, not an empty (failed) step.
+        redundant_ending = (
+            follows_speech
+            and not state.calls
+            and dropped == len(state.step_text)
+            and _is_bare_confirmation(state.step_text)
+        )
         await self.push_frame(LLMFullResponseEndFrame())
 
         duration_ms = round((time.monotonic() - state.t0) * 1000)
@@ -489,6 +546,18 @@ class AgentLoopProcessor(FrameProcessor):
             out=lambda: f"{state.step_text!r} calls="
             f"{[(c.name, c.arguments) for c in state.calls]}",
         )
+
+        if dropped:
+            # after the trace row above, which keeps what the model wrote:
+            # the context records only what was spoken
+            if state.step_text[:dropped].strip():
+                log.bind(event="agent.confirmation_dropped", chars=dropped).info(
+                    "premature or redundant leading confirmation not spoken"
+                )
+            state.step_text = state.step_text[dropped:]
+            if redundant_ending:
+                # the step before it already said what was being done
+                return True
 
         if not state.step_text.strip() and not state.calls:
             # FR-42: an empty step is a failure, not an ending — blocked or
@@ -513,7 +582,6 @@ class AgentLoopProcessor(FrameProcessor):
                 calls=len(state.calls),
                 finish_reason=finish,
             ).warning("tool calls from an incomplete generation were not run")
-            state.tools_done = True  # the armed filler's round is over
             # never issued: a barge-in during the fallback line must
             # not dispose them as a tool round that was cut
             state.calls = []
@@ -540,93 +608,20 @@ class AgentLoopProcessor(FrameProcessor):
             # whitespace-only generation alongside the forbidden call must
             # take the fallback, not open mute with an empty append
             if state.step_text.strip():
-                self._context.append_assistant(
-                    (state.step_filler + state.step_text).strip()
-                )
-                state.step_filler = ""
+                self._context.append_assistant(state.step_text.strip())
             else:
                 await self._speak_fallback(state, reason="forbidden_tool_calls")
             return True
 
         if state.calls:
             await self._run_tools(state)
-            state.tools_done = True
-            appended = state.step_filler + state.step_text
-            self._context.append_step(appended, state.calls, state.results)
-            state.appended_texts.append(appended)
-            state.step_filler = ""
+            self._context.append_step(state.step_text, state.calls, state.results)
+            state.appended_texts.append(state.step_text)
             self._land_late_results()
             return False  # next step sees the results
 
-        self._context.append_assistant(state.step_filler + state.step_text)
+        self._context.append_assistant(state.step_text)
         return True
-
-    async def _maybe_filler(self, state: _TurnState, elapsed_ms: int) -> None:
-        """FR-43 with a latency threshold (2026-10-11 live sessions): the
-        backstop ARMS at the tool round's first call but SPEAKS only once
-        FILLER_DELAY_MS of dead air has passed since the step began and
-        nothing has reached the speaker — an instant edit must not get
-        "One moment." welded to its "Done". The condition re-checks at
-        fire time; audio that arrived during the delay (the next step's
-        text) is the threshold doing its job. The state-based condition
-        is unchanged: filler is owed whenever a tool round is running
-        and no speech is playing or queued (a tool-only step 3 after
-        step 1's sentence finished playing is the same dead air as a
-        silent step 1)."""
-        if self._bot_speaking or self._audio_pending or state.step_text:
-            return
-        remaining_ms = FILLER_DELAY_MS - elapsed_ms
-        if remaining_ms <= 0:
-            await self._speak_filler(state, elapsed_ms)
-            return
-        if self._filler_task is not None and not self._filler_task.done():
-            # stale: its round is already over (fire_later would no-op on
-            # the step/tools_done checks) — cancel and re-arm for THIS
-            # round; returning here starved every later round of its
-            # filler (round-1 review)
-            self._filler_task.cancel()
-        armed_step = state.step
-
-        async def fire_later() -> None:
-            await asyncio.sleep(remaining_ms / 1000)
-            if self._state is not state:
-                return  # the turn ended or was interrupted meanwhile
-            if state.step != armed_step or state.tools_done:
-                # the round this filler was armed for is OVER — the only
-                # wait left is the next step's speech, and "One moment."
-                # after the result is already on screen reads as lag the
-                # system invented (2026-10-11: step.2.filler at +73ms)
-                return
-            if self._bot_speaking or self._audio_pending or state.step_text:
-                return  # something real reached the speaker in time
-            await self._speak_filler(
-                state, round((time.monotonic() - state.t0) * 1000)
-            )
-
-        # plain asyncio task (like tool tasks): guarded by the state
-        # identity check above; cleanup() cancels a pending one. The
-        # delayed push can land OUTSIDE the LLMFullResponseStart/End pair
-        # — checked against pipecat 1.3's TTSService: it aggregates text
-        # itself (SimpleTextAggregator) and flushes on sentence
-        # boundaries, and every FILLER_LINES entry ends with a period, so
-        # an out-of-pair filler still synthesizes (round-2 review note).
-        self._filler_task = asyncio.create_task(fire_later())
-
-    async def _speak_filler(self, state: _TurnState, elapsed_ms: int) -> None:
-        filler = next(self._filler_cycle)
-        state.step_filler = filler + " "
-        state.filler_spoken.append(filler)
-        # Through the NORMAL downstream text path — FR-20's transcript log
-        # records it; it counts as first audio but must not launder the
-        # turn as healthy: the step.N.filler stage entry marks it (FR-47).
-        self._audio_pending = True
-        await self.push_frame(LLMTextFrame(filler + " "))
-        self._recorder.record_step_stage(
-            state.turn_id, f"step.{state.step}.filler", elapsed_ms
-        )
-        self._log.bind(
-            event="agent.filler", turn_id=state.turn_id, step=state.step
-        ).info(f"filler spoken at +{elapsed_ms}ms (silent tool round)")
 
     # ---- tools -----------------------------------------------------------
 
@@ -906,7 +901,6 @@ class AgentLoopProcessor(FrameProcessor):
                     # pending/in-flight reads: abandoned, results discarded
                     results.append({"status": "cancelled"})
         self._context.append_step(text, state.calls, results, interrupted=interrupted)
-        state.step_filler = ""
         self._land_late_results()
 
     # ---- failure + instrumentation ---------------------------------------
@@ -914,9 +908,9 @@ class AgentLoopProcessor(FrameProcessor):
     async def _speak_fallback(self, state: _TurnState, reason: str) -> None:
         """FR-42's degrade path: a brief spoken canned line and a clean end
         of turn. Nothing from a FAILED/EMPTY generation is appended, but
-        words the user already heard — the filler AND any model text that
-        streamed before the failure (a handler crash after step text) —
-        never vanish from the context (FR-43's principle; review finding).
+        words the user already heard — model text that streamed before the
+        failure (a handler crash after step text) — never vanish from the
+        context (review finding).
         A failed GREETING falls back to a canned greeting — "where were we"
         at session open would read as a resumed-session assumption."""
         if state.purpose == "greeting":
@@ -932,10 +926,8 @@ class AgentLoopProcessor(FrameProcessor):
             await self.push_frame(LLMFullResponseEndFrame())
         except Exception:
             pass  # a torn pipeline can't speak; the turn still ends cleanly
-        heard = state.step_filler + state.step_text
-        if heard.strip():
-            self._context.append_assistant(heard.strip())
-            state.step_filler = ""
+        if state.step_text.strip():
+            self._context.append_assistant(state.step_text.strip())
 
     def _instrument_call(
         self, state: _TurnState, finish: str | None, duration_ms: int, purpose: str
@@ -1008,7 +1000,7 @@ class AgentLoopProcessor(FrameProcessor):
                     )
             else:
                 # only THIS entry's own releases vouch for it: an earlier
-                # entry's audio (the filler, step text) is excluded by the
+                # entry's audio (an earlier step's text) is excluded by the
                 # mark, so a reply that never played annotates instead of
                 # hiding behind the mismatch valve (round-3 blocker)
                 self._context.amend_unspoken_tail(" ".join(tail))
@@ -1031,8 +1023,6 @@ class AgentLoopProcessor(FrameProcessor):
         # destroyed-task noise (round 4); _read_done swallows the cancel.
         for read_task in list(self._live_reads):
             read_task.cancel()
-        if self._filler_task is not None:
-            self._filler_task.cancel()
         await super().cleanup()
 
     def _finalize_interrupted_turn(self) -> None:
@@ -1070,21 +1060,16 @@ class AgentLoopProcessor(FrameProcessor):
                 output=self._trace_output(state),
             )
         # 2. What the context holds is DEFINED (FR-46): the spoken prefix
-        # (sentence-level over-approximation, filler excluded by the loop's
-        # own dedupe), marked with the provider-owned sentinel.
+        # (sentence-level over-approximation), marked with the
+        # provider-owned sentinel.
         prefix = self._spoken_prefix(state)
         if state.calls:
-            self._dispose_tool_round(
-                state, state.step_filler + prefix, interrupted=True
-            )
+            self._dispose_tool_round(state, prefix, interrupted=True)
             log.bind(event="agent.interrupted", step=state.step).info(
                 f"interrupted mid-tool-round: {len(state.calls)} call(s) disposed"
             )
-        elif prefix or state.step_filler:
-            self._context.append_assistant(
-                state.step_filler + prefix, interrupted=bool(prefix)
-            )
-            state.step_filler = ""
+        elif prefix:
+            self._context.append_assistant(prefix, interrupted=True)
             log.bind(event="agent.interrupted", step=state.step).info(
                 "interrupted mid-stream; spoken prefix recorded"
             )
@@ -1095,27 +1080,17 @@ class AgentLoopProcessor(FrameProcessor):
         # 3. Turn end for the metrics buffer (FR-47): a measurement that
         # already exists flushes the row; a pre-audio interruption clears.
         self._recorder.turn_ended(state.turn_id)
-        self._audio_pending = False  # the interruption discards queued audio
 
     def _spoken_prefix(self, state: _TurnState) -> str:
         """What was SENT FOR SYNTHESIS for the interrupted STEP (the
-        accepted sentence-level over-approximation), with two exclusions
-        the loop owns because it knows the exact texts: the filler (its
-        context entry belongs to FR-43's prefix rule — recorded once,
-        never twice) and sentences belonging to EARLIER steps' already-
-        appended text — sentence aggregation lags the loop, so a fast tool
-        round starts step N+1 before step N's sentence is captured, and
-        without this filter it would be duplicated into the interrupted
-        step's entry."""
-        sentences = list(state.spoken)
-        for filler in state.filler_spoken:
-            for i, sentence in enumerate(sentences):
-                stripped = sentence.strip()
-                if stripped == filler or stripped == filler.strip():
-                    del sentences[i]
-                    break
+        accepted sentence-level over-approximation), with one exclusion
+        the loop owns because it knows the exact texts: sentences
+        belonging to EARLIER steps' already-appended text — sentence
+        aggregation lags the loop, so a fast tool round starts step N+1
+        before step N's sentence is captured, and without this filter it
+        would be duplicated into the interrupted step's entry."""
         kept = []
-        for sentence in sentences:
+        for sentence in state.spoken:
             stripped = sentence.strip()
             if not stripped:
                 continue
@@ -1140,8 +1115,8 @@ class AgentLoopProcessor(FrameProcessor):
 class AgentLoopObserver(BaseObserver):
     """The loop's eyes downstream of itself. The loop sits upstream of TTS
     and cannot see playback or synthesis frames for free; this observer
-    feeds it the three signals the spec names: bot-started/stopped speaking
-    (FR-43's playing-or-queued state), the sentence-level synthesis stream
+    feeds it the three signals the spec names: bot-started speaking
+    (FR-61's audio-began valve), the sentence-level synthesis stream
     (FR-46's spoken-prefix capture — the same AggregatedTextFrame stream
     FR-20 logs), and user-speech-start (FR-44's straggler boundary)."""
 
@@ -1174,10 +1149,10 @@ class AgentLoopObserver(BaseObserver):
             if self._already_seen(frame.id):
                 return
             self._loop.note_user_speech_start()
-        elif isinstance(frame, (BotStartedSpeakingFrame, BotStoppedSpeakingFrame)):
+        elif isinstance(frame, BotStartedSpeakingFrame):
             if self._already_seen(frame.id):
                 return
-            self._loop.note_bot_speaking(isinstance(frame, BotStartedSpeakingFrame))
+            self._loop.note_bot_spoke()
         elif isinstance(frame, TTSTextFrame):
             # FR-61: only the OUTPUT TRANSPORT's release counts — it holds
             # text frames behind their preceding audio and discards them

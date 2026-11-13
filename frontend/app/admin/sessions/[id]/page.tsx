@@ -52,9 +52,11 @@ type Detail = {
 
 /** Vocabulary-aware stage line (FR-47): rows written before §4.10 carry
  * flat keys (ttfb.llm, tool.x) and render as before; the agent loop's rows
- * carry step-indexed keys (step.N.ttfb.llm, step.N.tool.x, step.N.filler)
- * and render grouped per step — with an expected-but-absent step TTFB
- * shown as "—", never omitted-therefore-fine. */
+ * carry step-indexed keys (step.N.ttfb.llm, step.N.tool.x) and render
+ * grouped per step — with an expected-but-absent step TTFB shown as "—",
+ * never omitted-therefore-fine. Sessions recorded while the loop still
+ * spoke a canned wait line carry a step.N.filler key; it renders through
+ * the generic branch ("filler 812ms"), so that history stays visible. */
 function fmtStages(stages: Record<string, number> | null): string {
   if (!stages || Object.keys(stages).length === 0) return "—";
   const entries = Object.entries(stages);
@@ -73,7 +75,9 @@ function fmtStages(stages: Record<string, number> | null): string {
     if (!steps.has(n)) steps.set(n, { parts: [] });
     const step = steps.get(n)!;
     if (rest === "ttfb.llm") step.ttfb = v;
-    else if (rest === "filler") step.parts.push(`filler@${v}ms`);
+    // a marker, not a stage: its value repeats this step's llm time,
+    // and it is shown beside the turn's latency instead (isToolFirst)
+    else if (rest === "tool_first") continue;
     else step.parts.push(`${rest.replace(/^tool\./, "")} ${v}ms`);
   }
   return [...steps.entries()]
@@ -84,10 +88,11 @@ function fmtStages(stages: Record<string, number> | null): string {
     .join(" · ");
 }
 
-/** FR-36 amendment: a filler-led turn spoke a canned line while tool work
- * ran — its healthy-looking first-audio number must say so. */
-function isFillerLed(stages: Record<string, number> | null): boolean {
-  return !!stages && Object.keys(stages).some((k) => /^step\.\d+\.filler$/.test(k));
+/** NFR-1's known exception: the turn's first step went straight to a tool
+ * call, so the agent was silent until a later step spoke. An expected
+ * slow turn, to be told apart from a regression. */
+function isToolFirst(stages: Record<string, number> | null): boolean {
+  return !!stages && "step.1.tool_first" in stages;
 }
 
 export default function AdminSessionPage() {
@@ -178,7 +183,7 @@ export default function AdminSessionPage() {
                       <td>{t.turn_id}</td>
                       <td className={breach ? "breach" : ""}>
                         {ms != null ? `${ms}ms${breach ? " ⚠" : ""}` : "—"}
-                        {isFillerLed(t.stages_ms) ? " 🗨" : ""}
+                        {isToolFirst(t.stages_ms) ? " ⏳" : ""}
                       </td>
                       <td>{fmtInt(t.usage["llm.tokens_in"] ?? 0)}</td>
                       <td>{fmtInt(t.usage["llm.tokens_out"] ?? 0)}</td>
@@ -193,9 +198,9 @@ export default function AdminSessionPage() {
           </div>
           <p className="admin-footnote">
             “—” latency = turn interrupted before first audio (its spend still
-            counts); ⚠ = over the {NFR1_BUDGET_MS / 1000}s NFR-1 budget; 🗨 =
-            filler-led — first audio was a canned line while tool work ran, not
-            a fast answer
+            counts); ⚠ = over the {NFR1_BUDGET_MS / 1000}s NFR-1 target; ⏳ =
+            silent until its first tool call (an expected slow turn, not a
+            regression)
           </p>
         </>
       )}

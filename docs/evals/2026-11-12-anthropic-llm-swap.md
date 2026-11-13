@@ -154,5 +154,9 @@ sentences, then every option with its details. The prompt says "keep
 replies brief" next to "answer directly and completely", with no concrete
 bound; Sonnet resolves that toward complete.
 
+The filler line was removed after this session (PR #25). Its check is
+its own eval, written before its run:
+`docs/evals/2026-11-12-filler-removal.md`.
+
 Part 3's scripted rows (A–C and the two 2026-10-11 scripts) are still
 unrun.

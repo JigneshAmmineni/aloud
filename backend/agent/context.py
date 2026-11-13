@@ -15,7 +15,7 @@ translation, this seam owns assembly and bookkeeping.
 
 from loguru import logger
 
-from agent.prompts import FILLER_LINES, render_documents_block
+from agent.prompts import render_documents_block
 from agent.providers import LLMToolCall
 
 # FR-46: the interrupted mark's wire form — a sentinel suffix on the
@@ -223,7 +223,7 @@ class ContextProvider:
             # direction is FR-46's over-approximation: count it heard,
             # change nothing — never mark a fully-heard reply as cut. The
             # loop entry-scopes the uttered slice (round 3), so an earlier
-            # entry's audio (a filler-led turn) can no longer satisfy this
+            # entry's audio (an earlier step's speech) can no longer satisfy this
             # branch for a reply that never played. WARNED, not silent:
             # the FR-61 eval greps for the amendment, and a disagreement
             # must be distinguishable from "no cut happened".
@@ -247,8 +247,8 @@ class ContextProvider:
         return True
 
     def append_assistant(self, text: str, *, interrupted: bool = False) -> None:
-        """The turn's closing text-only assistant entry (also FR-43's
-        filler-alone path and FR-46's spoken-prefix capture)."""
+        """The turn's closing text-only assistant entry (also FR-46's
+        spoken-prefix capture)."""
         if interrupted and text:
             text += INTERRUPTED_SUFFIX
         self._messages.append({"role": "assistant", "content": text})
@@ -272,8 +272,9 @@ class ContextProvider:
 
         A tool-call step's text counts (round 4): the model speaks
         before tool calls, and an offer made in the same step as a
-        call is still the offer. Only the FR-43 filler the loop
-        prefixed is removed, since "One moment." is no referent."""
+        call is still the offer. The loop speaks no line of its own,
+        so the only text in an entry that is not the model's is
+        FR-46's cut-off mark."""
         latest_user_seen = False
         for m in reversed(self._messages):
             if m.get("role") == "user":
@@ -285,16 +286,6 @@ class ContextProvider:
                 continue  # the current turn's own entries
             if m.get("role") == "assistant":
                 content = (m.get("content") or "").strip()
-                if m.get("tool_calls"):
-                    # drop the filler prefix, keep the model's own
-                    # speech; a step that spoke only filler (cut or
-                    # not) spoke nothing the user could answer
-                    for filler in FILLER_LINES:
-                        if content.startswith(filler):
-                            content = content[len(filler) :].strip()
-                            break
-                    if content == INTERRUPTED_SUFFIX.strip():
-                        content = ""
                 if content:
                     return content[-max_chars:]
         return None
