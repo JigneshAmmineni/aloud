@@ -17,7 +17,7 @@ A voice-first work assistant for people who think and work by talking out loud. 
 | Voice orchestration | Pipecat (cascade pipeline: turn detection → STT → LLM → TTS) |
 | Transport | WebRTC via Pipecat SmallWebRTC |
 | STT + turn detection | Deepgram Flux |
-| LLM (default) | Gemini Flash — swappable; Claude Sonnet is the runner-up if question quality disappoints |
+| LLM (default) | Claude Sonnet 5.5 for the agent loop, Claude Haiku 5.5 for the small judge/decision calls; thinking off on both — swappable; the Gemini Flash client is kept as the swap-back |
 | TTS | Cartesia Sonic-3 |
 | DB | PostgreSQL |
 | Auth | Firebase Auth — Google + email/password, Bearer ID tokens verified via firebase-admin in `get_current_user_id`; admin via custom claims (REQUIREMENTS.md §4.8) |
@@ -41,7 +41,7 @@ All provider-specific construction (STT/LLM/TTS service classes, SDK imports) is
 
 ### Encryption (add after MVP)
 
-Cloud processing is fine — the privacy policy discloses that voice and transcripts are processed by Deepgram, Google, and Cartesia.
+Cloud processing is fine — the privacy policy discloses that voice and transcripts are processed by Deepgram, Anthropic, and Cartesia.
 
 Server-side encryption (key held by us) is added post-MVP. To make this painless:
 - **Keep sensitive columns clearly separated from metadata at schema design time.** Transcripts, summaries, memory entries, and artifacts get their own columns; timestamps, IDs, and session metadata stay unencrypted.

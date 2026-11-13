@@ -274,6 +274,14 @@ def test_tool_choice_none_declares_tools_but_forbids_selection():
     assert config.thinking_config.thinking_budget == 0
 
 
+def test_unknown_tool_choice_fails_instead_of_meaning_auto():
+    # the same guard as the Claude client (PR #24 round 1)
+    client, fake = _client_with([_chunk([_text_part("hi")], finish=SimpleNamespace(name="STOP"))])
+    with pytest.raises(ValueError, match="tool_choice"):
+        _collect(client, messages=[{"role": "user", "content": "hi"}], tool_choice="NONE")
+    assert fake.seen == {}
+
+
 def test_tool_choice_auto_sets_no_tool_config():
     tools = [{"name": "t", "description": "", "parameters": {"type": "object", "properties": {}}}]
     client, fake = _client_with([_chunk([_text_part("hi")], finish=SimpleNamespace(name="STOP"))])

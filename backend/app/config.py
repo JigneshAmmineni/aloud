@@ -5,10 +5,21 @@ from dataclasses import dataclass
 
 _REQUIRED = (
     "DEEPGRAM_API_KEY",
-    "GOOGLE_API_KEY",
     "CARTESIA_API_KEY",
     "FIREBASE_SERVICE_ACCOUNT_PATH",
 )
+
+# The LLM key that must be present depends on the configured provider; the
+# other provider's key may stay unset. An unknown provider requires neither
+# here and fails in the providers.py factory, which names it.
+_LLM_KEY = {"anthropic": "ANTHROPIC_API_KEY", "google": "GOOGLE_API_KEY"}
+_DEFAULT_LLM_MODEL = {"anthropic": "claude-sonnet-5-5", "google": "gemini-2.5-flash"}
+# The FR-60 judge's smaller model. A provider with no entry judges on
+# its loop model.
+_DEFAULT_JUDGE_MODEL = {"anthropic": "claude-haiku-5-5"}
+# The loop runs with thinking off, and the API rejects every call at a
+# higher effort than these when thinking is off.
+_LLM_EFFORTS = ("low", "medium", "high")
 
 # Public Cartesia voice used in Pipecat examples; override with CARTESIA_VOICE_ID.
 _DEFAULT_VOICE_ID = "71a7ad14-091c-4e8e-a314-022ece01c121"
@@ -34,10 +45,13 @@ def _env_float(name: str, default: float) -> float:
 @dataclass(frozen=True)
 class Settings:
     deepgram_api_key: str
-    google_api_key: str
+    anthropic_api_key: str  # "" unless LLM_PROVIDER=anthropic
+    google_api_key: str  # "" unless LLM_PROVIDER=google
     cartesia_api_key: str
     cartesia_voice_id: str
     llm_model: str
+    judge_model: str  # the FR-60 gate's model; smaller/faster than llm_model
+    llm_effort: str  # main-loop effort (Anthropic only; ignored on google)
     stt_provider: str
     llm_provider: str
     tts_provider: str
@@ -56,21 +70,34 @@ class Settings:
 
 
 def load_settings() -> Settings:
-    missing = [name for name in _REQUIRED if not os.getenv(name)]
+    llm_provider = os.getenv("LLM_PROVIDER") or "anthropic"
+    llm_key = _LLM_KEY.get(llm_provider)
+    required = _REQUIRED + ((llm_key,) if llm_key else ())
+    missing = [name for name in required if not os.getenv(name)]
     if missing:
         raise RuntimeError(
             "Missing required environment variables: "
             + ", ".join(missing)
             + " — add them to .env (see .env.example)."
         )
+    llm_effort = os.getenv("LLM_EFFORT") or "medium"
+    if llm_effort not in _LLM_EFFORTS:
+        raise RuntimeError(
+            f"LLM_EFFORT must be one of {', '.join(_LLM_EFFORTS)} — got {llm_effort!r}."
+        )
+    llm_model = os.getenv("LLM_MODEL") or _DEFAULT_LLM_MODEL.get(llm_provider, "")
+    default_judge = _DEFAULT_JUDGE_MODEL.get(llm_provider, llm_model)
     return Settings(
         deepgram_api_key=os.environ["DEEPGRAM_API_KEY"],
-        google_api_key=os.environ["GOOGLE_API_KEY"],
+        anthropic_api_key=os.getenv("ANTHROPIC_API_KEY") or "",
+        google_api_key=os.getenv("GOOGLE_API_KEY") or "",
         cartesia_api_key=os.environ["CARTESIA_API_KEY"],
         cartesia_voice_id=os.getenv("CARTESIA_VOICE_ID") or _DEFAULT_VOICE_ID,
-        llm_model=os.getenv("LLM_MODEL") or "gemini-2.5-flash",
+        llm_model=llm_model,
+        judge_model=os.getenv("JUDGE_MODEL") or default_judge,
+        llm_effort=llm_effort,
         stt_provider=os.getenv("STT_PROVIDER") or "deepgram_flux",
-        llm_provider=os.getenv("LLM_PROVIDER") or "google",
+        llm_provider=llm_provider,
         tts_provider=os.getenv("TTS_PROVIDER") or "cartesia",
         tts_sanitize_enabled=_env_bool("TTS_SANITIZE_ENABLED", True),
         cartesia_speed=_env_float("CARTESIA_SPEED", 0.85),

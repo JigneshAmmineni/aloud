@@ -23,7 +23,7 @@ Create an account (email + password, or continue with Google), then tap **Talk**
 A cascaded voice pipeline — conversation state is **text on the server**, which is what makes provider swapping, the ops log, and the future memory layer possible:
 
 ```
-browser mic ── WebRTC ──▶ Deepgram Flux ──▶ Gemini 2.5 Flash ──▶ Cartesia Sonic-3 ──▶ speaker
+browser mic ── WebRTC ──▶ Deepgram Flux ──▶ Claude Sonnet 5.5 ─▶ Cartesia Sonic-3 ──▶ speaker
                           (STT + native      (thinking off,        (~150ms to
                            end-of-turn)       tool calling)         first audio)
 ```
@@ -38,7 +38,7 @@ browser mic ── WebRTC ──▶ Deepgram Flux ──▶ Gemini 2.5 Flash ─
 | Voice orchestration | [Pipecat](https://github.com/pipecat-ai/pipecat) (Python) |
 | Transport | WebRTC (Pipecat SmallWebRTC) |
 | STT + turn detection | Deepgram Flux |
-| LLM | Gemini 2.5 Flash (swappable) |
+| LLM | Claude Sonnet 5.5, with Claude Haiku 5.5 as a small judge in front of document creation (swappable) |
 | TTS | Cartesia Sonic-3 |
 | Backend | FastAPI + SQLAlchemy + Postgres |
 | Frontend | Next.js + Pipecat JS SDK |
@@ -55,7 +55,7 @@ docker compose up -d
 Open **http://localhost:3000**, tap **Talk**, allow the mic, and start thinking out loud.
 
 You'll need API keys (each has a free tier) for:
-[Deepgram](https://console.deepgram.com) · [Gemini](https://aistudio.google.com) · [Cartesia](https://play.cartesia.ai)
+[Deepgram](https://console.deepgram.com) · [Anthropic](https://console.anthropic.com) · [Cartesia](https://play.cartesia.ai)
 
 ### Tests
 

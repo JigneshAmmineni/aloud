@@ -92,6 +92,35 @@ def test_judge_timeout_propagates_for_the_loop_to_fail_closed(monkeypatch):
         )
 
 
+def test_judge_cut_by_its_timeout_has_already_handed_over_its_input_count(monkeypatch):
+    # PR #24 round 3: Claude reports input tokens before any output. A
+    # judge call that then runs past its timeout returns nothing, so the
+    # count must leave through on_usage or the slow calls go uncounted.
+    monkeypatch.setattr(gate_mod, "JUDGE_TIMEOUT_S", 0.05)
+    llm = OneShotLLM([LLMUsage(340, 0), 60.0, LLMTextDelta("YES"), LLMDone("stop", None)])
+    seen = []
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(
+            judge_allows(llm, judge_messages("create_document", {}, ["x"]), on_usage=seen.append)
+        )
+    assert seen == [LLMUsage(340, 0)]
+
+
+def test_early_usage_is_kept_when_the_final_event_carries_none():
+    llm = OneShotLLM([LLMUsage(340, 0), LLMTextDelta("YES"), LLMDone("stop", None)])
+    _, usage, _, _ = asyncio.run(
+        judge_allows(llm, judge_messages("create_document", {}, ["x"]))
+    )
+    assert usage == LLMUsage(340, 0)
+
+
+def test_refusal_text_never_names_the_mechanism():
+    # PR #24 round 4: the model repeats what it reads, and it told the
+    # user "the gate refused again". Nothing model-visible may name it.
+    text = gate_mod.GATE_REFUSAL["error"].lower()
+    assert "gate" not in text and "judge" not in text
+
+
 def test_evidence_is_bounded_and_quotes_only_recent_turns():
     # the CALLER owns the window (round 3) — mirror the loop's slice
     from agent.gate import JUDGE_RECENT_TURNS
@@ -119,9 +148,15 @@ def test_evidence_includes_the_assistants_offer_for_the_yes_to_answer():
     user_block = msgs[1]["content"]
     assert "Do you want a new document for this?" in user_block
     assert "'yes'" in user_block
+    # the offer comes AFTER the user turns and is tied to the latest one:
+    # listed ahead of them, the live judge read a bare "Yeah." as
+    # unrelated to the offer and refused a confirmed create (2026-11-12)
+    assert user_block.index("'yes'") < user_block.index("Do you want a new")
+    assert "which the user's latest turn responds to" in user_block
+    assert "say yes to the assistant's offer" in user_block
     # and without one, the block simply omits the line
     bare = judge_messages("create_document", {}, ["yes"])[1]["content"]
-    assert "preceding reply" not in bare
+    assert "most recent reply" not in bare
 
 
 def test_blocked_or_truncated_judge_reports_its_real_finish():

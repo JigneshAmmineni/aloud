@@ -33,7 +33,7 @@ from agent.prompts import (
     build_greeting_trigger,
     build_system_prompt,
 )
-from agent.providers import make_loop_llm, make_stt, make_tts
+from agent.providers import make_judge_llm, make_loop_llm, make_stt, make_tts
 from agent.registry import register_provider, unregister_provider
 from agent.sanitizer import make_text_filters
 from agent.tools import build_registry
@@ -238,11 +238,13 @@ class CompanionAgent:
 
         loop_stage = AgentLoopProcessor(
             context=context_provider,
-            llm=make_loop_llm(self._settings),
+            llm=make_loop_llm(self._settings, session_id),
             registry=build_registry(),
             session_id=session_id,
             user_id=self._user_id,
             model_name=self._settings.llm_model,
+            judge_llm=make_judge_llm(self._settings, session_id),
+            judge_model_name=self._settings.judge_model,
             recorder=recorder,
             traces=traces,
             emit=emit,

@@ -35,7 +35,7 @@ you need to navigate, troubleshoot, and update the box afterward.
         │   backend ◀── UDP media (host network) ──────┘  (phone ↔ backend directly)     │
         │      │                                                                         │
         │      ├──▶ Postgres (:5432, loopback only)                                       │
-        │      └──▶ Deepgram / Google / Cartesia  (outbound HTTPS to provider APIs)       │
+        │      └──▶ Deepgram / Anthropic / Cartesia (outbound HTTPS to provider APIs)     │
         └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -240,12 +240,14 @@ nano .env
 Paste, filling in your real keys:
 ```
 DEEPGRAM_API_KEY=...
-GOOGLE_API_KEY=...
+ANTHROPIC_API_KEY=...
 CARTESIA_API_KEY=...
 CARTESIA_VOICE_ID=
-LLM_MODEL=gemini-2.5-flash
 STT_PROVIDER=deepgram_flux
-LLM_PROVIDER=google
+LLM_PROVIDER=anthropic
+LLM_MODEL=claude-sonnet-5-5
+JUDGE_MODEL=claude-haiku-5-5
+LLM_EFFORT=medium
 TTS_PROVIDER=cartesia
 TTS_SANITIZE_ENABLED=true
 LOG_LEVEL=INFO
@@ -556,6 +558,23 @@ gcloud compute ssh aloud --zone=us-west1-b --tunnel-through-iap \
   --command="docker exec aloud-db-1 pg_dump -U aloud aloud | gzip > ~/aloud/pre-migration-$(date +%Y%m%d).sql.gz"
 ```
 
+**Before a deploy that adds or changes a required env var:** edit the
+VM's `~/aloud/.env` FIRST. Deploys never sync it, and the backend
+refuses to boot on a missing key or on a model the configured provider
+cannot run, so the old `.env` under new code takes the app down until
+it is edited. Compare against `.env.example` at the commit being
+deployed. The LLM swap to Claude (PR #24) is the first such deploy; it
+needs:
+```
+ANTHROPIC_API_KEY=...
+LLM_PROVIDER=anthropic
+LLM_MODEL=claude-sonnet-5-5
+RATE_LLM_PER_1M_TOKENS_IN=2
+RATE_LLM_PER_1M_TOKENS_OUT=10
+```
+and no `JUDGE_MODEL` line unless it names a Claude model. `GOOGLE_API_KEY`
+can stay (unused) or go.
+
 Push your change to GitHub from your laptop as usual, then on the VM:
 ```bash
 cd ~/aloud
@@ -589,7 +608,7 @@ SSH in and `docker compose -f docker-compose.prod.yml up -d`. To go back, set th
 | Caddy log loops on cert errors | DNS not pointing at the VM yet, or :80 blocked | `dig +short yourdomain` must show the static IP; confirm `aloud-web` firewall rule allows tcp:80; wait for DNS TTL, then `docker compose -f docker-compose.prod.yml restart caddy` |
 | `https://` shows cert warning | cert not issued yet | check `logs -f caddy`; usually resolves once DNS propagates |
 | Page loads, but no agent voice | UDP media not reaching backend | §11 — verify `aloud-webrtc` UDP rule, check `chrome://webrtc-internals` for an srflx candidate |
-| "Missing required environment variables" in backend log | `.env` missing/incomplete | `cat .env`, ensure the three keys are set; `chmod 600 .env`; rebuild |
+| "Missing required environment variables" in backend log | `.env` missing/incomplete | the log names each missing variable — add them to `.env` (the LLM key required depends on `LLM_PROVIDER`; see `.env.example`); `chmod 600 .env`; rebuild |
 | Backend can't reach DB | wrong password / db not up | confirm `POSTGRES_PASSWORD` matches in `.env`; `docker compose ... ps` shows db healthy |
 | Frontend build killed / OOM | swap not enabled on e2-small | redo §6 (`free -h` should show 2 GB swap), rebuild |
 | Works on Wi-Fi, fails on cellular | strict carrier NAT blocking UDP | the deferred TURN case (§11) |
@@ -608,7 +627,7 @@ SSH in and `docker compose -f docker-compose.prod.yml up -d`. To go back, set th
 | Domain | ~$10 / **year** |
 | **Total** | **~$14–15/mo + $10/yr** |
 
-Provider API usage (Deepgram/Gemini/Cartesia) bills separately per use, as today.
+Provider API usage (Deepgram/Anthropic/Cartesia) bills separately per use, as today.
 To pause spend between demos: `gcloud compute instances stop aloud --zone=us-west1-b`
 (you stop paying for compute; keep the static IP attached or it may be reclaimed).
 

@@ -173,6 +173,79 @@ The rules:
 
 ### 3.3 Thinking-partner mode — proactive reasoning & ambient capture
 
+**Decisions 2026-11-12 (research: docs/notes/turn-decision-jev.md):**
+the per-turn INTENT decider (spoken-substance? × write-asked? → ack /
+silent-execute / discuss-with-read-tools / both) runs on **Claude Haiku
+5.5 through the FR-48 provider seam** — mechanical bindings only (write
+tools stripped for discuss, turn suppression, canned replies; reads
+NEVER stripped). **Swap-if-slow is pre-decided:** the decider sits
+behind a factory, so if its measured stage latency (step.N.* metrics)
+becomes a problem, switch the factory to TypeSafe Jev (~150–300ms
+faster, needs a privacy-policy amendment as a 4th processor) — one
+client + env var, no loop changes. End-of-turn detection is the AUDIO
+layer, not Jev: tune Flux eot_threshold first, DuplexJev
+(open-weights, self-hosted) as the upgrade. The FR-60 create-gate
+judge moves to the same Haiku client immediately; CONSOLIDATION
+end-state: the gate's "explicit new-doc ask?" becomes a third question
+in the one pre-call decision bundle, and the gate keeps its fail-closed
+enforcement point but consults the bundled verdict instead of making
+its own mid-turn call.
+
+**Measured since (2026-11-12, first Claude session), reopening the
+Haiku-vs-Jev choice:** the Haiku judge took 0.7–1.9s per call (685,
+976, 1230, 1884 ms live; ~0.7–0.85s in the smoke test), well over the
+assumption behind "Haiku first". A decider that runs BEFORE every main
+call at that speed adds about a second to every turn. Two consequences
+for the spec: (1) bench Jev and Haiku side by side from our own
+environment before choosing (latency p50/p95 and accuracy on a labelled
+set pulled from our transcript_events) — Jev first is now a live
+option, not just the fallback; (2) consider binding the verdict at tool
+DISPATCH instead of at the request: start the main call and the decider
+together, and let the decider's verdict refuse write tools when they
+arrive (the create gate's existing shape) rather than strip them from
+the request. The decider then costs no serial latency on turns that
+never call a write tool. Owner's fallback if gating disappoints: no
+decider, plain Sonnet deciding as today (it already judged
+keep-listening vs. respond well in that session).
+
+**Answer modes — match how hands-on the user wants to be (owner spec,
+2026-11-12; implement with the decision gates).** The agent gauges the
+level of involvement the user wants and operates there: the less
+hands-on they are, the more autonomous and end-to-end it works; the more
+hands-on, the more detail it gives. Three modes:
+
+1. **Silent execution.** Do the work; at most "Done."
+2. **Summary (the default for a question).** Two sentences, three at
+   most, done in a few seconds, feels like conversation. Ideally it ends
+   there. A short spoken list of relevant points is allowed ONLY when
+   really needed (the user wants to hear five relevant things): up to
+   four or five points, each very concise — one clause, at most two.
+   The sentence bound does not apply to the list; the per-point bound
+   does. May close with an offer to go deeper.
+3. **Explain / elaborate / recite.** Only on an explicit ask ("explain",
+   "go into detail", "read me that section"). The agent takes its time
+   and goes into depth while staying conversational, and may recite the
+   requested parts of a document verbatim.
+
+Prompt changes this implies: drop "and completely" from "answer directly
+and completely" (Sonnet resolves it against "keep replies brief" in
+favour of long answers — the 2026-11-12 supplier answer ran 344 tokens);
+replace "keep replies brief" with the mode-2 bound; relax "never read a
+document's content aloud" for mode 3; and say how a list is SPOKEN (the
+voice has no bullet points: short separate sentences, no markdown).
+Enforcement is instructions only — no deterministic check on the output
+and no retry, since either adds latency. Which mode a turn gets is
+exactly what the intent decider above classifies, so the two ship
+together; an `LLM_EFFORT=low` A/B belongs in the same eval.
+
+**Duration class per turn (eval, ships with the answer modes).** Each
+mode implies how long a turn should take: silent execution and summary
+finish in seconds; explain, recite, or a long write take as long as
+their output. The scripted eval set labels each turn with its class and
+fails a turn that lands in a slower one. This is the "too slow" check
+that replaces a time limit for ordinary turns; the checks for long
+tasks are in feature 10.
+
 Two capabilities the 2026-10-11 live sessions showed the agent lacks, both
 deferred to their own spec (they change the agent's core behavior, not one
 tool):
@@ -314,6 +387,25 @@ agent loop (feature 3), which already owns context assembly per turn.
   section's budgets in mind: section boundaries that rewrite the prefix
   (re-rendered attach blocks, compression) invalidate the cache, so cache
   granularity and section layout get decided together.
+  - **On Claude (noted 2026-11-12, after the LLM swap): more urgent, and
+    nothing to build.** Sonnet 5.5 input is $2 per 1M tokens against
+    roughly $0.30 on Gemini 2.5 Flash (about 7x; output about 4x), and
+    every call still pays full price for the whole context. Caching is a
+    server-side API feature, not a framework: the request marks
+    `cache_control` breakpoints and the API caches everything before
+    them; cached reads cost $0.10 per 1M (a twentieth of the input
+    price), cache writes cost slightly more than normal input. The work
+    is ours only in two places: (1) `ClaudeLoopClient` sends `system` as
+    blocks with breakpoints instead of one joined string, and (2) the
+    context is ordered stable-first — system prompt, tool definitions,
+    older turns ahead of the breakpoint; the attached-documents block,
+    which is re-rendered on every edit, after it (today it sits second
+    in the system prompt and would invalidate the cache on every write).
+    Also to decide at spec time: usage accounting (cached-read and
+    cache-write tokens are reported separately from input tokens and
+    priced differently, and FR-34's single input rate assumes one
+    price), and the cache lifetime to pay for (5 minutes by default;
+    pauses in a voice session can exceed it).
 
 - Distinct, individually budgeted sections: system prompt, core memory
   (durable facts about the user), retrieved memory (populated by feature 6),
@@ -412,6 +504,93 @@ when picked up. The named concerns it must cover:
   this layer decides detection/redaction on top), and any future
   third-party surface.
 
+### 10. Long tasks with a live conversation — new input while old input is still being processed
+
+Owner direction (2026-11-12). Position in the order is not decided: it
+builds on the loop (3) and probably wants the context engine (5) first.
+
+**Vision.** The user hands the agent a long piece of work (research,
+restructuring several documents, a long write) and keeps talking. While
+the task runs they can ask a question, add information, or change the
+task, and the agent answers and carries on, the way a coding agent takes
+messages mid-task. Nothing that is working as intended is cut off for
+taking long; the less hands-on the user wants to be, the longer the
+agent runs on its own.
+
+**Where it stands today.** One turn at a time, sized for a quick voice
+exchange. Shipped with the LLM swap as a first step: a Claude response
+has no time limit once it has started (only the 10s wait for it to
+START remains, which is a liveness check and never fires on a working
+call).
+
+**What stands in the way (the two blockers, then the rest):**
+
+- **A new user turn cancels the running one.** Barge-in ends the turn
+  task: writes in flight finish, reads are abandoned, no further step
+  runs. Taking input during a task needs the opposite: the task keeps
+  running while a second, short turn answers, plus a way to hand the
+  task what the user just said. The design questions this opens: which
+  of the two speaks when both have something to say; whether "stop" and
+  "also do X" are told apart by the model or by a decider; how a
+  steering message enters the task's context (queued until its next
+  step, the way coding agents do it, is the simplest); and what the
+  user hears when the task finishes in the middle of their sentence.
+- **Turn budgets sized for a quick exchange.** `MAX_STEPS = 5` ends a
+  turn after five tool rounds (then one forced wrap-up call), and
+  `TOOL_TIMEOUT_S = 10` fails any tool that runs longer. Both are FR-42
+  bounds and both are right for a conversational turn. A task needs its
+  own budget, not a raised global one: the quick turn keeps its bounds
+  and the task gets a step and tool budget of its own, with FR-42
+  amended to say so.
+- The 4s judge timeout stays. It bounds a yes/no call, not work.
+- No tool today takes long. Research needs tools that do (web search,
+  reading long sources), which is where the 10s tool bound starts to
+  matter.
+- Silence during a long write. Claude sends nothing while it writes a
+  tool call's input. Eager input streaming (off today) makes it send the
+  input as it is written: the client could then report progress, and a
+  short between-bytes timeout could come back as a true dead-connection
+  check, since a working call would never be silent. The trade: the
+  client must validate inputs itself.
+
+**Thinking.** Not required for a long task: a task is a chain of tool
+calls, and the loop runs those with thinking off today. It is likely
+worth turning on FOR THE TASK'S CALLS, because planning and re-planning
+across many steps is where it helps most, while the spoken turn stays
+off (thinking delays the first audible word). So the spec should assume
+two call profiles: conversational (thinking off, low latency) and task
+(thinking on, no latency budget). Decide by eval at spec time, not by
+assumption. The cost of turning it on is already written down in
+CURRENT-ARCHITECTURE.md, "What turning thinking on would take"; the
+hard part is that history must become append-only, which is also what
+prompt caching (feature 5) wants.
+
+**"Too slow" is an eval, not a timeout.** All from `llm_traces` as it
+is today (`ttfb_ms`, `duration_ms`, `completion_tokens`):
+
+- **Output rate per call.** Tokens per second, not characters, and per
+  LLM call, not per task. `completion_tokens` counts everything the
+  model generates in that call: spoken text, tool call inputs, and
+  thinking tokens when thinking is on (they are billed as output, so
+  they are already in the count). A call is healthy when its time is
+  explained by its output: about 90 tokens/s measured on Sonnet. A
+  32-second call that wrote a long document passes; a 12-second call
+  that wrote one sentence fails. Time a task spends inside tools is
+  outside every LLM call and is judged per tool, against that tool's
+  own expected duration.
+- **Slow start.** `ttfb_ms` well over the ~1.5s norm. With thinking on
+  this must be measured to the first event of any kind, since the first
+  spoken word arrives late by design.
+- **Hang signature.** With no time limit, a call that stops producing
+  never "hits" anything: it ends only when the user speaks over it or
+  the session ends. So count calls that ended as interrupted, had run
+  for several seconds, and had produced no output. It is a lead to
+  investigate, not proof: a user who interrupts a long silent write
+  looks the same until eager input streaming makes the write visible.
+- Per task rather than per call: steps taken, total time, and whether
+  the user had to ask "are you still working?" (the conversational
+  version of the same signal).
+
 ## Process infrastructure
 
 Per-PR CI (ruff + pytest, frontend build) and the tailored Claude review are
@@ -458,8 +637,39 @@ REQUIREMENTS.md is what implementation and review are held to.
 Shipped on the create-gate branch but only partially verified live
 (moving on to bigger features; come back and run the two eval docs:
 docs/evals/2026-10-11-create-gate-judge.md and
-docs/evals/2026-10-11-voice-behavior-fixes.md). The list, so nothing is
+docs/evals/2026-10-11-voice-behavior-fixes.md). The LLM swap's eval
+(docs/evals/2026-11-12-anthropic-llm-swap.md) re-runs both on Claude, so
+one live session can close all three. The list, so nothing is
 forgotten:
+
+- **Carried from the first Claude session (2026-11-12) into the
+  decision-gates PR:** (1) replies run long — give the prompt a
+  concrete bound (two or three sentences, then offer to go deeper)
+  instead of "keep replies brief" beside "answer completely";
+  (2) Sonnet narrates before tool calls and after refusals, and
+  the loop speaks it ("I'll add that to the document", "the gate
+  refused again") — decide between a prompt fix and not speaking a
+  step's text when that step calls a tool; (3) the judge ran over
+  its ~1s bar twice (1.2s, 1.9s); (4) from PR #24's review: run an
+  `LLM_EFFORT=low` A/B — the recommended level for chat-shaped
+  turns, no code needed, and it may cut first-token time and reply
+  length together; (5) from the same review: on Claude the forced
+  wrap-up instruction is hoisted to the front of the system prompt
+  instead of arriving last — keep it in place as a mid-conversation
+  system message when the context is restructured for caching
+  (feature 5); (6) from review round 2, with measurements: a step
+  that goes straight to a tool call is SILENT until Claude has
+  written the whole call (3.0s for an 800-character document in the
+  live session, 34s for an 11,700-character one in a probe), and
+  the filler only arms when the call arrives. FILLER_DEADLINE_MS is
+  the wrong lever (it would fire on every plain turn). Fix: Claude
+  announces a tool call at its START (`content_block_start`, ~1.6s
+  in) — add that as an event in the FR-48 contract and arm the
+  filler there, FR-43's first-delta trigger. Same seam, same
+  change (from review round 3): `llm.thinking_discarded` is logged
+  by the client with `session_id` only; hand the discarded count
+  to the loop as a neutral event so it is logged with `turn_id`
+  and step.
 
 - **Questions and instructions never get "Hmm."** — lean talkative over
   unresponsive: a QUESTION always gets a real answer, a misheard one

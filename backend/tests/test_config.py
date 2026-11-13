@@ -6,13 +6,15 @@ from app.config import _env_bool, _env_float, load_settings
 
 _REQUIRED = (
     "DEEPGRAM_API_KEY",
-    "GOOGLE_API_KEY",
+    "ANTHROPIC_API_KEY",
     "CARTESIA_API_KEY",
     "FIREBASE_SERVICE_ACCOUNT_PATH",
 )
 _OPTIONAL = (
     "CARTESIA_VOICE_ID",
     "LLM_MODEL",
+    "JUDGE_MODEL",
+    "LLM_EFFORT",
     "STT_PROVIDER",
     "LLM_PROVIDER",
     "TTS_PROVIDER",
@@ -33,6 +35,7 @@ def _clear_optional(monkeypatch):
 
 
 def test_all_missing_required_vars_are_named(monkeypatch):
+    _clear_optional(monkeypatch)  # a local .env's LLM_PROVIDER picks the LLM key
     for name in _REQUIRED:
         monkeypatch.delenv(name, raising=False)
     with pytest.raises(RuntimeError) as err:
@@ -52,9 +55,11 @@ def test_single_missing_var_is_named(monkeypatch):
 def test_defaults(monkeypatch):
     _clear_optional(monkeypatch)
     s = load_settings()
-    assert s.llm_model == "gemini-2.5-flash"
+    assert s.llm_model == "claude-sonnet-5-5"
+    assert s.judge_model == "claude-haiku-5-5"
+    assert s.llm_effort == "medium"
     assert s.stt_provider == "deepgram_flux"
-    assert s.llm_provider == "google"
+    assert s.llm_provider == "anthropic"
     assert s.tts_provider == "cartesia"
     assert s.tts_sanitize_enabled is True
     assert s.cartesia_speed == 0.85
@@ -68,9 +73,42 @@ def test_defaults(monkeypatch):
     assert s.rate_tts_per_1m_chars == 0.0
 
 
+def test_required_llm_key_follows_the_provider(monkeypatch):
+    _clear_optional(monkeypatch)
+    # anthropic (the default) needs its own key and not Google's
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    assert load_settings().google_api_key == ""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+        load_settings()
+    # google needs Google's key and not Anthropic's
+    monkeypatch.setenv("LLM_PROVIDER", "google")
+    with pytest.raises(RuntimeError) as err:
+        load_settings()
+    assert "GOOGLE_API_KEY" in str(err.value)
+    assert "ANTHROPIC_API_KEY" not in str(err.value)
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-g")
+    s = load_settings()
+    assert s.llm_model == "gemini-2.5-flash"
+    assert s.judge_model == "gemini-2.5-flash"  # no second model on google
+    assert s.anthropic_api_key == ""
+
+
+@pytest.mark.parametrize("effort", ["xhigh", "max", "Medium", "fast"])
+def test_llm_effort_outside_the_thinking_off_range_fails_at_boot(monkeypatch, effort):
+    # xhigh and max are real API values, but the API rejects every call
+    # at them while thinking is off (PR #24 round 1)
+    _clear_optional(monkeypatch)
+    monkeypatch.setenv("LLM_EFFORT", effort)
+    with pytest.raises(RuntimeError, match="LLM_EFFORT"):
+        load_settings()
+
+
 def test_env_overrides(monkeypatch):
     _clear_optional(monkeypatch)
     monkeypatch.setenv("LLM_MODEL", "gemini-2.5-flash-lite")
+    monkeypatch.setenv("JUDGE_MODEL", "claude-sonnet-5-5")
+    monkeypatch.setenv("LLM_EFFORT", "low")
     monkeypatch.setenv("CARTESIA_VOICE_ID", "my-voice")
     monkeypatch.setenv("TTS_SANITIZE_ENABLED", "false")
     monkeypatch.setenv("CARTESIA_SPEED", "0.7")
@@ -78,6 +116,8 @@ def test_env_overrides(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://x:y@host/db")
     s = load_settings()
     assert s.llm_model == "gemini-2.5-flash-lite"
+    assert s.judge_model == "claude-sonnet-5-5"
+    assert s.llm_effort == "low"
     assert s.cartesia_voice_id == "my-voice"
     assert s.tts_sanitize_enabled is False
     assert s.cartesia_speed == 0.7

@@ -7,8 +7,9 @@ so the boundary is enforced in code: before a gated tool runs, a cheap
 non-thinking judge call classifies the user's recent turns — did they
 EXPLICITLY ask for a new document? — and anything but a clear YES
 returns a steering refusal instead of executing. The judge speaks
-through the same provider-neutral FR-48 client the loop uses (no second
-provider, no SDK import here), inside a bounded timeout, and the loop
+through the same provider-neutral FR-48 seam the loop uses, on its own
+client and a smaller model of the same provider (no second provider,
+no SDK import here), inside a bounded timeout, and the loop
 FAILS CLOSED on judge errors: the worst failure mode is one extra voice
 turn (the agent asks), never an unwanted document.
 
@@ -43,10 +44,14 @@ JUDGE_MAX_OUTPUT_TOKENS = 8
 JUDGE_RECENT_TURNS = 4
 _TURN_MAX_CHARS = 600
 
+# Model-visible, and this model repeats what it reads (2026-11-12: it
+# said "the gate refused again" to the user). The text never names the
+# mechanism: no "gate", no "judge".
 GATE_REFUSAL = {
     "status": "refused",
     "error": (
-        "gate: the user has not explicitly asked for a new document. "
+        "A new document was not created: the user has not explicitly "
+        "asked for one. "
         "Redirect — and speak NONE of this reasoning out loud. (1) If "
         "they wanted a spoken answer (a summary, an opinion, a "
         "readback), answer out loud and write nothing. (2) Otherwise, "
@@ -55,7 +60,7 @@ GATE_REFUSAL = {
         "there with edit_document NOW, structured sensibly, without "
         "asking. (3) ONLY if no existing document fits, ask the user "
         "'do you want a new document for this?' — their verbal yes "
-        "passes this gate on your next create_document call, or their "
+        "is enough on your next create_document call, or their "
         "answer names the document to write to; either way, then write "
         "silently."
     ),
@@ -67,8 +72,10 @@ _SYSTEM = (
     "user's recent spoken turns, decide one thing: did the user "
     "explicitly ask for a NEW or SEPARATE document? Explicit means the "
     "DOCUMENT framing itself — 'create/make/start a new document', "
-    "'write that up as its own doc', or a clear yes to the assistant's "
-    "offer of a new document. Asking to create, make, note, save, add, "
+    "'write that up as its own doc' — or a yes of any kind ('yes', "
+    "'yeah', 'sure', 'go ahead') in the user's LATEST turn when the "
+    "assistant's most recent reply asked whether they want a new "
+    "document. Asking to create, make, note, save, add, "
     "update, list, or summarize CONTENT — including 'make a list' or "
     "'create two lists' — while an existing document or topic is under "
     "discussion is NOT a request for a new document: that content "
@@ -93,17 +100,22 @@ def _evidence(
     # (round-2 review: without the offer, the ask-then-yes recovery the
     # refusal promises could never pass the gate). Its length is owned by
     # ContextProvider.last_assistant_text (300 chars) — no second cap.
+    # It sits AFTER the user turns and is tied to the latest one in words:
+    # listed ahead of them, the judge could not tell that a bare "Yeah."
+    # answered it, and refused a confirmed create (2026-11-12 live trace).
     offer = (
-        f"The assistant's own preceding reply (data): {assistant_text!r}\n\n"
+        "The assistant's most recent reply, which the user's latest turn "
+        f"responds to (data): {assistant_text!r}\n\n"
         if assistant_text
         else ""
     )
     title = str(args.get("title", ""))[:120]
     want = tool_name + (f" titled {title!r}" if title else "")
     return (
-        f"{offer}Recent user turns, oldest first:\n{quoted}\n\n"
+        f"Recent user turns, oldest first:\n{quoted}\n\n{offer}"
         f"The assistant now wants: {want}.\n"
-        "YES or NO: did the user explicitly ask for this new document?"
+        "YES or NO: did the user explicitly ask for this new document, or "
+        "say yes to the assistant's offer of one?"
     )
 
 
@@ -125,7 +137,7 @@ def judge_messages(
 
 
 async def judge_allows(
-    llm, messages: list[dict]
+    llm, messages: list[dict], on_usage=None
 ) -> tuple[bool, LLMUsage | None, str, str]:
     """One bounded judge call through the FR-48 client. Returns
     (allowed, usage, verdict_text, finish_reason) — usage for FR-45
@@ -136,7 +148,10 @@ async def judge_allows(
     why). Raises propagate: the loop owns fail-closed and its
     instrumentation. aclosing: a timeout or barge-in cancellation must
     close the provider stream (and its HTTP connection)
-    deterministically, not at GC time (round-1 review)."""
+    deterministically, not at GC time (round-1 review). on_usage is
+    called with a count the provider reports BEFORE output (Claude's
+    input tokens): the only way that count survives a timeout or a
+    barge-in, which return nothing."""
 
     async def ask() -> tuple[str, LLMUsage | None, str]:
         text = ""
@@ -150,8 +165,12 @@ async def judge_allows(
             async for event in stream:
                 if isinstance(event, LLMTextDelta):
                     text += event.text
+                elif isinstance(event, LLMUsage):
+                    usage = event
+                    if on_usage is not None:
+                        on_usage(event)
                 elif isinstance(event, LLMDone):
-                    usage = event.usage
+                    usage = event.usage or usage
                     finish = event.finish_reason
         return text, usage, finish
 

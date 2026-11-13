@@ -17,6 +17,7 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import pytest
 from pipecat.frames.frames import LLMTextFrame
 from pipecat.observers.base_observer import FramePushed
 from pipecat.processors.frame_processor import FrameDirection
@@ -106,7 +107,7 @@ def write_tool(name="save", delay=0.0, result=None, emit_on_done=True):
     )
 
 
-def make_loop(scripts, tools=(), current_turn=2):
+def make_loop(scripts, tools=(), current_turn=2, **loop_kwargs):
     """A loop with real recorders (never started — the NFR-10 fake-queue
     half: enqueue paths touch no database) and stubbed frame plumbing."""
     recorder = UsageRecorder("s-1", "uid-a")
@@ -118,9 +119,13 @@ def make_loop(scripts, tools=(), current_turn=2):
         emitted.append(data)
 
     provider = ContextProvider("base prompt", session_id="s-1")
+    llm = FakeLLM(scripts)
+    # one scripted client serves both roles unless a test splits them
+    loop_kwargs.setdefault("judge_llm", llm)
+    loop_kwargs.setdefault("judge_model_name", "test-model")
     loop = AgentLoopProcessor(
         context=provider,
-        llm=FakeLLM(scripts),
+        llm=llm,
         registry=list(tools),
         session_id="s-1",
         user_id="uid-a",
@@ -130,6 +135,7 @@ def make_loop(scripts, tools=(), current_turn=2):
         emit=emit,
         write_registry=set(),
         greeting_trigger=GREETING_TRIGGER,
+        **loop_kwargs,
     )
     pushed: list = []
 
@@ -493,6 +499,44 @@ def test_interrupt_mid_stream_records_spoken_prefix_with_sentinel():
     trace = _queued(h.traces, LLMTrace)[0]
     assert trace.finish_reason == "interrupted"
     assert "First sentence." in trace.output
+
+
+def test_interrupted_call_still_records_the_input_it_was_billed_for():
+    """PR #24 round 2: Claude reports input tokens before the first
+    output token. A barge-in used to drop them (usage only ever left the
+    client on the final event), so the usage record under-counted exactly
+    the turns that were cut."""
+    h = make_loop([[LLMUsage(6172, 0), LLMTextDelta("First sentence. "), 60]])
+
+    async def run():
+        task = asyncio.create_task(h.loop._run_turn("talk"))
+        h.loop._turn_task = task
+        await asyncio.sleep(0.1)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        h.loop._turn_task = None
+        h.loop._finalize_interrupted_turn()
+
+    asyncio.run(run())
+    trace = _queued(h.traces, LLMTrace)[0]
+    assert trace.finish_reason == "interrupted"
+    assert (trace.prompt_tokens, trace.completion_tokens) == (6172, 0)
+    assert any(
+        e.stage == "llm" and e.quantity == 6172 for e in _queued(h.recorder, UsageEvent)
+    )
+
+
+def test_early_usage_does_not_count_as_the_first_token():
+    """The early usage event arrives with the response headers; time to
+    first token must still be measured to real output."""
+    h = make_loop([[LLMUsage(100, 0), 0.15, LLMTextDelta("Hello."), _done()]])
+
+    asyncio.run(h.loop._run_turn("hi"))
+
+    trace = _queued(h.traces, LLMTrace)[0]
+    assert trace.ttfb_ms >= 140
+    # LLMDone carried no usage here: the early count is kept, not erased
+    assert trace.prompt_tokens == 100
 
 
 def test_interrupt_mid_chain_write_finishes_reads_abandoned_no_new_step():
@@ -924,6 +968,126 @@ def test_provider_error_mid_stream_still_writes_a_trace_row():
     assert "Recovered." in _pushed_text(h)
 
 
+@pytest.mark.parametrize("finish", ["truncated", "blocked"])
+def test_tool_calls_from_an_incomplete_generation_are_not_run(finish):
+    """PR #24 round 1: a length-cut or declined generation can carry a
+    half-written tool input, or one the provider says to discard. The
+    write must not run; the turn says so and ends."""
+    executed = []
+
+    async def spy(args, ctx):
+        executed.append(args)
+        return {"status": "created"}
+
+    tool = Tool(
+        name="save",
+        description="test write tool",
+        parameters={"type": "object", "properties": {}},
+        handler=spy,
+        is_write=True,
+    )
+    scripts = [
+        [
+            LLMTextDelta("Writing that up."),
+            LLMToolCall(name="save", arguments={"content": "half a docu"}, id="c1"),
+            LLMDone(finish, None),
+        ],
+        [LLMTextDelta("Recovered."), _done()],
+    ]
+    h = make_loop(scripts, tools=[tool])
+
+    async def run():
+        await h.loop._run_turn("write it up")
+        await h.loop._run_turn("again")
+
+    asyncio.run(run())
+
+    assert executed == []  # nothing was written
+    assert any(line in _pushed_text(h) for line in FALLBACK_LINES)
+    built = h.ctx.build()
+    # no tool round entered the context; the words already spoken did
+    assert not any(m["role"] == "tool" for m in built)
+    assert any(
+        m["role"] == "assistant" and "Writing that up." in m["content"] for m in built
+    )
+    assert "Recovered." in _pushed_text(h)  # the session carries on
+
+
+@pytest.mark.parametrize(
+    ("turn_text", "script", "fallback_lines"),
+    [
+        # a length-cut step carrying a call (the incomplete-step branch)
+        (
+            "write it up",
+            [
+                LLMTextDelta("Writing that up. "),
+                LLMToolCall(name="save", arguments={"content": "half"}, id="c1"),
+                LLMDone("truncated", None),
+            ],
+            FALLBACK_LINES,
+        ),
+        # the greeting returning a call despite tool_choice none
+        (
+            None,
+            [LLMToolCall(name="save", arguments={}, id="g1"), _done()],
+            FALLBACK_GREETING_LINES,
+        ),
+    ],
+)
+def test_barge_in_during_the_fallback_line_records_no_phantom_tool_round(
+    turn_text, script, fallback_lines
+):
+    """PR #24 round 3: the skipped calls stayed on the turn state, so a
+    barge-in while the fallback line was being pushed disposed them as a
+    tool round that had been cut — an assistant message carrying a
+    tool_use the model never got to run, plus a 'cancelled' result."""
+    h = make_loop([script], tools=[write_tool()])
+    reached = asyncio.Event()
+
+    async def push_frame(frame, direction=None):
+        h.pushed.append(frame)
+        if isinstance(frame, LLMTextFrame) and frame.text in fallback_lines:
+            reached.set()
+            await asyncio.sleep(60)  # the barge-in lands here
+
+    h.loop.push_frame = push_frame
+
+    async def run():
+        task = asyncio.create_task(h.loop._run_turn(turn_text))
+        h.loop._turn_task = task
+        await asyncio.wait_for(reached.wait(), 2)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        h.loop._turn_task = None
+        h.loop._finalize_interrupted_turn()
+
+    asyncio.run(run())
+
+    built = h.ctx.build()
+    assert not any(m["role"] == "tool" for m in built)
+    assert not any(m.get("tool_calls") for m in built)
+
+
+def test_loop_cannot_be_built_without_its_judge_client():
+    """PR #24 round 1: with a default of 'the loop's own client', a
+    dropped kwarg would run every verdict on the loop model under a
+    green suite."""
+    with pytest.raises(TypeError, match="judge_llm"):
+        AgentLoopProcessor(
+            context=ContextProvider("base", session_id="s-1"),
+            llm=FakeLLM([]),
+            registry=[],
+            session_id="s-1",
+            user_id="uid-a",
+            model_name="test-model",
+            recorder=UsageRecorder("s-1", "uid-a"),
+            traces=TraceRecorder("s-1", "uid-a"),
+            emit=None,
+            write_registry=set(),
+            greeting_trigger=GREETING_TRIGGER,
+        )
+
+
 def test_wrap_up_call_returning_tools_never_executes_them():
     """Round-3 should-fix 4: tool_choice none is a request — a wrap-up
     that comes back with tool calls must not run them or end silently."""
@@ -1197,6 +1361,64 @@ def test_gated_create_runs_on_yes_and_judge_usage_lands_on_the_turn():
     gate_rows = [t for t in _queued(h.traces, LLMTrace) if t.purpose == "gate"]
     assert len(gate_rows) == 1
     assert "YES" in gate_rows[0].output
+
+
+def test_judge_cut_by_its_timeout_still_records_the_input_it_was_billed_for(
+    monkeypatch,
+):
+    """PR #24 round 3: usage left the judge only on its final event, so a
+    judge call past its timeout — the slow calls, the ones worth seeing —
+    wrote a trace row with no tokens and no usage row at all."""
+    import agent.gate as gate_mod
+
+    monkeypatch.setattr(gate_mod, "JUDGE_TIMEOUT_S", 0.05)
+    ran: list = []
+    judge = FakeLLM([[LLMUsage(340, 0), 60]])
+    scripts = [
+        [LLMToolCall(name="create_document", arguments={"title": "x"}, id="c1"), _done()],
+        [LLMTextDelta("Want me to start a new document?"), _done()],
+    ]
+    h = make_loop(scripts, tools=[_create_tool(ran)], judge_llm=judge)
+
+    asyncio.run(h.loop._run_turn("note it"))
+
+    assert ran == []  # still fails closed
+    gate_row = next(t for t in _queued(h.traces, LLMTrace) if t.purpose == "gate")
+    assert (gate_row.finish_reason, gate_row.prompt_tokens) == ("error", 340)
+    assert [
+        e.quantity for e in _queued(h.recorder, UsageEvent) if e.quantity == 340
+    ] == [340]  # counted once
+
+
+def test_gate_judge_runs_on_its_own_client_and_model():
+    """The judge may be a smaller model than the loop's: its call goes
+    through the judge client and its trace row names the judge model,
+    while the turn's own steps stay on the loop client."""
+    ran: list = []
+    judge = FakeLLM([[LLMTextDelta("YES"), _done()]])
+    scripts = [
+        [
+            LLMToolCall(name="create_document", arguments={"title": "x"}, id="c1"),
+            _done(),
+        ],
+        [LLMTextDelta("Done."), _done()],
+    ]
+    h = make_loop(
+        scripts,
+        tools=[_create_tool(ran)],
+        judge_llm=judge,
+        judge_model_name="judge-model",
+    )
+
+    asyncio.run(h.loop._run_turn("make a new doc called x"))
+
+    assert len(ran) == 1
+    assert len(judge.calls) == 1
+    assert judge.calls[0]["tools"] is None
+    assert len(h.llm.calls) == 2  # the loop client never saw the judge call
+    rows = _queued(h.traces, LLMTrace)
+    assert [t.model for t in rows if t.purpose == "gate"] == ["judge-model"]
+    assert {t.model for t in rows if t.purpose != "gate"} == {"test-model"}
 
 
 def test_gate_fails_closed_on_a_judge_error():
@@ -1633,6 +1855,87 @@ def test_last_assistant_text_skips_tool_call_step_entries():
         provider.last_assistant_text()
         == "Do you want a new document for this?"
     )
+
+
+def test_last_assistant_text_keeps_an_offer_spoken_in_a_tool_call_step():
+    """PR #24 round 4 blocker: Sonnet speaks before tool calls, so the
+    offer can sit in the same step entry as a call. The user answers over
+    the tool round; skipping the entry left the judge with no offer and
+    the bare 'Yeah.' with no referent — the refused-after-yes bug again."""
+    provider = ContextProvider("base", session_id="s-t")
+    provider.append_user("note that down")
+    provider.append_step(
+        "",
+        [LLMToolCall(name="create_document", arguments={"title": "x"}, id="c1")],
+        [{"status": "refused"}],
+    )
+    provider.append_step(
+        "One moment. Nothing here fits. Do you want a new document for this?",
+        [LLMToolCall(name="list_documents", arguments={}, id="c2")],
+        [{"status": "cancelled"}],
+        interrupted=True,
+    )
+    provider.append_user("Yeah.")
+    text = provider.last_assistant_text()
+    assert "Do you want a new document for this?" in text
+    assert not text.startswith("One moment.")  # the filler is not the referent
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_last_assistant_text_ignores_a_step_that_spoke_only_filler(interrupted):
+    """...and the round-3 rule still holds: 'One moment.' (cut or not) is
+    nothing the user could be answering."""
+    provider = ContextProvider("base", session_id="s-t")
+    provider.append_user("what do I have?")
+    provider.append_step(
+        "One moment. ",
+        [LLMToolCall(name="list_documents", arguments={}, id="c1")],
+        [{"status": "cancelled"}],
+        interrupted=interrupted,
+    )
+    provider.append_user("yeah")
+    assert provider.last_assistant_text() is None
+
+
+def test_last_assistant_text_never_returns_an_offer_from_before_an_earlier_turn():
+    """PR #24 round 2 blocker: the judge is told this text is what the
+    latest turn responds to. An offer the user DECLINED two turns ago,
+    followed by a turn that left no spoken reply (barge-in during the
+    tool round), must not be paired with a later unrelated 'yeah'."""
+    provider = ContextProvider("base", session_id="s-t")
+    provider.append_user("capture the hiring plan")
+    provider.append_assistant("No existing document fits. Do you want a new document for this?")
+    provider.append_user("no, add it to the launch plan")
+    provider.append_step(
+        "",
+        [LLMToolCall(name="edit_document", arguments={"document_id": 1}, id="c1")],
+        [{"status": "in_progress"}],
+        interrupted=True,
+    )
+    provider.append_user("yeah, that's fine")
+    assert provider.last_assistant_text() is None
+    # and still None once the current turn's own tool step is in
+    provider.append_step(
+        "One moment. ",
+        [LLMToolCall(name="list_documents", arguments={}, id="c2")],
+        [{"status": "ok"}],
+    )
+    assert provider.last_assistant_text() is None
+
+
+def test_last_assistant_text_keeps_the_end_of_a_long_reply():
+    """PR #24 round 1: a reply explains first and asks last. Capped from
+    the head, a long one reached the judge without its offer — the same
+    refusal the evidence reordering fixed."""
+    provider = ContextProvider("base", session_id="s-t")
+    provider.append_user("capture the supplier research")
+    reply = "None of your documents cover this. " * 12 + "Do you want a new document for this?"
+    assert len(reply) > 300
+    provider.append_assistant(reply)
+    provider.append_user("yeah")
+    text = provider.last_assistant_text()
+    assert len(text) == 300
+    assert text.endswith("Do you want a new document for this?")
 
 
 def test_entry_sentences_released_before_append_still_vouch_and_truncate():

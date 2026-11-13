@@ -59,10 +59,13 @@ from agent.prompts import (
     WRAP_UP_INSTRUCTION,
 )
 from agent.providers import (
+    FINISH_BLOCKED,
     FINISH_INTERRUPTED,
+    FINISH_TRUNCATED,
     LLMDone,
     LLMTextDelta,
     LLMToolCall,
+    LLMUsage,
 )
 from agent.tools import Tool, ToolContext, registry_schemas
 
@@ -77,10 +80,16 @@ TOOL_TIMEOUT_S = 10.0
 FILLER_DELAY_MS = 800
 # FR-43's named lever for the atomic-delivery branch, deliberately
 # DISENGAGED: the FR-48 spike measured ~1.0s of pre-call dead air for a
-# typical create_document — inside NFR-1's 3s — so no blind deadline runs
-# and a slow PLAIN turn never gets filler (the no-tool-turn mandate). If
-# artifact sizes ever push the gap past budget, this is the knob the spec
-# names, with its false positive accepted knowingly.
+# typical create_document ON GEMINI — inside NFR-1's 3s — so no blind
+# deadline runs and a slow PLAIN turn never gets filler (the no-tool-turn
+# mandate). On Claude Sonnet 5.5 that gap is past budget (2026-11-12:
+# 3.0s for an 800-character document in a live session, 34s for an
+# 11,700-character one in a probe; the call arrives whole only once its
+# input is fully written). This knob is still the wrong fix there: plain
+# turns reach their first token at ~1.4s, so a 700ms blind deadline
+# would fire on every one of them. The planned fix arms the filler at
+# the tool call's START, which Claude announces within ~1.6s — carried
+# in ROADMAP §3.3 for the decision-gates PR.
 FILLER_DEADLINE_MS = 700
 
 
@@ -142,6 +151,11 @@ class AgentLoopProcessor(FrameProcessor):
         emit,
         write_registry: set,
         greeting_trigger: str,  # required: dropping it must not pass a green suite
+        # required for the same reason: defaulted to the loop's own
+        # client, a dropped kwarg would run every verdict on the loop
+        # model, at its price and latency, under a green suite
+        judge_llm,
+        judge_model_name: str,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -152,6 +166,9 @@ class AgentLoopProcessor(FrameProcessor):
         self._session_id = session_id
         self._user_id = user_id
         self._model_name = model_name
+        # FR-60: the gate's judge runs on its own (smaller) model
+        self._judge_llm = judge_llm
+        self._judge_model_name = judge_model_name
         self._recorder = recorder
         self._traces = traces
         self._emit = emit
@@ -410,7 +427,9 @@ class AgentLoopProcessor(FrameProcessor):
             ) as stream:
                 async for event in stream:
                     elapsed_ms = round((time.monotonic() - state.t0) * 1000)
-                    if state.ttfb_ms is None and not isinstance(event, LLMDone):
+                    if state.ttfb_ms is None and not isinstance(
+                        event, (LLMDone, LLMUsage)
+                    ):
                         state.ttfb_ms = elapsed_ms
                     if isinstance(event, LLMTextDelta):
                         state.step_text += event.text
@@ -423,16 +442,24 @@ class AgentLoopProcessor(FrameProcessor):
                         if not state.calls and tool_choice != "none":
                             await self._maybe_filler(state, elapsed_ms)
                         state.calls.append(event)
+                    elif isinstance(event, LLMUsage):
+                        # reported ahead of the output on providers that
+                        # can: a barge-in or a dropped stream after this
+                        # point still records the input it was billed for
+                        state.usage = event
                     elif isinstance(event, LLMDone):
                         finish = event.finish_reason
-                        state.usage = event.usage
+                        # None from a stream that never reported: keep
+                        # whatever arrived early
+                        state.usage = event.usage or state.usage
         except Exception:
             # FR-49: EVERY call writes a row — a provider drop after 40
             # deltas is precisely the call a trace is for (review round 3).
             # No finish reason ever arrived, so "error" is the loop-level
             # spelling for a call that raised (FR-48's vocabulary describes
-            # streams that returned); Gemini reports usage only on the
-            # final chunk, so a dropped stream genuinely has none.
+            # streams that returned). Usage is whatever arrived before
+            # the drop: Claude's input count (reported up front), or
+            # nothing on Gemini, which reports only on its final chunk.
             self._instrument_call(
                 state,
                 "error",
@@ -475,6 +502,24 @@ class AgentLoopProcessor(FrameProcessor):
             await self._speak_fallback(state, reason=finish or "empty")
             return True
 
+        if state.calls and finish in (FINISH_TRUNCATED, FINISH_BLOCKED):
+            # A cut or declined generation is not a complete one: its
+            # tool input may be half-written (a length cut mid-call) or
+            # belong to output the provider says to discard (a refusal
+            # after partial output). Run nothing — a truncated document
+            # must never be written — and say so via the fallback.
+            log.bind(
+                event="agent.incomplete_step_tools_skipped",
+                calls=len(state.calls),
+                finish_reason=finish,
+            ).warning("tool calls from an incomplete generation were not run")
+            state.tools_done = True  # the armed filler's round is over
+            # never issued: a barge-in during the fallback line must
+            # not dispose them as a tool round that was cut
+            state.calls = []
+            await self._speak_fallback(state, reason=f"{finish}_tool_calls")
+            return True
+
         if state.calls and tool_choice == "none":
             # tool_choice "none" is a REQUEST — FR-48 names a silent
             # mistranslation here as what would unguard the loop. BOTH
@@ -490,6 +535,7 @@ class AgentLoopProcessor(FrameProcessor):
             ).warning(
                 "call returned tool calls despite tool_choice none"
             )
+            state.calls = []  # never issued — as in the branch above
             # .strip(), matching the empty-step check above (review): a
             # whitespace-only generation alongside the forbidden call must
             # take the fallback, not open mute with an empty append
@@ -685,7 +731,7 @@ class AgentLoopProcessor(FrameProcessor):
     async def _gate_allows(
         self, state: _TurnState, call: LLMToolCall, log, key_suffix: str = ""
     ) -> bool:
-        """FR-60: one judge call through the loop's own FR-48 client,
+        """FR-60: one judge call through the FR-48 seam (the judge client),
         instrumented like any stage and FAILING CLOSED — a judge error
         degrades to the agent asking the user, never to an unwanted
         write. Judge tokens land on the turn like any LLM call, and the
@@ -703,16 +749,17 @@ class AgentLoopProcessor(FrameProcessor):
         usage = None
         allowed = False
         finish = FINISH_INTERRUPTED  # overwritten unless a cancel unwinds
+
+        def early_usage(reported: LLMUsage) -> None:
+            # held here so a timed-out or barged-in judge call still
+            # records the input it was billed for
+            nonlocal usage
+            usage = reported
+
         try:
             allowed, usage, verdict_text, finish = await judge_allows(
-                self._llm, messages
+                self._judge_llm, messages, on_usage=early_usage
             )
-            if usage is not None:
-                self._recorder.record_llm_usage(
-                    usage.prompt_tokens,
-                    usage.completion_tokens,
-                    turn_id=state.turn_id,
-                )
         except asyncio.CancelledError:
             raise  # the finally still writes the interrupted trace row
         except Exception as e:
@@ -722,10 +769,16 @@ class AgentLoopProcessor(FrameProcessor):
             )
         finally:
             gate_ms = round((time.monotonic() - g0) * 1000)
+            if usage is not None:  # every exit: FR-45 counts what was spent
+                self._recorder.record_llm_usage(
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                    turn_id=state.turn_id,
+                )
             self._traces.record_trace(
                 turn_id=state.turn_id,
                 step=state.step,
-                model=self._model_name,
+                model=self._judge_model_name,
                 purpose="gate",
                 finish_reason=finish,
                 prompt_tokens=usage.prompt_tokens if usage else None,
