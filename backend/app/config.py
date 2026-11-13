@@ -14,6 +14,9 @@ _REQUIRED = (
 # here and fails in the providers.py factory, which names it.
 _LLM_KEY = {"anthropic": "ANTHROPIC_API_KEY", "google": "GOOGLE_API_KEY"}
 _DEFAULT_LLM_MODEL = {"anthropic": "claude-sonnet-5-5", "google": "gemini-2.5-flash"}
+# The FR-60 judge's smaller model. A provider with no entry judges on
+# its loop model.
+_DEFAULT_JUDGE_MODEL = {"anthropic": "claude-haiku-5-5"}
 # The loop runs with thinking off, and the API rejects every call at a
 # higher effort than these when thinking is off.
 _LLM_EFFORTS = ("low", "medium", "high")
@@ -82,7 +85,7 @@ def load_settings() -> Settings:
             f"LLM_EFFORT must be one of {', '.join(_LLM_EFFORTS)} — got {llm_effort!r}."
         )
     llm_model = os.getenv("LLM_MODEL") or _DEFAULT_LLM_MODEL.get(llm_provider, "")
-    default_judge = "claude-haiku-5-5" if llm_provider == "anthropic" else llm_model
+    default_judge = _DEFAULT_JUDGE_MODEL.get(llm_provider, llm_model)
     return Settings(
         deepgram_api_key=os.environ["DEEPGRAM_API_KEY"],
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY") or "",

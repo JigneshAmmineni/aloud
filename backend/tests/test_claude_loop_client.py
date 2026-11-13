@@ -133,6 +133,9 @@ def test_unspeakable_assistant_text_is_dropped(text):
             {"role": "user", "content": "again"},
         ]
     )
+    # two user turns in a row are sent as they are: the API combines
+    # them (verified live, PR #24 round 3; scripts/smoke_llm.py
+    # replays this shape against whichever model is configured)
     assert [m["role"] for m in messages] == ["user", "user"]
 
 
@@ -485,6 +488,8 @@ def test_silence_after_the_response_started_does_not_time_out(monkeypatch):
     [
         ({"status": "error", "error": "content is required"}, True),
         ({"status": "timeout"}, True),
+        # a document deleted mid-session: the loop counts it as a failure too
+        ({"status": "not_found", "error": "no such document"}, True),
         ({"status": "edited"}, False),
         # the gate's refusal is steering to follow, not a failure to retry
         ({"status": "refused", "error": "gate: ..."}, False),

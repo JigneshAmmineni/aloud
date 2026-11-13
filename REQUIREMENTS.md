@@ -1025,7 +1025,13 @@ FR-7 still governs: the agent acts when the user asks.
   (the stream cancelled mid-generation by barge-in, whose partial
   consumption FR-46 records and whose trace row FR-49 keeps); without it
   the loop cannot tell an empty ending from a blocked generation
-  (FR-42's empty-step rule) nor a finished turn from a cut one. Claude is the
+  (FR-42's empty-step rule) nor a finished turn from a cut one. A
+  client MAY also report usage early, before any output (Claude
+  reports input tokens when a response starts, which is what makes
+  an interrupted or timed-out call's spend recordable): an early
+  count is superseded by the final one but never erased by its
+  absence, and it is not model output, so it never marks time to
+  first token. Claude is the
   provider in use (the provider SDK lives inside the factory, per the
   hard constraint); the Gemini client, the first one built, remains as
   the swap-back. Implementation MUST begin with a
@@ -2651,11 +2657,16 @@ deliberately unchanged (FR-56 states local verification and why).
     provider-neutral FR-48 seam the loop uses, on a smaller, faster
     model of the same provider (`JUDGE_MODEL`) — no second provider,
     no new SDK surface. Evidence is the last 4 user turns (600 chars
-    each), the assistant's own preceding reply (the referent a bare
-    "yes" answers — the ask-then-yes recovery is unworkable without it,
-    round 2), and the proposed title; never document content, never
+    each), the assistant's immediately preceding reply — included
+    only when the user's latest turn directly follows it, and
+    omitted otherwise (it is the referent a bare "yes" answers, and
+    the prompt tells the judge so: an older reply would let an
+    unrelated "yes" confirm an offer the user declined) — and the
+    proposed title; never document content, never
     tool results, and the prompt marks all quoted text as data. The
-    judge's output is capped (the verdict is one word).
+    judge's output is capped (the verdict is one word). A yes of
+    any kind in the user's latest turn, answering a reply that
+    offered a new document, counts as an explicit request.
   - Anything but a clear YES refuses, and the gate **fails closed**: a
     judge error or timeout (4s) refuses with the same steering — the
     worst failure mode is one extra voice turn, never an unwanted
@@ -2733,7 +2744,7 @@ deliberately unchanged (FR-56 states local verification and why).
 ## 5. Non-Functional Requirements
 
 ### 5.1 Latency
-- **NFR-1** Time from end-of-user-speech to first audio from the agent must be under 3 seconds under normal network conditions.
+- **NFR-1** The target for time from end-of-user-speech to first audio from the agent is 3 seconds under normal network conditions. It is a target, not a gate: it is measured on every turn and its breaches are counted (§4.9), and where the two conflict, the quality of the response takes precedence over the budget. One breach is known and accepted: a turn whose first step goes straight to a tool call is silent until the model has written the whole call (3.6–4.5s measured on Claude Sonnet 5.5), because the FR-43 filler arms only when the call arrives.
 - **NFR-2** Audio must stream as it is generated. The agent must not wait until its full response is ready before speaking.
 - **NFR-10** Measurement must be free: capture (§4.9) adds no synchronous work to the voice hot path. The principle, independent of pipeline architecture: code on the hot path only ever enqueues to memory; background writers batch queues into the database; a failed write logs an error and drops the batch rather than disturbing a live session. Test approach: the same split the transcript-writer tests use — observers/recorders are tested against a fake queue with no database available (proving the enqueue path touches nothing), and writers are exercised separately, including the broken-database case completing without raising. (The FR-20 transcript writer is the exemplar of this discipline, not its definition — it applies equally to a future custom agent loop, where observers become direct recorder calls.)
 

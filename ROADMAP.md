@@ -665,7 +665,11 @@ forgotten:
   the wrong lever (it would fire on every plain turn). Fix: Claude
   announces a tool call at its START (`content_block_start`, ~1.6s
   in) — add that as an event in the FR-48 contract and arm the
-  filler there, FR-43's first-delta trigger.
+  filler there, FR-43's first-delta trigger. Same seam, same
+  change (from review round 3): `llm.thinking_discarded` is logged
+  by the client with `session_id` only; hand the discarded count
+  to the loop as a neutral event so it is logged with `turn_id`
+  and step.
 
 - **Questions and instructions never get "Hmm."** — lean talkative over
   unresponsive: a QUESTION always gets a real answer, a misheard one

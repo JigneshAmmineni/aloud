@@ -1013,6 +1013,61 @@ def test_tool_calls_from_an_incomplete_generation_are_not_run(finish):
     assert "Recovered." in _pushed_text(h)  # the session carries on
 
 
+@pytest.mark.parametrize(
+    ("turn_text", "script", "fallback_lines"),
+    [
+        # a length-cut step carrying a call (the incomplete-step branch)
+        (
+            "write it up",
+            [
+                LLMTextDelta("Writing that up. "),
+                LLMToolCall(name="save", arguments={"content": "half"}, id="c1"),
+                LLMDone("truncated", None),
+            ],
+            FALLBACK_LINES,
+        ),
+        # the greeting returning a call despite tool_choice none
+        (
+            None,
+            [LLMToolCall(name="save", arguments={}, id="g1"), _done()],
+            FALLBACK_GREETING_LINES,
+        ),
+    ],
+)
+def test_barge_in_during_the_fallback_line_records_no_phantom_tool_round(
+    turn_text, script, fallback_lines
+):
+    """PR #24 round 3: the skipped calls stayed on the turn state, so a
+    barge-in while the fallback line was being pushed disposed them as a
+    tool round that had been cut — an assistant message carrying a
+    tool_use the model never got to run, plus a 'cancelled' result."""
+    h = make_loop([script], tools=[write_tool()])
+    reached = asyncio.Event()
+
+    async def push_frame(frame, direction=None):
+        h.pushed.append(frame)
+        if isinstance(frame, LLMTextFrame) and frame.text in fallback_lines:
+            reached.set()
+            await asyncio.sleep(60)  # the barge-in lands here
+
+    h.loop.push_frame = push_frame
+
+    async def run():
+        task = asyncio.create_task(h.loop._run_turn(turn_text))
+        h.loop._turn_task = task
+        await asyncio.wait_for(reached.wait(), 2)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        h.loop._turn_task = None
+        h.loop._finalize_interrupted_turn()
+
+    asyncio.run(run())
+
+    built = h.ctx.build()
+    assert not any(m["role"] == "tool" for m in built)
+    assert not any(m.get("tool_calls") for m in built)
+
+
 def test_loop_cannot_be_built_without_its_judge_client():
     """PR #24 round 1: with a default of 'the loop's own client', a
     dropped kwarg would run every verdict on the loop model under a
@@ -1306,6 +1361,33 @@ def test_gated_create_runs_on_yes_and_judge_usage_lands_on_the_turn():
     gate_rows = [t for t in _queued(h.traces, LLMTrace) if t.purpose == "gate"]
     assert len(gate_rows) == 1
     assert "YES" in gate_rows[0].output
+
+
+def test_judge_cut_by_its_timeout_still_records_the_input_it_was_billed_for(
+    monkeypatch,
+):
+    """PR #24 round 3: usage left the judge only on its final event, so a
+    judge call past its timeout — the slow calls, the ones worth seeing —
+    wrote a trace row with no tokens and no usage row at all."""
+    import agent.gate as gate_mod
+
+    monkeypatch.setattr(gate_mod, "JUDGE_TIMEOUT_S", 0.05)
+    ran: list = []
+    judge = FakeLLM([[LLMUsage(340, 0), 60]])
+    scripts = [
+        [LLMToolCall(name="create_document", arguments={"title": "x"}, id="c1"), _done()],
+        [LLMTextDelta("Want me to start a new document?"), _done()],
+    ]
+    h = make_loop(scripts, tools=[_create_tool(ran)], judge_llm=judge)
+
+    asyncio.run(h.loop._run_turn("note it"))
+
+    assert ran == []  # still fails closed
+    gate_row = next(t for t in _queued(h.traces, LLMTrace) if t.purpose == "gate")
+    assert (gate_row.finish_reason, gate_row.prompt_tokens) == ("error", 340)
+    assert [
+        e.quantity for e in _queued(h.recorder, UsageEvent) if e.quantity == 340
+    ] == [340]  # counted once
 
 
 def test_gate_judge_runs_on_its_own_client_and_model():

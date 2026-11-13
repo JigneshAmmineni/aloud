@@ -356,7 +356,15 @@ def to_anthropic_messages(messages: list[dict]) -> tuple[str | None, list[dict]]
     Claude rejects empty and whitespace-only text blocks) plus one tool_use
     block per call. Every result of that step lands in ONE user message of
     tool_result blocks: Claude rejects a tool_use whose results are split
-    across messages or missing."""
+    across messages or missing.
+
+    Two user messages in a row are sent as they are. The context
+    produces them on ordinary turns (a turn cut before it spoke
+    appends nothing; a barge-in during a tool round leaves the
+    results message followed by the new turn), and the API combines
+    consecutive same-role turns itself — verified live on both models,
+    2026-11-12 (PR #24 round 3), and replayed by scripts/smoke_llm.py
+    so a model swap re-checks it."""
     system_parts: list[str] = []
     out: list[dict] = []
     for msg in messages:
@@ -389,9 +397,14 @@ def to_anthropic_messages(messages: list[dict]) -> tuple[str | None, list[dict]]
                 if isinstance(result, str)
                 else json.dumps(result, ensure_ascii=False, default=str),
             }
-            # Failures only. A gate refusal (status "refused") is
-            # steering to follow, not an error to retry.
-            if isinstance(result, dict) and result.get("status") in ("error", "timeout"):
+            # Failures only — the loop's own failing outcomes, minus one:
+            # a gate refusal (status "refused") is steering to follow,
+            # not an error to retry.
+            if isinstance(result, dict) and result.get("status") in (
+                "error",
+                "timeout",
+                "not_found",
+            ):
                 block["is_error"] = True
             if out and _is_tool_result_message(out[-1]):
                 out[-1]["content"].append(block)
@@ -433,8 +446,12 @@ _CLAUDE_MODELS = {
 #   silence for an 11,700-character document — so any between-bytes
 #   timeout is a cap on document length in disguise (8s killed that
 #   call). A call that is slow for its output is found from its trace
-#   (duration against tokens), not cut off; a connection that dies
-#   mid-stream ends at barge-in or session end.
+#   (duration against tokens), not cut off. The accepted residual
+#   (PR #24 round 3 proposed a 300s read timeout for it; declined,
+#   since any such bound also cuts a long silent write): a
+#   half-open connection — dropped mid-stream with no FIN — hangs
+#   the turn with no fallback line and no trace row until the user
+#   speaks again (which cancels and restarts) or the session ends.
 _CLAUDE_FIRST_EVENT_TIMEOUT_S = 10.0
 _CLAUDE_CONNECT_TIMEOUT_S = 5.0
 

@@ -514,6 +514,9 @@ class AgentLoopProcessor(FrameProcessor):
                 finish_reason=finish,
             ).warning("tool calls from an incomplete generation were not run")
             state.tools_done = True  # the armed filler's round is over
+            # never issued: a barge-in during the fallback line must
+            # not dispose them as a tool round that was cut
+            state.calls = []
             await self._speak_fallback(state, reason=f"{finish}_tool_calls")
             return True
 
@@ -532,6 +535,7 @@ class AgentLoopProcessor(FrameProcessor):
             ).warning(
                 "call returned tool calls despite tool_choice none"
             )
+            state.calls = []  # never issued — as in the branch above
             # .strip(), matching the empty-step check above (review): a
             # whitespace-only generation alongside the forbidden call must
             # take the fallback, not open mute with an empty append
@@ -745,16 +749,17 @@ class AgentLoopProcessor(FrameProcessor):
         usage = None
         allowed = False
         finish = FINISH_INTERRUPTED  # overwritten unless a cancel unwinds
+
+        def early_usage(reported: LLMUsage) -> None:
+            # held here so a timed-out or barged-in judge call still
+            # records the input it was billed for
+            nonlocal usage
+            usage = reported
+
         try:
             allowed, usage, verdict_text, finish = await judge_allows(
-                self._judge_llm, messages
+                self._judge_llm, messages, on_usage=early_usage
             )
-            if usage is not None:
-                self._recorder.record_llm_usage(
-                    usage.prompt_tokens,
-                    usage.completion_tokens,
-                    turn_id=state.turn_id,
-                )
         except asyncio.CancelledError:
             raise  # the finally still writes the interrupted trace row
         except Exception as e:
@@ -764,6 +769,12 @@ class AgentLoopProcessor(FrameProcessor):
             )
         finally:
             gate_ms = round((time.monotonic() - g0) * 1000)
+            if usage is not None:  # every exit: FR-45 counts what was spent
+                self._recorder.record_llm_usage(
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                    turn_id=state.turn_id,
+                )
             self._traces.record_trace(
                 turn_id=state.turn_id,
                 step=state.step,

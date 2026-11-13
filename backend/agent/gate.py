@@ -133,7 +133,7 @@ def judge_messages(
 
 
 async def judge_allows(
-    llm, messages: list[dict]
+    llm, messages: list[dict], on_usage=None
 ) -> tuple[bool, LLMUsage | None, str, str]:
     """One bounded judge call through the FR-48 client. Returns
     (allowed, usage, verdict_text, finish_reason) — usage for FR-45
@@ -144,7 +144,10 @@ async def judge_allows(
     why). Raises propagate: the loop owns fail-closed and its
     instrumentation. aclosing: a timeout or barge-in cancellation must
     close the provider stream (and its HTTP connection)
-    deterministically, not at GC time (round-1 review)."""
+    deterministically, not at GC time (round-1 review). on_usage is
+    called with a count the provider reports BEFORE output (Claude's
+    input tokens): the only way that count survives a timeout or a
+    barge-in, which return nothing."""
 
     async def ask() -> tuple[str, LLMUsage | None, str]:
         text = ""
@@ -158,8 +161,12 @@ async def judge_allows(
             async for event in stream:
                 if isinstance(event, LLMTextDelta):
                     text += event.text
+                elif isinstance(event, LLMUsage):
+                    usage = event
+                    if on_usage is not None:
+                        on_usage(event)
                 elif isinstance(event, LLMDone):
-                    usage = event.usage
+                    usage = event.usage or usage
                     finish = event.finish_reason
         return text, usage, finish
 

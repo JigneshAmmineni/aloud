@@ -138,9 +138,11 @@ Two models sit behind the one FR-48 seam (`agent/providers.py`,
   session end; slow calls are meant to be found from `llm_traces`
   (duration against output tokens), not cut off (ROADMAP feature 10).
 - **Usage arrives early.** Claude reports input tokens when a response
-  starts; the client hands that to the loop at once (an early
-  `LLMUsage` event), so an interrupted or dropped call still records
-  the input it was billed for. Gemini reports usage only at the end.
+  starts; the client hands that over at once (an early `LLMUsage`
+  event), so an interrupted or dropped call still records the input
+  it was billed for — the loop's own calls and the judge's alike (a
+  judge call cut by its 4s timeout included). Gemini reports usage
+  only at the end.
 - **Known gap: silence before a tool call.** A step that goes straight
   to a tool call is silent until the whole call has been written (3.0s
   for an 800-character document live, far longer for a long one), and

@@ -92,6 +92,28 @@ def test_judge_timeout_propagates_for_the_loop_to_fail_closed(monkeypatch):
         )
 
 
+def test_judge_cut_by_its_timeout_has_already_handed_over_its_input_count(monkeypatch):
+    # PR #24 round 3: Claude reports input tokens before any output. A
+    # judge call that then runs past its timeout returns nothing, so the
+    # count must leave through on_usage or the slow calls go uncounted.
+    monkeypatch.setattr(gate_mod, "JUDGE_TIMEOUT_S", 0.05)
+    llm = OneShotLLM([LLMUsage(340, 0), 60.0, LLMTextDelta("YES"), LLMDone("stop", None)])
+    seen = []
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(
+            judge_allows(llm, judge_messages("create_document", {}, ["x"]), on_usage=seen.append)
+        )
+    assert seen == [LLMUsage(340, 0)]
+
+
+def test_early_usage_is_kept_when_the_final_event_carries_none():
+    llm = OneShotLLM([LLMUsage(340, 0), LLMTextDelta("YES"), LLMDone("stop", None)])
+    _, usage, _, _ = asyncio.run(
+        judge_allows(llm, judge_messages("create_document", {}, ["x"]))
+    )
+    assert usage == LLMUsage(340, 0)
+
+
 def test_evidence_is_bounded_and_quotes_only_recent_turns():
     # the CALLER owns the window (round 3) — mirror the loop's slice
     from agent.gate import JUDGE_RECENT_TURNS
