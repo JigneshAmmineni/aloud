@@ -127,7 +127,7 @@ class UsageRecorder:
 
     def record_step_stage(self, turn_id: int | None, key: str, ms: int) -> None:
         """A step-indexed stage entry from the loop (step.N.ttfb.llm,
-        step.N.tool.name, step.N.filler) against the turn EXPLICITLY named
+        step.N.tool.name) against the turn EXPLICITLY named
         by the step that measured it. C-1's over-1s advisory transfers
         here from the displaced breakdown handler."""
         if turn_id is None:

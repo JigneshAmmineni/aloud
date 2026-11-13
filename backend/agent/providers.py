@@ -331,7 +331,7 @@ def to_anthropic_tools(tools: list[dict]) -> list[dict]:
     """Registry entries → Claude tool definitions (the JSON schema passes
     through as input_schema). eager_input_streaming stays OFF on purpose:
     without it the server validates each tool input and delivers it whole,
-    which is the atomic-call contract the loop's filler timing relies on."""
+    which is the atomic-call contract the loop relies on."""
     return [
         {
             "name": t["name"],
@@ -449,7 +449,7 @@ _CLAUDE_MODELS = {
 #   liveness check, not a limit on work: the first event arrives in
 #   1.4–2.0s however long the response will be. A stalled call must
 #   fail into the loop's spoken fallback, because nothing else covers
-#   that silence (the filler arms only on a tool call), and a retry
+#   that silence, and a retry
 #   lands in a conversation that has moved on. Why 10s and not the
 #   4–5s the measurements would allow (PR #24 round 4, advisory): a
 #   rate limit or overload already raises at once with retries off,

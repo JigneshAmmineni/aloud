@@ -144,11 +144,13 @@ Two models sit behind the one FR-48 seam (`agent/providers.py`,
   it was billed for — the loop's own calls and the judge's alike (a
   judge call cut by its 4s timeout included). Gemini reports usage
   only at the end.
-- **Known gap: silence before a tool call.** A step that goes straight
-  to a tool call is silent until the whole call has been written (3.0s
-  for an 800-character document live, far longer for a long one), and
-  the filler arms only when the call arrives. Carried in ROADMAP §3.3:
-  arm it when Claude announces the call, about 1.6s in.
+- **Silence before a tool call is accepted.** A step that goes straight
+  to a tool call is silent until the whole call has been written and
+  run (3.0s for an 800-character document live, far longer for a long
+  one). The loop speaks no line of its own: the canned filler was
+  removed on 2026-11-12 (it could only fire once the call had arrived,
+  so it landed right before the answer). A wait indicator comes back,
+  in a deliberate form, with long tasks (ROADMAP feature 10).
 - **Server-side fallback (Sonnet only).** Sonnet requests carry the
   `server-side-fallback-2026-07-01` beta with `fallbacks: "default"`: a
   request Sonnet 5.5 declines in the `cyber` or `frontier_llm` category is
@@ -295,8 +297,8 @@ backend/
               detection, caps; runs via threadpool + semaphore)
   agent/      companion.py (CompanionAgent: builds/runs one session's pipeline)
               loop.py (§4.10 AgentLoopProcessor: the agent loop IN the
-              pipeline's LLM slot — steps, tools, the FR-60 gate, filler
-              backstop, barge-in disposal, FR-61 playback-cut amendment,
+              pipeline's LLM slot — steps, tools, the FR-60 gate,
+              barge-in disposal, FR-61 playback-cut amendment,
               self-instrumentation; + AgentLoopObserver, its eyes
               downstream: bot-speaking, the synthesis stream,
               user-speech-start, and FR-61's transport-released
@@ -305,7 +307,7 @@ backend/
               providers.py (THE provider seam: SDK construction for
               STT/TTS + the FR-48 loop LLM streaming clients — Claude in
               use, Gemini kept — and the loop/judge factories),
-              prompts.py (system prompt, FILLER/FALLBACK lines, wrap-up,
+              prompts.py (system prompt, FALLBACK lines, wrap-up,
               the per-document attach-block renderer),
               tools.py (FR-53 registry: create/list/read/search/
               edit_document — paged reads, two-scope search, str_replace/
@@ -413,8 +415,8 @@ Two architectural seams everything hangs on:
    (10s timeout = a tool result; reads abandoned on barge-in, writes run
    in tasks outside pipeline cancellation and always finish); tool steps
    append atomically and loop (MAX 5 steps + one forced tool-free wrap-up
-   call); a silent tool round gets a spoken FILLER line at call arrival
-   (FR-43); any loop error degrades to a spoken canned fallback. The
+   call); a silent tool round stays silent — the loop speaks no line of
+   its own (FR-43); any loop error degrades to a spoken canned fallback. The
    greeting is one tool-forbidden step with no user turn, carrying the
    FR-24 preferred name on its ephemeral trigger — one bounded (1s)
    `users` read at session setup, degrading to a nameless greeting on
@@ -626,7 +628,7 @@ Full original rationale: `git show a84df1b:SDD.md` (§0).
 | 8 | Single VM, host networking, Caddy | Cheapest thing that runs real WebRTC (bridge networking can't forward ephemeral UDP); Caddy for zero-config TLS |
 | 9 | Git: `main` = workbench, `prod` = deploy pointer; PR + CI + Claude review gate on `main` | Two-branch model matching a solo dev with a live demo |
 | 10 | Everything in Docker; commit-at-checkpoints, push/PR only on confirmation | CLAUDE.md workflow rules |
-| 11 | Hand-rolled agent loop in the pipeline's LLM slot (§4.10) | One hot-path LLM call per turn (a "decider" call is serial latency for nothing — Flash selects tools and speaks in the same call); Pipecat stays the audio chassis, the loop is plain Python behind our seams (context provider, tool registry, provider client) so features 4–6 extend seams, not control flow, and a Pipecat retirement would strand nothing. Both mandated spikes ran first: stage swap + barge-in (the interruption hook is `_start_interruption`, not a frame), and live Gemini streaming (function calls arrive ATOMICALLY → filler fires at call arrival; raw API defaults thinking ON — pinned off per call) |
+| 11 | Hand-rolled agent loop in the pipeline's LLM slot (§4.10) | One hot-path LLM call per turn (a "decider" call is serial latency for nothing — Flash selects tools and speaks in the same call); Pipecat stays the audio chassis, the loop is plain Python behind our seams (context provider, tool registry, provider client) so features 4–6 extend seams, not control flow, and a Pipecat retirement would strand nothing. Both mandated spikes ran first: stage swap + barge-in (the interruption hook is `_start_interruption`, not a frame), and live Gemini streaming (function calls arrive ATOMICALLY; raw API defaults thinking ON — pinned off per call) |
 
 ## 9. Scaling notes (when the time comes)
 

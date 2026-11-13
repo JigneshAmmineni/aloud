@@ -69,8 +69,7 @@ unrelated documents, none of them discussed). A NEW document happens \
 only on an explicit ask ("make a new doc", "put that in its own \
 document"). Work silently: never narrate your steps, your \
 tools, or your plan ("let me read the document", "okay, I have the \
-content") — if a wait is worth marking, the system speaks a brief filler \
-for you. When the work is done, confirm in a word or two ("Done.") and \
+content"). When the work is done, confirm in a word or two ("Done.") and \
 stop: never say where the result appeared, never mention the screen, and \
 never read a document's content aloud. Decide small details yourself — \
 where in a document something goes, how to phrase a note — instead of \
@@ -127,15 +126,6 @@ def build_greeting_trigger(preferred_name: str | None) -> str:
                 "Greet them as your instructions describe.)"
             )
     return GREETING_TRIGGER
-
-# FR-43: the speak-first backstop before silent tool work. Generic and
-# topic-agnostic by design; varied to avoid repetition.
-FILLER_LINES = (
-    "One moment.",
-    "Let me get that.",
-    "Just a second.",
-    "On it.",
-)
 
 # FR-42: the cap's forced final step — injected into that one call's
 # message list, never appended to the context.

@@ -119,7 +119,7 @@ it.**
   one, at most one at a time (FR-9 holds), never to keep the conversation
   moving.
 - Where the pieces live is mapped in `agent/prompts.py` (base prompt,
-  documents block, fallback/filler/greeting lines, wrap-up instruction)
+  documents block, fallback/greeting lines, wrap-up instruction)
   and `agent/tools.py` (tool descriptions — the model reads these too).
   All of them get vetted in this pass, with A/B listening tests against
   real brain-dump sessions as the acceptance bar — the test plan, scripted
@@ -552,6 +552,16 @@ call).
   short between-bytes timeout could come back as a true dead-connection
   check, since a working call would never be silent. The trade: the
   client must validate inputs itself.
+- Nothing tells the user that work is in progress. The canned filler
+  line ("One moment.") was removed on 2026-11-12: it armed when a tool
+  call ARRIVED, which on Claude is after the whole call has been
+  written, so it spoke right before the answer instead of during the
+  wait, and its text had to be stripped back out of the context, the
+  interruption capture and the judge's evidence. A long task needs a
+  deliberate replacement, specced with this feature: when it starts
+  (the tool call's start event, not its arrival), what it says, how
+  often it repeats, and a rule that it never lands just before the
+  answer. Quick turns stay silent.
 
 **Thinking.** Not required for a long task: a task is a chain of tool
 calls, and the loop runs those with thinking off today. It is likely
@@ -660,16 +670,17 @@ forgotten:
   (feature 5); (6) from review round 2, with measurements: a step
   that goes straight to a tool call is SILENT until Claude has
   written the whole call (3.0s for an 800-character document in the
-  live session, 34s for an 11,700-character one in a probe), and
-  the filler only arms when the call arrives. FILLER_DEADLINE_MS is
-  the wrong lever (it would fire on every plain turn). Fix: Claude
-  announces a tool call at its START (`content_block_start`, ~1.6s
-  in) — add that as an event in the FR-48 contract and arm the
-  filler there, FR-43's first-delta trigger. Same seam, same
-  change (from review round 3): `llm.thinking_discarded` is logged
-  by the client with `session_id` only; hand the discarded count
-  to the loop as a neutral event so it is logged with `turn_id`
-  and step.
+  live session, 34s for an 11,700-character one in a probe). The
+  filler line meant to cover it is REMOVED (owner decision,
+  2026-11-12: it could only fire when the call arrived, so it
+  landed right before the answer). The silence is accepted for
+  quick turns; a wait indicator returns, in a deliberate form, with
+  long tasks (feature 10). Kept from this item for that work:
+  Claude announces a tool call at its START (`content_block_start`,
+  ~1.6s in), which would be a new event in the FR-48 contract; and
+  (from review round 3) `llm.thinking_discarded` is logged by the
+  client with `session_id` only — hand the discarded count to the
+  loop as a neutral event so it is logged with `turn_id` and step.
 
 - **Questions and instructions never get "Hmm."** — lean talkative over
   unresponsive: a QUESTION always gets a real answer, a misheard one
@@ -679,10 +690,6 @@ forgotten:
 - **Minimal confirmations** — never "it's on your screen", "I have
   written that to the document", "the document has been updated";
   "Done." is enough.
-- **Filler threshold** — the filler phrase only when the agent is
-  genuinely taking long (800ms of dead air), not on every tool call.
-- **Filler round scoping** — a filler armed for a tool round dies with
-  that round; no "One moment." after the result is already visible.
 - **Create-gate redirection (FR-60)** — a blocked create silently picks
   the existing document from recent conversation (usually the one under
   discussion), writes without asking; only with no fitting document

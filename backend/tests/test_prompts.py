@@ -37,7 +37,8 @@ def test_prompt_keeps_document_instructions():
     """FR-12/FR-53: tools named, on-request only, never read aloud — and
     tool work is SILENT (2026-10-11 live sessions: the model narrated
     every internal step and closed every edit with "it's on your
-    screen"); the loop's filler backstop owns the dead air."""
+    screen"). Nothing marks the wait: the prompt must not promise a
+    filler line the system no longer speaks."""
     prompt = build_system_prompt().lower()
     for tool in (
         "create_document",
@@ -49,6 +50,7 @@ def test_prompt_keeps_document_instructions():
         assert tool in prompt
     assert "never read a document" in prompt
     assert "work silently" in prompt
+    assert "filler" not in prompt
     assert "never narrate" in prompt
     assert "never mention the screen" in prompt
     assert "decide small details yourself" in prompt

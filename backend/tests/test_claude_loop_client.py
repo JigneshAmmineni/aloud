@@ -432,7 +432,7 @@ def test_unsupported_model_fails_at_construction():
 
 def test_sdk_client_is_bounded_and_shared_across_sessions():
     # SDK defaults are a 600s timeout and 2 retries: a stalled or
-    # rate-limited call would be silence the filler never covers
+    # rate-limited call would be silence nothing covers
     loop_llm = ClaudeLoopClient(api_key="a_fake", model="claude-sonnet-5-5", effort="medium")
     judge_llm = ClaudeLoopClient(api_key="a_fake", model="claude-haiku-5-5", effort="low")
     sdk = loop_llm._client
