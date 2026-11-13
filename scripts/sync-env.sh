@@ -214,8 +214,8 @@ cd "$(dirname "$0")/.."
 command -v gcloud >/dev/null || { echo "gcloud CLI not found (deployment.md, section 2)."; exit 1; }
 [ "$mode" != "sync" ] || [ -f .env ] || { echo "No .env in $(pwd)."; exit 1; }
 
-# Git Bash would rewrite "vm:path" arguments as Windows paths.
-export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+# No argument below starts with "/" or "~": Git Bash rewrites those as
+# Windows paths, and switching that off breaks gcloud's own launcher.
 
 on_vm() {  # run this same script on the VM, tolerant of CRLF line endings
   gcloud compute ssh "$VM" --zone="$ZONE" --tunnel-through-iap \
