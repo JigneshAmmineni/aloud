@@ -76,9 +76,13 @@ modes:
   the server. Record p50, p95 and max per question: these are the
   figures production would see.
 
-## Part 3 — live voice run (owner, local dev server, then the live site)
+## Part 3 — live voice run (owner, local dev server)
 
-Fresh session, no documents attached, both switches on. Topic is free;
+This run is a condition of switching on, so it happens where the
+switches may already be on: the owner's development server, with only
+the owner speaking. It is repeated on the live site after switch-on, as
+a check of that deploy. Fresh session, no documents attached, both
+switches on. Topic is free;
 the turns below are shapes, not exact words. Every row names the
 outcome the checks should select and the answer mode the reply should
 take. Duration class: modes 1 and 2 finish in seconds; mode 3 takes as
@@ -92,13 +96,13 @@ run 2 script except for the expected columns):
 | 1 | (connect) | not checked | — | a few words of greeting |
 | 2 | a plain factual question | plain or talk only | 2 | one or two sentences, no document |
 | 3 | thinking aloud, trailing off ("…maybe two nights? Probably…") | silent (mid-thought) | — | nothing spoken; the indicator returns to Listening |
-| 4 | "Create a new document called … with what I've said so far." | plain | 1 | one document; a few words of confirmation |
-| 5 | "Add that we need to book the campsite by Friday." | plain | 1 | edit without asking; a few words of confirmation |
+| 4 | "Create a new document called … with what I've said so far." | affirm | 1 | one document; a few words of confirmation |
+| 5 | "Add that we need to book the campsite by Friday." | affirm | 1 | edit without asking; a few words of confirmation |
 | 6 | "Give me a quick summary of the plan." | talk only | 2 | spoken, one or two sentences, nothing written |
-| 7 | "Organize the plan into three sections: …" | plain | 1 | restructured; a few words of confirmation |
+| 7 | "Organize the plan into three sections: …" | affirm | 1 | restructured; a few words of confirmation |
 | 8 | "What am I missing?" | talk only | 2 | spoken, no write; a short list is allowed here |
 | 9 | "Poke holes in this plan." | talk only | 2 | spoken critique, no write |
-| 10 | "Rename the document to …" | plain | 1 | one rename; a few words of confirmation |
+| 10 | "Rename the document to …" | affirm | 1 | one rename; a few words of confirmation |
 | 11 | "Which of my documents mention a budget?" | talk only | 2 | silent search (a read tool on a talk-only turn), then the answer |
 | 12 | "Change the line about X to Y." (no such line) | plain | 2 | one short sentence that it could not; no tool names |
 | 13 | "Actually, never mind. Let's go back to the trip." | silent (nothing asked) or plain | 2 | no tool; silence is acceptable |
@@ -113,11 +117,11 @@ Rows for this change:
 |---|---|---|---|---|
 | 18 | "I think we should probably…" (pause five seconds or more) "…go with the cheaper campsite." | silent (mid-thought), then plain or talk only | 2 | silence through the pause, however long; then one reply to the whole thought |
 | 19 | "Okay." / "Right, right." / "Hmm." after a reply | silent (nothing asked) | — | nothing spoken, each time |
-| 20 | after the agent asks a yes/no question: "Yeah." | plain | 1 | it acts on the yes; not judged mid-thought or nothing-asked |
+| 20 | after the agent asks a yes/no question: "Yeah." | affirm | 1 | it acts on the yes; not judged mid-thought or nothing-asked |
 | 21 | "Split the list into client side and server side, and give me your ideas for each." | edit and speak | 1 then 2 | the edit lands AND the ideas are spoken |
 | 22 | "What do you think of that split?" | talk only | 2 | spoken opinion, one or two sentences, no write |
 | 23 | "Should we add a budget section? What would go in it?" | talk only | 2 | spoken answer; nothing written, and it does not claim to have written anything |
-| 24 | "Add a budget section with those." | plain | 1 | the edit lands; a few words of confirmation |
+| 24 | "Add a budget section with those." | affirm | 1 | the edit lands; a few words of confirmation |
 | 25 | "Explain the schedule section in detail." | talk only | 3 | a full explanation |
 | 26 | "Read me the gear section." | talk only | 3 | the section read word for word |
 | 27 | "Give me five things I should double-check before leaving." | talk only | 2 | a spoken list: at most five points, one clause each, no bullet words |
@@ -149,7 +153,11 @@ must behave as it did before.
 - Row 21: both halves, every time it is tried.
 - No reply to a mode-2 row runs past two sentences, the list rows
   excepted. Record the sentence count per row.
-- No reply to a mode-1 row runs past five words. Record the words.
+- No closing reply on a mode-1 row runs past five words (narration
+  before a tool call is not counted). Record the words.
+- A thinking-aloud turn that reaches the model (row 35, when the
+  checks miss it) gets a few words, not commentary. Record which
+  happened: silence, a few words, or more.
 - Wherever two steps of a turn both spoke (row 32 and any other), the
   pause between them is audible, about a second, and nothing the agent
   wrote was left unspoken.
@@ -159,7 +167,7 @@ must behave as it did before.
 - Row 28: the context after the cut holds only the reply's first
   sentence, marked as cut (`context.playback_cut` in the logs).
 - Check response time on every turn, read from the `turn.check` log
-  lines (silent turns write those too; the `check.*` stage keys exist
+  lines (silent turns write those too; the `check` stage key exists
   only on turns that spoke): record p50 and the worst; count
   `turn.check_bypassed` lines. A bypass is not a failure of the run,
   but its count is recorded.
