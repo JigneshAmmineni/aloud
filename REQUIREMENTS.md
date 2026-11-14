@@ -640,9 +640,14 @@ FR-7 still governs: the agent acts when the user asks.
   before it ("I'll add that to the document." — a pause — "Done.").
   The loop learns that playback finished from the output transport's
   bot-stopped-speaking signal; when no earlier speech of the turn is
-  playing or queued nothing is held, and a hold never outlasts
-  `STEP_SPEECH_HOLD_MAX_S` — a missing signal must not strand a reply,
-  so on breach the words are spoken and a WARNING is logged. Nothing
+  playing or queued nothing is held. A missing signal must not strand
+  a reply, so the hold has a ceiling, and the ceiling scales with the
+  speech being waited for: that speech's length in characters at a
+  deliberately slow speaking rate (`STEP_SPEECH_SLOWEST_CPS`) plus
+  `STEP_SPEECH_HOLD_SLACK_S`. A long recitation therefore keeps its
+  pause; only a signal that never arrives reaches the ceiling, and
+  then the words are spoken and `speech_gap.signal_missing` is logged
+  at WARNING — an event that means a broken signal and nothing else. Nothing
   the model says is dropped or rewritten: narration before a tool call
   and the confirmation after it are both spoken. **Recorded trade
   (owner, 2026-11-14):** that verbosity is accepted. Dropping the
@@ -656,8 +661,10 @@ FR-7 still governs: the agent acts when the user asks.
   spoken, recorded on that step's entry, and not marked; a step that
   speaks after an earlier step of the same turn spoke starts no sooner
   than the gap after that playback ended; a step that speaks first, or
-  after silent steps only, is not delayed; the hold releases at its
-  ceiling when the signal never comes; a closing confirmation after a
+  after silent steps only, is not delayed; a step that follows a
+  playback far longer than the slack (a recitation) still gets its
+  pause and logs nothing; the hold releases at its scaled ceiling, with
+  the warning, when the signal never comes; a closing confirmation after a
   spoken sentence is spoken, not dropped. The no-tool turn — the overwhelming common case — is
   one LLM call with no added synchronous work (NFR-10 applies to the
   loop itself; anything the loop does beyond the call and the
@@ -1148,7 +1155,8 @@ on session end: ONE WRITE_GRACE_S budget, spent once — End-tap/disconnect:
 | `READ_ARTIFACT_MAX_CHARS` (renamed `READ_DOCUMENT_MAX_CHARS` by §4.11; also the `edit_artifact` replace-refusal threshold, passed into the repo as `max_replaceable_chars`) | 8,000 | `agent/tools.py` (moves to `db/` documents repo with §4.11's pager; FR-45's tool-owns-the-value division is amended there) |
 | `FALLBACK_LINES` (spoken failure/empty-step lines) | small named set | `agent/prompts.py` |
 | `STEP_SPEECH_GAP_S` (pause between two spoken steps of one turn) | 1s | `agent/loop.py` |
-| `STEP_SPEECH_HOLD_MAX_S` (longest a step's words wait for earlier playback to end) | 5s | `agent/loop.py` |
+| `STEP_SPEECH_SLOWEST_CPS` (speaking rate assumed when bounding the wait for earlier playback) | 10 chars/s | `agent/loop.py` |
+| `STEP_SPEECH_HOLD_SLACK_S` (added to that bound) | 5s | `agent/loop.py` |
 | `WRITE_GRACE_S` (teardown wait for writes) | 5 total | `agent/companion.py` (the code that awaits: session teardown + the SIGTERM drain; the loop only owns the in-flight set) |
 | Model / provider | `LLM_MODEL` / `LLM_PROVIDER` env | `agent/providers.py` |
 | Voice + tool-use behavior | system prompt | `agent/prompts.py` |
@@ -2626,9 +2634,7 @@ deliberately unchanged (FR-56 states local verification and why).
     each), the assistant's immediately preceding reply — what it
     last said before the user's latest turn, whether or not that
     step also called a tool; included
-    only when no other assistant reply stands between it and the
-    user's latest turn (consecutive user turns, which FR-64
-    produces, count as one), and
+    only when the user's latest turn directly follows it, and
     omitted otherwise (it is the referent a bare "yes" answers, and
     the prompt tells the judge so: an older reply would let an
     unrelated "yes" confirm an offer the user declined) — and the
@@ -2768,10 +2774,9 @@ Five decisions shape every FR below, each with the alternative it beat:
    again is cheaper than cutting off a wrong reply). Withholding the
    edit tools leans toward allowing (editing by voice is the core
    feature, so a wrongly blocked edit is the costlier mistake).
-5. **The create gate keeps its own judge.** FR-60's model, prompt and
-   fail-closed dispatch point are unchanged; one clause of its evidence
-   rule is widened so that FR-64's consecutive user turns do not hide
-   the reply a "yes" answers.
+5. **The create gate is untouched.** FR-60 keeps its judge, its
+   evidence rule and its fail-closed dispatch point. FR-64 records what
+   that costs after a silent turn.
 
 - **FR-62** **At the end of every user turn, before the main model is
   called, the loop asks a decision model three questions about the
@@ -2834,7 +2839,13 @@ Five decisions shape every FR below, each with the alternative it beat:
   A turn that is not silent, not talk-only and not instructed is
   **plain**: it runs exactly as it would without the checks. Answer is
   the default because it is today's behaviour, so every unsure SPEAK
-  lands there. The loop acts as soon as the outcome is determined: a
+  lands there. **Recorded coupling:** `CHECK_NO_WRITE_MIN` gates two
+  things, the withholding of the write tools and the nothing-asked
+  silence, on purpose: the agent never goes silent on a turn that may
+  hold an edit request. The cost is on the bench's record: of 63 turns
+  that asked for no edit, 4 kept their tools, and a nothing-asked turn
+  among those gets a few words instead of silence. The loop acts as
+  soon as the outcome is determined: a
   mid-thought verdict does not wait for the other answers. With
   `TURN_CHECK_DONE` off, decision 1 is skipped; with `TURN_CHECK_MODE`
   off, decisions 2 and 3 are skipped. The thresholds are settings,
@@ -2863,7 +2874,8 @@ Five decisions shape every FR below, each with the alternative it beat:
     FR-47).
   - The client is told with one server message, `turn.silent`, so
     FR-6's indicator returns from Thinking to Listening.
-  - **Recorded bounds, both accepted by the owner:** (i) a wrong silent
+  - **Recorded bounds** (the first two accepted by the owner, the third
+    FR-60's own direction): (i) a wrong silent
     verdict on a finished request leaves the user unanswered until they
     speak again — nothing tells them, the lean (decision 4) makes it the
     preferred mistake, and FR-70's records make its rate measurable.
@@ -2872,11 +2884,20 @@ Five decisions shape every FR below, each with the alternative it beat:
     rest of that reply is not resumed. With FR-72's one-or-two-sentence
     replies there is little to lose, and telling such a sound from a
     real interruption is turn-detection work, not this section's.
+    (iii) FR-60's judge is shown the agent's last reply only when the
+    user's latest turn directly follows it, so that an unrelated "yes"
+    cannot confirm an offer made earlier. After a silent turn the
+    next turn no longer directly follows the reply: a "yes" to an
+    offer of a new document made before the silence is refused once,
+    and the agent asks again. One extra voice turn, never an unwanted
+    document.
 
   Mandated tests: a silent outcome makes no main-model call, pushes no
   text frame, appends no assistant entry, and emits `turn.silent`; the
   next turn's request carries both user messages in order; the session
-  takes the next turn normally.
+  takes the next turn normally; in the client, a `turn.silent` message
+  moves the indicator from Thinking to Listening (FR-6) — without it a
+  silent turn looks like a hung session.
 - **FR-65** **On a talk-only turn no write tool is available to the
   model; read tools always are.** Mechanism:
   - Every step of that turn, the forced wrap-up step included, declares
@@ -2896,8 +2917,9 @@ Five decisions shape every FR below, each with the alternative it beat:
     a request whose history holds calls to tools absent from the
     declared set is accepted. If it is rejected, the binding moves to
     dispatch: all tools stay declared and a write call on a talk-only
-    turn is refused with a steering result (FR-60's shape); the
-    instruction is unchanged.
+    turn is refused with a steering result (FR-60's shape) before
+    FR-60's judge is consulted — no judge call is paid for a call that
+    is refused either way; the instruction is unchanged.
 
   Mandated tests: on a talk-only turn the tool list handed to the
   client contains no write tool at any step; the instruction is in the
@@ -2905,12 +2927,17 @@ Five decisions shape every FR below, each with the alternative it beat:
   that arrives anyway runs no handler.
 - **FR-66** **The affirm and the edit-and-speak outcomes are each bound
   by one instruction, added to that turn's calls only.**
-  - *Affirm:* reply in five words or fewer — a confirmation that the
-    work is done, that the agent heard or agrees, a greeting returned,
-    or a topic closed — and always with at least a word, because a
-    step with no text is FR-42's empty step and gets the spoken
-    fallback. On a turn that keeps its write tools the instruction
-    reads "after the work".
+  - *Affirm:* close the exchange with any short phrase, five words or
+    fewer ("Okay.", "Done.", "Sounds good.") — after a task or tool
+    call the user gave has finished, or when there is nothing more to
+    say — and always with at least a word (a step with no text is
+    FR-42's empty step and gets the spoken fallback). The phrase is a
+    closing, not a report: it does not by itself mean that work was
+    done. One guard follows from that. On a talk-only turn no change
+    can have been made, so the phrase must not say one was. There FR-65
+    governs: the two are sent as one instruction, and its sentence
+    saying a requested change has not been made is exempt from the
+    five-word bound.
   - *Edit and speak:* make the change, and after it say the requested
     substance aloud.
   - Neither is ever appended to the context (FR-42's wrap-up pattern),
@@ -2921,7 +2948,8 @@ Five decisions shape every FR below, each with the alternative it beat:
 
   Mandated tests: each instruction is in the call's messages on its
   outcome, absent on every other outcome, and absent from the context
-  afterwards.
+  afterwards; on a talk-only affirm turn the instruction sent forbids
+  saying a change was made, and keeps FR-65's "has not been made".
 - **FR-67** **A question left unanswered — by an error, or by no answer
   within `CHECK_TIMEOUT_S` of the end of turn — never holds the turn:
   the rules that need its answer are skipped and the turn proceeds at
@@ -2941,13 +2969,20 @@ Five decisions shape every FR below, each with the alternative it beat:
     the provider is down. A broken check costs the improvement, never
     the conversation.
   - The ceiling bounds a gate, not work: cutting it off loses nothing.
-    It is twice the slowest response time the provider claims, so a
-    healthy provider does not reach it.
+    It is twice the slowest response time the provider claims, and
+    the first bench saw it reached once in 102 requests from the
+    development machine: such a turn runs plain, which is today's
+    behaviour. The value is revisited with the VM's figures (FR-71).
+  - With the questions in one request (FR-62), a failed or late
+    request leaves every asked question unanswered together. One
+    question alone is unanswered only when the response omits it or
+    its answer cannot be read; its status is then `error`.
 
   Mandated tests: a checker that raises yields the plain outcome and
   the WARNING; a checker that never answers lets the turn start at the
-  ceiling; an unanswered DONE with answered WRITE and SPEAK still
-  applies decisions 2 and 3.
+  ceiling; a failed request yields the plain outcome for the whole turn;
+  a response that lacks DONE but carries WRITE and SPEAK still applies
+  decisions 2 and 3.
 - **FR-68** **Each question is sent only the current user turn, the
   unanswered user turns directly before it, and the assistant's last
   reply.** Mechanism:
@@ -2967,9 +3002,11 @@ Five decisions shape every FR below, each with the alternative it beat:
   and older turns, the evidence contains none of them.
 - **FR-69** **The decision model is reached only through an
   `agent/providers.py` factory that returns a provider-neutral
-  checker.** The loop sees one method — question and evidence in,
-  probability of yes out — and no provider type (C-2, the hard
-  constraint on SDK usage). Mechanism:
+  checker.** The loop sees one method — the turn's evidence and the
+  questions its switches enable in; their answers out, each with a
+  status: a probability of yes for DONE and for WRITE, a probability
+  per option for SPEAK — and no provider type (C-2, the hard constraint
+  on SDK usage). One call is one provider request (FR-62). Mechanism:
   - Provider in use: TypeSafe's Jev, through its own SDK
     (`typesafe-sdk`, added to `requirements.txt`), key in
     `TYPESAFE_API_KEY`, model in `CHECK_MODEL`. The default is a pinned
@@ -2988,6 +3025,11 @@ Five decisions shape every FR below, each with the alternative it beat:
     working). With both switches off the key is not needed and no
     checker is built. Mandated test: a switch on with no key fails
     configuration loading; both off with no key loads.
+  - Every environment setting in this section's knob table is listed in
+    `.env.example` with its default, which is how `scripts/sync-env.sh`
+    carries it to the VM. The key may be present while both switches
+    are off — FR-71's response-time bench on the VM needs exactly that
+    — and is then unused by the running app.
   - Implementation MUST begin with a spike against the live API that
     establishes the request and response shape of a yes/no decision
     (where the probability is), whether one request can carry several
@@ -3065,10 +3107,12 @@ Five decisions shape every FR below, each with the alternative it beat:
     per switch.
 - **FR-72** **The system prompt defines three answer modes and has the
   model pick one per turn from the user's words.**
-  1. **Affirm.** Five words or fewer ("Done.", "Great.", "Sounds
-     good.", "All sorted."): confirming that work is done, confirming
-     the agent heard or understood, agreeing, returning a greeting, or
-     closing a topic with nothing more to say. Always at least a word.
+  1. **Affirm.** Any short phrase that closes the exchange, five words
+     or fewer ("Okay.", "Done.", "Sounds good."): when a task or tool
+     call the user gave has finished, or when the conversation has
+     reached a point with nothing more to say — an agreement, an
+     acknowledgement, a greeting returned. It is a closing, not a
+     report that work was done. Always at least a word.
   2. **Summary — the default for anything that needs an answer.** One
      or two sentences, ideally one. A short spoken list only when the
      user needs several items: at most five points, each one clause,
@@ -3109,10 +3153,13 @@ Five decisions shape every FR below, each with the alternative it beat:
   the silence that replaces it is not there, and without either one a
   trailing thought gets advice — the failure this section exists for.
   The prompt is assembled from the switches, so the two change together
-  in one configuration change and never in separate deploys. Mandated
-  tests: with both switches on, the assembled system prompt contains no
-  instruction offering such a reply; with either off, it contains
-  today's rule.
+  in one configuration change and never in separate deploys. The rule
+  leaves as a whole: the clause that offers the sound and the clauses
+  that restrict it ("never twice in a row", "never to a question") go
+  together, since a prompt that forbids a reply it never offered still
+  names it. Mandated tests: with both switches on, the assembled system
+  prompt contains neither "Hmm" nor "Mm-hmm" anywhere; with either off,
+  it contains today's rule unchanged.
 
 | Knob | Default | Where |
 |---|---|---|

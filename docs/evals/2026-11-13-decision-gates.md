@@ -309,22 +309,32 @@ thinking-aloud statement (7 of 7), and the bare confirming "yeah" (3 of
 3), which the option text invites by also listing "answered a question
 the assistant asked".
 
-**Whole outcome:** 57 of the 74 fully labelled turns get the outcome
-their labels call for (mid-thought 0.6, withhold 0.8, edit-and-speak
-0.5). By kind of mistake:
+**Whole outcome, at the knob table's starting values** (mid-thought
+0.5, withhold 0.8, nothing 0.5, affirm 0.5, edit-and-speak 0.6): 65 of
+the 87 labelled turns, the 13 mid-thought turns included, get the
+outcome FR-63 would select for their labels. The 22 that do not, by
+kind:
 
 - thinking aloud answered instead of left alone: 6 (today's behaviour);
 - a confirming "yeah" answered at summary length instead of in a few
   words: 3;
-- "Hold on." and "I'm thinking." silenced as mid-thought instead of as
-  nothing asked: 2 (same result for the user);
-- a spoken request given the edit-and-speak instruction: 2, plus one
-  plain edit (rows 59, 87, 51) — the one mistake that could cause an
-  unwanted write, and the reason `CHECK_BOTH_MIN` starts at 0.6, where
-  it still catches only one of the two real edit-plus-ideas turns;
+- a mid-thought turn answered: 3 of the 13;
+- "Hold on.", "I'm thinking." and one statement silenced as mid-thought
+  instead of as nothing asked: 3 (the same result for the user);
+- a spoken request that kept its write tools: 2 (today's behaviour);
+- the edit-and-speak instruction on a turn that did not ask for both:
+  2, one plain edit and one spoken request (rows 51, 59). This is the
+  one mistake that could cause an unwanted write;
+- an edit-plus-ideas turn left plain: 1 of the 2 in the set (row 75,
+  p_write 0.54). At 0.5 it would be caught, at the price of one more
+  wrong instruction (row 87);
 - one real request silenced (row 40); one answer cut to a few words
-  (row 99); one spoken request left plain (row 96).
+  (row 99).
 - No edit request lost its tools.
+
+(An earlier version of this section gave 57 of 74 at mid-thought 0.6
+and edit-and-speak 0.5, and left the mid-thought turns out of the
+count. The figures above replace it.)
 
 **Haiku reference: dropped as a yardstick for now.** With its raw
 replies kept, it answered NO to "did the user ask for an edit" on plain
