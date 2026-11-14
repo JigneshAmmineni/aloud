@@ -16,13 +16,16 @@ advance: the numbers below are recorded and read, not gated.
 
 - The three questions asked at each end of turn (FR-62): DONE (has the
   user finished, or are they mid-thought?), WRITE (did they ask for
-  something to be written or changed?), SPEAK (do they expect something
-  spoken back?).
-- The five outcomes those answers select (FR-63): silent (mid-thought),
-  silent (nothing asked), talk only, edit and speak, plain.
-- The answer modes (FR-72): 1 silent execution, 2 summary in one or two
-  sentences, 3 explain or recite on an explicit ask. "Hmm." is gone from
-  the prompt (FR-73).
+  something to be written or changed?), SPEAK (do they expect nothing,
+  a few words, or a real answer?).
+- What those answers decide (FR-63): silence (mid-thought, or nothing
+  asked), a talk-only turn, the affirm instruction, the edit-and-speak
+  instruction, or a plain turn.
+- The answer modes (FR-72): 1 affirm in five words or fewer, 2 summary
+  in one or two sentences, 3 explain or recite on an explicit ask.
+  "Hmm." is gone from the prompt while both checks are on (FR-73).
+- The one-second pause between two spoken steps of one turn, which
+  replaces the dropped "Done." (FR-43 amended).
 - The first-sentence cut (FR-61 amended).
 
 ## Part 1 — early bench on recorded turns (owner's own turns only)
@@ -89,13 +92,13 @@ run 2 script except for the expected columns):
 | 1 | (connect) | not checked | — | a few words of greeting |
 | 2 | a plain factual question | plain or talk only | 2 | one or two sentences, no document |
 | 3 | thinking aloud, trailing off ("…maybe two nights? Probably…") | silent (mid-thought) | — | nothing spoken; the indicator returns to Listening |
-| 4 | "Create a new document called … with what I've said so far." | plain | 1 | one document; "Done." |
-| 5 | "Add that we need to book the campsite by Friday." | plain | 1 | edit without asking; "Done." |
+| 4 | "Create a new document called … with what I've said so far." | plain | 1 | one document; a few words of confirmation |
+| 5 | "Add that we need to book the campsite by Friday." | plain | 1 | edit without asking; a few words of confirmation |
 | 6 | "Give me a quick summary of the plan." | talk only | 2 | spoken, one or two sentences, nothing written |
-| 7 | "Organize the plan into three sections: …" | plain | 1 | restructured; "Done." |
+| 7 | "Organize the plan into three sections: …" | plain | 1 | restructured; a few words of confirmation |
 | 8 | "What am I missing?" | talk only | 2 | spoken, no write; a short list is allowed here |
 | 9 | "Poke holes in this plan." | talk only | 2 | spoken critique, no write |
-| 10 | "Rename the document to …" | plain | 1 | one rename; "Done." |
+| 10 | "Rename the document to …" | plain | 1 | one rename; a few words of confirmation |
 | 11 | "Which of my documents mention a budget?" | talk only | 2 | silent search (a read tool on a talk-only turn), then the answer |
 | 12 | "Change the line about X to Y." (no such line) | plain | 2 | one short sentence that it could not; no tool names |
 | 13 | "Actually, never mind. Let's go back to the trip." | silent (nothing asked) or plain | 2 | no tool; silence is acceptable |
@@ -114,7 +117,7 @@ Rows for this change:
 | 21 | "Split the list into client side and server side, and give me your ideas for each." | edit and speak | 1 then 2 | the edit lands AND the ideas are spoken |
 | 22 | "What do you think of that split?" | talk only | 2 | spoken opinion, one or two sentences, no write |
 | 23 | "Should we add a budget section? What would go in it?" | talk only | 2 | spoken answer; nothing written, and it does not claim to have written anything |
-| 24 | "Add a budget section with those." | plain | 1 | the edit lands; "Done." |
+| 24 | "Add a budget section with those." | plain | 1 | the edit lands; a few words of confirmation |
 | 25 | "Explain the schedule section in detail." | talk only | 3 | a full explanation |
 | 26 | "Read me the gear section." | talk only | 3 | the section read word for word |
 | 27 | "Give me five things I should double-check before leaving." | talk only | 2 | a spoken list: at most five points, one clause each, no bullet words |
@@ -122,6 +125,11 @@ Rows for this change:
 | 29 | say "mm-hmm" while the agent is mid-reply | silent (nothing asked) | — | recorded, not gated: the agent stops and does not resume (accepted limit); note how it feels |
 | 30 | a garbled or half-heard instruction | plain | 2 | "say that again?" in some form; never "Hmm." |
 | 31 | a real request, immediately after row 19's silence | plain or talk only | per row | the reply uses the earlier turn too if it was part of the thought, and ignores it if not |
+| 32 | an edit request on which the agent narrates first ("I'll add that…") | plain, affirm | 1 | the narration, a pause of about a second, then the confirmation; neither is dropped |
+| 33 | after the agent checks its understanding ("…is that right?"): "Yeah." | talk only, affirm | 1 | five words or fewer, not a new paragraph |
+| 34 | "Hi." mid-session | talk only, affirm | 1 | a short greeting back |
+| 35 | thinking aloud about a plan, several sentences, nothing asked | silent (nothing asked) | — | nothing spoken |
+| 36 | answer a question the agent asked, with new information | talk only | 2 | one or two sentences back |
 
 Also run once with each switch off in turn (rows 3, 6, 19 and 21 are
 enough): with a switch off, its outcomes must not occur and the agent
@@ -141,6 +149,10 @@ must behave as it did before.
 - Row 21: both halves, every time it is tried.
 - No reply to a mode-2 row runs past two sentences, the list rows
   excepted. Record the sentence count per row.
+- No reply to a mode-1 row runs past five words. Record the words.
+- Wherever two steps of a turn both spoke (row 32 and any other), the
+  pause between them is audible, about a second, and nothing the agent
+  wrote was left unspoken.
 - No turn's transcript contains "Hmm." or "Mm-hmm." from the agent
   (both switches on; with a switch off, today's rule is back by
   design, FR-73).
@@ -234,5 +246,103 @@ inspected.
    recordings. Both results are rough; the live run (part 3) is where
    they get tested properly.
 
-Next: the owner's label review, then run 2 with the reworded DONE and
-SPEAK questions and a fixed reference column.
+### Label review with the owner — 2026-11-14
+
+Settled one case at a time. The rulings, which FR-62 now carries as the
+definition of SPEAK's three options:
+
+- Thinking aloud with nothing asked: nothing expected (silence).
+- Answering a question the agent asked, with new information: an
+  answer is expected.
+- A "yeah" that only confirms the agent understood: a few words
+  (affirm), not silence.
+- A greeting to the agent: a few words back.
+- A plain edit request: a few words of confirmation.
+- The six real requests run 1 silenced (rows 33, 34, 40, 54, 77, 86)
+  were all finished: the labels stand, the model was wrong.
+
+SPEAK's labels became three values (nothing 15, affirm 18, answer 44,
+unsure 25). The same session changed the design: mode 1 is "affirm",
+SPEAK is a three-way choice, and a one-second pause between spoken
+steps replaces the rule that dropped "Done.".
+
+### Part 1, run 2 — 2026-11-14, same machine, reviewed labels
+
+DONE reworded for speech-recogniser text; SPEAK asked as a three-way
+choice; WRITE unchanged. 102 turns, no errors.
+
+**Response time:** p50 115 ms, p95 159 ms, one request of 102 over a
+second (1,130 ms).
+
+**DONE** (62 real requests, 13 mid-thought turns):
+
+| Stay silent when 1 − p_done ≥ | real requests silenced | mid-thought turns answered |
+|---|---|---|
+| 0.4 | 2 | 2 |
+| 0.5 | 1 | 3 |
+| 0.6 | 1 | 4 |
+| 0.7 | 1 | 4 |
+| 0.8 | 0 | 5 |
+
+The rewording did what it was for: five of the six rough-speech
+requests are no longer silenced (the one left, row 40, has a garbled
+ending). It cost some mid-thought catches: the fragments now answered
+(rows 24, 30, 35, 100) read as short complete phrases. Run 1's best
+point silenced 5 real requests to miss 1 mid-thought turn; run 2 at 0.4
+silences 2 and misses 2.
+
+**WRITE:** as in run 1. At 0.8, no edit request of 16 is withheld and
+59 of 63 no-edit turns are.
+
+**SPEAK**, the owner's label against the model's choice:
+
+| Labelled | nothing | affirm | answer |
+|---|---|---|---|
+| nothing (15) | 8 | 0 | 7 |
+| affirm (18) | 0 | 14 | 4 |
+| answer (44) | 0 | 1 | 43 |
+
+The three-way choice fixes what run 1 could not do: plain edit
+requests land on affirm (13 of 14) and listening sounds on nothing (all
+8). Two groups are still judged as wanting an answer: every
+thinking-aloud statement (7 of 7), and the bare confirming "yeah" (3 of
+3), which the option text invites by also listing "answered a question
+the assistant asked".
+
+**Whole outcome:** 57 of the 74 fully labelled turns get the outcome
+their labels call for (mid-thought 0.6, withhold 0.8, edit-and-speak
+0.5). By kind of mistake:
+
+- thinking aloud answered instead of left alone: 6 (today's behaviour);
+- a confirming "yeah" answered at summary length instead of in a few
+  words: 3;
+- "Hold on." and "I'm thinking." silenced as mid-thought instead of as
+  nothing asked: 2 (same result for the user);
+- a spoken request given the edit-and-speak instruction: 2, plus one
+  plain edit (rows 59, 87, 51) — the one mistake that could cause an
+  unwanted write, and the reason `CHECK_BOTH_MIN` starts at 0.6, where
+  it still catches only one of the two real edit-plus-ideas turns;
+- one real request silenced (row 40); one answer cut to a few words
+  (row 99); one spoken request left plain (row 96).
+- No edit request lost its tools.
+
+**Haiku reference: dropped as a yardstick for now.** With its raw
+replies kept, it answered NO to "did the user ask for an edit" on plain
+edit requests (11 of 16) and silenced 9 real requests, at a median of
+1,059 ms. Whether that is Haiku or the harness (three parallel calls
+through one client) is not established, and it is not worth
+establishing before the build: Jev clears the speed the design needs by
+a factor of eight.
+
+**Findings.**
+
+1. The design's two assumptions hold on this set: Jev answers in about
+   an eighth of a second, and it is right about the turn's outcome on
+   three turns in four with first-draft wording, never taking the edit
+   tools from a turn that needed them.
+2. The remaining misses are wording, not thresholds: thinking aloud
+   read as wanting an answer, and the confirming "yeah". Both go in the
+   next wording pass, with the caution that 100 turns is a small set to
+   tune against.
+3. Mid-thought has 13 examples and edit-plus-ideas has 2. Neither
+   threshold should be trusted from this file; the live run sets them.

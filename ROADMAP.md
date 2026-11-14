@@ -196,6 +196,14 @@ below, the spec is the state and these notes are the journey:
   again when they want an answer. "Hmm." leaves the prompt while both
   checks are on (with either off, today's rule stays, so a trailing
   thought is never answered with advice in between).
+- **Changed in the label review, 2026-11-14:** mode 1 is "affirm" (five
+  words or fewer: "Done.", "Great.", "Sounds good."), the spoken
+  question is a three-way choice (nothing / affirm / answer) so the
+  mode has a mechanism behind it, and the PR #25 rule that dropped a
+  "Done." is removed in favour of a one-second pause between two
+  spoken steps of a turn. Dropping the sentence before a tool call
+  was considered and rejected by the owner as a hack that depends on
+  what the model says; the narration's verbosity is accepted for now.
 - **Two leans:** toward silence when unsure whether the user is done;
   toward allowing the edit when unsure whether one was asked for.
 - **The create gate stays on Haiku** (3.3.1 below is the follow-up),
@@ -870,7 +878,9 @@ forgotten:
   One acknowledgment per piece of work (2026-11-12, enforced in the
   loop): no "Done." directly after a sentence the agent just spoke,
   and none in the middle of chained work; a turn that worked
-  silently still ends with one.
+  silently still ends with one. (Shipped rule until §4.15 is built:
+  FR-43 as amended replaces it with a one-second pause and drops
+  nothing.)
 - **Create-gate redirection (FR-60)** — a blocked create silently picks
   the existing document from recent conversation (usually the one under
   discussion), writes without asking; only with no fitting document
