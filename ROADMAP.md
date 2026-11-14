@@ -173,6 +173,46 @@ The rules:
 
 ### 3.3 Thinking-partner mode — proactive reasoning & ambient capture
 
+**Specced 2026-11-13 as REQUIREMENTS.md §4.15 (FR-62–FR-73), from a
+design session with the owner.** Where the spec departs from the notes
+below, the spec is the state and these notes are the journey:
+
+- **Jev first, not Haiku.** The checks run on TypeSafe's Jev behind a
+  provider factory; Haiku is only a reference column in the bench.
+  Reason: the checks sit in front of every turn, and Haiku measured
+  0.7–1.9s per call.
+- **Wait, then call**, not binding at dispatch: the main model is
+  called only after the answers are in, so a turn the agent should
+  not take costs no Claude call. Starting Claude at once and applying
+  the verdict to its output was considered and rejected (wasted
+  tokens, a refusal round, more moving parts). It stays the fallback
+  if only a slow model turns out accurate enough.
+- **Keep-listening is a text check after Flux's end of turn**, not an
+  audio-layer change. DuplexJev is ruled out (non-commercial weights,
+  needs a GPU). `FLUX_EOT_THRESHOLD` is untouched.
+- **Silence, with no time limit and no "Hmm."** for a mid-thought turn
+  and for a turn that asks for nothing. No canned replies. The owner
+  wants the session to stay open through long gaps; the user asks
+  again when they want an answer. "Hmm." leaves the prompt entirely.
+- **Two leans:** toward silence when unsure whether the user is done;
+  toward allowing the edit when unsure whether one was asked for.
+- **The create gate stays on Haiku** (3.3.1 below is the follow-up),
+  so there is no consolidated decision bundle yet.
+- **Answer modes** are FR-72, as instructions to Claude; the summary
+  bound is tightened to one or two sentences, ideally one. Claude, not
+  the checks, picks between summary and explanation.
+- **Accepted limit, not on the roadmap by the owner's choice:** a
+  listening sound ("mm-hmm") while the agent is talking still stops
+  it, and the reply is not resumed.
+- **Parked:** preparing the context, or looking documents up, while
+  the user is still speaking. The checks are plain text-in,
+  verdict-out calls so that this stays possible (feature 5, feature
+  10).
+- **Before the spec's review rounds are spent:** a throwaway bench of
+  Jev on about 100 of the owner's recorded turns, as soon as there is
+  an API key — the design rests on a response time and an accuracy
+  nobody has measured from here.
+
 **Decisions 2026-11-12 (research: docs/notes/turn-decision-jev.md):**
 the per-turn INTENT decider (spoken-substance? × write-asked? → ack /
 silent-execute / discuss-with-read-tools / both) runs on **Claude Haiku
@@ -269,6 +309,21 @@ tool):
   CREATES are not) and against barge-in (writes mid-speech). Candidate
   shape: a capture mode the user toggles by voice ("take notes while I
   talk"), scoped to one target document.
+
+### 3.3.1 New-document check on Jev — the PR after the decision gates
+
+Owner decision 2026-11-13 (decision-gates spec grilling): the FR-60
+create gate stays on Haiku, untouched, while the decision gates ship, so
+a problem in their testing has one possible cause. The PR after that
+considers moving the gate's "did the user explicitly ask for a new
+document?" judgement to Jev (Haiku measured 0.7–1.9s per call in our
+sessions; Jev about 0.1s by one independent measurement, not yet
+measured from our VM). Conditions: Jev has proven itself in production
+on the two new checks; the judgement is replayed on the real gate rows
+(`llm_traces` where purpose='gate') plus near-miss cases before the
+switch; the gate keeps its fail-closed enforcement point. Spec-time: its
+own call when a create arrives, as now, or a third question asked
+alongside the two pre-call checks (the consolidation end-state in 3.3).
 
 ### 3.4 Playback-aware interruption context — shipped as FR-61 (§4.14)
 
@@ -658,6 +713,18 @@ docs/evals/2026-11-12-filler-removal.md (the filler line's removal,
 whose script covers the same turns). The list, so nothing is
 forgotten:
 
+- **Sorted 2026-11-13 (decision-gates spec).** Of the carried list
+  below, these are now specced and leave this list when §4.15 is
+  built: (1) reply length (FR-72), (9) the first-sentence cut (FR-61
+  amended; its "how much was heard" column is not), (10) the trailing
+  thought (FR-62–FR-64), and from (11) the "Done." vocabulary and the
+  after-a-tool-call ordering (FR-43 amended, FR-72). The rest wait for
+  a cleanup PR of their own, none of them about what the user hears:
+  (2) and (6) narration and when it plays, (3) judge latency (see
+  3.3.1), (4) the `LLM_EFFORT=low` A/B, (5) the wrap-up instruction's
+  position, (7) the invisible server-side fallback, (8) the refusal
+  category, and from (11) the `tool_first` advisory flag and the
+  admin page's missing vitest coverage.
 - **Carried from the first Claude session (2026-11-12) into the
   decision-gates PR:** (1) replies run long — give the prompt a
   concrete bound (two or three sentences, then offer to go deeper)
@@ -748,7 +815,9 @@ forgotten:
 
 - **Questions and instructions never get "Hmm."** — lean talkative over
   unresponsive: a QUESTION always gets a real answer, a misheard one
-  gets "say that again?", and never two "Hmm."s in a row.
+  gets "say that again?", and never two "Hmm."s in a row. (The
+  shipped rule until §4.15 is built; FR-73 then removes "Hmm." from
+  the prompt altogether and FR-64's silence takes its place.)
 - **Silent tool work** — no narrated reasoning, steps, or workflow
   ("let me read the document", "okay I have the content").
 - **Minimal confirmations** — never "it's on your screen", "I have

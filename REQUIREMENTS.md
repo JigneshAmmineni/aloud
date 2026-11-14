@@ -41,7 +41,7 @@ User explicitly asks for the agent's opinion, alternatives, or next steps. The a
 ### 4.1 Voice Interaction
 - **FR-1** The app must support hands-free voice input and voice output. No typing required.
 - **FR-2** The user must be able to start a session with a single tap and begin speaking immediately.
-- **FR-3** Turn detection is automatic via Voice Activity Detection (VAD). The agent responds when the user stops speaking; no button press is required to signal end-of-turn.
+- **FR-3** Turn detection is automatic via Voice Activity Detection (VAD). The agent's turn begins when the user stops speaking, and whether it then replies is §4.15's decision; no button press is required to signal end-of-turn.
 - **FR-4** Voice output must feel natural and conversational, not robotic.
 
 ### 4.2 Session Controls & UI
@@ -51,7 +51,7 @@ User explicitly asks for the agent's opinion, alternatives, or next steps. The a
   - **Active session:** red "End" button. Tapping ends the session.
 - **FR-6** While a session is active, the UI must indicate the current state via an animated waveform bar below the button:
   - **Listening** — waveform animates to the user's mic amplitude (user sees their own voice as bars).
-  - **Thinking** — three pulsing dots (typing-indicator style).
+  - **Thinking** — three pulsing dots (typing-indicator style). A turn the agent chooses not to answer (FR-64) returns to Listening.
   - **Speaking** — waveform animates to the agent's audio amplitude, in a distinct color from the listening state.
 
 ### 4.3 Agent Behavior
@@ -315,7 +315,8 @@ principles govern every FR below:
   Required dimensions per event: `user_id`, `session_id`, `turn_id`
   (nullable — session-level events like the STT record have none),
   timestamp, `stage` (the event's *source* — `stt` | `llm` | `tts` |
-  `artifact`; a source label, not strictly a pipeline stage), `unit`,
+  `artifact` | `check`, the last being FR-70's one event per checked
+  turn; a source label, not strictly a pipeline stage), `unit`,
   `quantity`, and a nullable `detail` field for event-specific metadata
   (the document `kind` — or `format` for uploaded documents — lives
   here; never content). `turn_id` is what makes
@@ -388,7 +389,9 @@ principles govern every FR below:
   worst turn latency); per session, a turn-by-turn table joining latency
   (FR-33) with that turn's usage and estimated cost (FR-32's `turn_id`
   events) — "this question cost 2,400 tokens and took 1.8s" — plus session
-  usage totals. The drill-down answers "user X says it broke at 3pm"
+  usage totals. Each turn also shows its §4.15 outcome (FR-70), so a
+  turn the agent chose not to answer is listed, without a latency,
+  rather than missing. The drill-down answers "user X says it broke at 3pm"
   without ever showing what was said (NFR-9).
 - **FR-37** Admin overview tab, the at-a-glance view: live sessions right
   now (in-process count; resets on deploy — accepted), sessions and unique
@@ -528,14 +531,16 @@ engine (5) replaces this feature's deliberately-trivial context assembly,
 and memory (6) plugs into the seams both establish. Three design principles
 govern every FR below:
 
-1. **One hot-path LLM call in the common case.** The turn's critical path
-   (end-of-speech → first audio, NFR-1) contains exactly one LLM call — the
-   one whose first streamed sentence goes to TTS. Everything else is either
-   deterministic code (context assembly, token math — microseconds, no LLM)
-   or overlaps speech that is already playing. A "decider" LLM call in
-   front of the speaking call is explicitly rejected: it is serial latency
-   with no offsetting benefit when the speaking model already
-   selects tools and produces text in the same call.
+1. **One main-model call on the hot path in the common case.** The turn's
+   critical path (end-of-speech → first audio, NFR-1) contains exactly one
+   call to the main model — the one whose first streamed sentence goes to
+   TTS. In front of it sit only deterministic code (context assembly,
+   token math — microseconds, no LLM) and §4.15's turn checks: small,
+   parallel yes/no questions to a decision model, with a hard ceiling on
+   their wait. They are the one serial cost this principle admits, and
+   what they buy is stated there: a turn the agent should not take costs
+   no main-model call at all. Everything else overlaps speech that is
+   already playing.
 2. **The loop is the brain; Pipecat stays the chassis.** Transport, audio,
    STT/turn detection, TTS, sentence aggregation, and barge-in interruption
    propagation remain Pipecat's — solved problems, irrelevant to agent
@@ -561,7 +566,9 @@ FR-7 still governs: the agent acts when the user asks.
   text deltas downstream *as they arrive*; if the step ends with tool
   calls, the loop executes them (concurrently when there is more than one),
   appends the calls and their results to the context, and begins the next
-  step; a step ending with text only ends the turn. The **greeting** is a
+  step; a step ending with text only ends the turn. Before a user turn's
+  first step, §4.15's checks decide whether any step runs and what it
+  may do. The **greeting** is a
   named entry point, not an accident: on client connect the loop runs one
   step with no user turn appended (today's `LLMRunFrame` semantics) — the
   agent speaks first — and that call is made with **`tool_choice: none`**:
@@ -632,7 +639,13 @@ FR-7 still governs: the agent acts when the user asks.
   said, the turn ends there without a fallback. Anywhere else the
   confirmation is spoken: after a turn that worked silently, after
   silent steps in between, and always in the forced wrap-up call
-  (FR-42). Whitespace is not speech. After a failure the context keeps
+  (FR-42). Whitespace is not speech. The rule recognises "Done." and
+  "All done." only, which is why FR-72 fixes the model's confirmation
+  to that word; any other closing word ("All set.") is spoken where it
+  stands. **Recorded bound:** a confirmation written after a tool call
+  in the same step is spoken where it falls, mid-work; the Claude
+  client does not order a step's output that way, the Gemini swap-back
+  can. After a failure the context keeps
   only what was spoken. The trace row keeps the model's full output. The
   system prompt directs the model to work without narrating its steps. Mandated
   tests: a silent tool round pushes no text and stamps only that
@@ -1005,8 +1018,9 @@ FR-7 still governs: the agent acts when the user asks.
   by that feature's own clause — the loop is *built through* its trace,
   not traced after the fact. Every LLM call the loop makes writes one
   row to an `llm_traces` table: `session_id`, `turn_id`, step number,
-  timestamp, model, purpose (`turn` | `greeting` | `wrap_up` | `gate` — exactly
-  the calls that exist; the FR-42 fallback is a canned line, not an LLM
+  timestamp, model, purpose (`turn` | `greeting` | `wrap_up` | `gate` |
+  `check` — exactly the calls that exist; a `check` row is one per
+  checked turn, not one per question, FR-70; the FR-42 fallback is a canned line, not an LLM
   call, so it can have no trace row), finish reason (FR-48's vocabulary,
   `interrupted` included — the cut-off turns are precisely the ones a
   trace is for), prompt/completion tokens, TTFB ms, and duration
@@ -1698,8 +1712,8 @@ asking to delete by voice.
   ordering, structured-JSON results, logs carrying names/ids/durations
   and never content, the create transaction (row + usage event, one
   commit), the announce-through-emit-callback path, and FR-12's verbal
-  contract (confirm briefly, never read content aloud, act only when
-  asked). The tool contracts below are deliberately modeled on
+  contract (confirm briefly, read content aloud only on an explicit
+  ask — FR-72's mode 3 — and act only when asked). The tool contracts below are deliberately modeled on
   Anthropic's own file tools (the Agent SDK's Read/Edit, the API
   text-editor and memory tools): exact-match editing, uniqueness with
   an explicit `replace_all`, line-numbered paged reads, quoted
@@ -2608,7 +2622,9 @@ deliberately unchanged (FR-56 states local verification and why).
     each), the assistant's immediately preceding reply — what it
     last said before the user's latest turn, whether or not that
     step also called a tool; included
-    only when the user's latest turn directly follows it, and
+    only when no other assistant reply stands between it and the
+    user's latest turn (consecutive user turns, which FR-64
+    produces, count as one), and
     omitted otherwise (it is the referent a bare "yes" answers, and
     the prompt tells the judge so: an older reply would let an
     unrelated "yes" confirm an offer the user declined) — and the
@@ -2670,32 +2686,366 @@ deliberately unchanged (FR-56 states local verification and why).
     no-op (every ordinary speech start broadcasts an interruption);
     otherwise the entry truncates to the longest matching word-prefix
     (15-char floor — shorter is coincidence) plus FR-46's cut-off
-    suffix, and an entry none of whose audio played keeps its INTACT
-    text with the suffix appended — amendment never destroys content.
+    suffix. An entry none of whose sentences was released is the
+    first-sentence cut below.
+  - **A cut inside the entry's first sentence.** When audio played
+    this turn and none of the entry's sentences was released, the cut
+    landed before its first sentence finished. If the session has seen
+    at least one released sentence — the signal is known to work —
+    the entry is cut to its first sentence (the first one FR-46's
+    synthesis stream recorded for it) plus the cut-off suffix: the
+    user heard part of that sentence and none of the rest (observed
+    2026-11-12: a four-sentence answer heard for one second stayed in
+    the context whole, and the agent then insisted it had said it).
+    This holds whether or not earlier audio of the same turn — a
+    sentence spoken before a tool call — was released. What is
+    dropped was never played; when the first sentence cannot be
+    identified, the entry keeps its intact text with the suffix.
   - **Recorded bounds (review rounds 2–3), both no-amend exits:** (i)
     this entry's sentences played but none prefix-match — the TTS
     sanitizer rewrites markdown/identifiers before synthesis, so the
     raw entry can never match the spoken form; counted as heard (the
     FR-46 over-approximation direction) with a `context.playback_
-    mismatch` WARN. (ii) The WHOLE buffer is empty although audio
-    played this turn — a broken transport signal; no-op with one
+    mismatch` WARN. (ii) Audio played this turn but no sentence has
+    been released at any point in the session — the signal itself is
+    unproven, so the entry is left whole: no-op with one
     `fr61.signal_suspect` WARN per session, never a mark on every turn.
-    An entry with no releases of its OWN while earlier audio played
-    (a turn that spoke before its tool call, cut inside the closing
-    reply's first sentence)
-    is NOT this case: it annotates its intact text — the direction
-    amendment always errs.
+    This is the one case where a first-sentence cut is still recorded
+    as fully heard: a session's first spoken reply.
   - Accepted over-approximation, same direction as FR-46: the sentence
-    mid-play when the cut lands counts as heard.
+    mid-play when the cut lands counts as heard, and so does the
+    sentence a first-sentence cut keeps.
+  - Mandated tests: a reply cut before its first sentence is
+    released, in a session that has seen releases, keeps only that
+    sentence with the mark, with and without earlier audio in the
+    same turn; the same cut on a session's first reply changes
+    nothing and logs the WARN once.
   - A context whose last message is no longer the assistant's, or whose
     entry already carries the mid-generation mark, is never amended.
+
+### 4.15 Turn checks — whether the agent takes its turn, and what the turn may do
+
+Purpose: Deepgram's end of turn says the user stopped talking. It does
+not say the user is finished, and it does not say what the turn asks
+for. Two recorded failures are what this section exists for
+(docs/evals/2026-11-12-filler-removal.md): the agent answered a trailing
+thought ("Probably…") with advice, and "create two lists, and give me
+your ideas" produced the lists with the ideas written into the document
+instead of spoken. Both are decisions the main model makes implicitly
+today; this section makes them explicit, cheap, and bound to mechanism.
+
+Five decisions shape every FR below, each with the alternative it beat:
+
+1. **Text checks after the end of turn, not a change to turn
+   detection.** `FLUX_EOT_THRESHOLD` and the audio layer are untouched.
+   Rejected: an audio-level turn model (the candidate, DuplexJev, has
+   non-commercial weights and needs a GPU the deployment does not have).
+2. **Wait, then call.** The answers are in before the main model is
+   called, so a turn the agent should not take costs no main-model call
+   at all. Rejected: starting the main call at once and applying the
+   answers when its output arrives — no added wait, but every wrongly
+   started reply costs its input tokens, a talk-only turn needs a
+   refusal round, and the edit-and-speak case needs a follow-up step.
+   The price accepted: one check's duration on every turn, bounded by
+   FR-67's ceiling. §4.10 principle 1 is amended to match.
+3. **Silence has no time limit.** The product is meant to stay open
+   while the user moves around and talks in bursts; the user asks again
+   when they want an answer. Rejected: replying on its own after N
+   seconds of quiet, and a spoken "Hmm." in place of silence.
+4. **Two leans, on purpose.** Silence leans toward silence (asking
+   again is cheaper than cutting off a wrong reply). Withholding the
+   edit tools leans toward allowing (editing by voice is the core
+   feature, so a wrongly blocked edit is the costlier mistake).
+5. **The create gate keeps its own judge.** FR-60's model, prompt and
+   fail-closed dispatch point are unchanged; one clause of its evidence
+   rule is widened so that FR-64's consecutive user turns do not hide
+   the reply a "yes" answers.
+
+- **FR-62** **At the end of every user turn, before the main model is
+  called, the loop asks a decision model three yes/no questions about
+  the turn.** The questions:
+  - DONE — has the user finished what they were saying, as opposed to
+    pausing mid-thought?
+  - WRITE — did the user ask for something to be written or changed in
+    a document?
+  - SPEAK — does the user expect something spoken back: an answer,
+    ideas, an opinion?
+
+  Each answer is a probability of yes between 0 and 1. Mechanism:
+  - The questions are sent at the same moment, one request each unless
+    FR-69's spike shows the provider answers several in one request, so
+    the loop's wait is the slowest answer and not the sum.
+  - The user's text is appended to the context (FR-44) before the
+    questions are sent, whatever the outcome.
+  - The greeting has no user turn and is never checked.
+  - The wait is part of the turn's task: an interruption while answers
+    are pending cancels them through FR-46's path (nothing was spoken,
+    no tool ran), and the turn's text stays in the context as an
+    unanswered user turn.
+  - Two switches: `TURN_CHECK_DONE` governs DONE, `TURN_CHECK_MODE`
+    governs WRITE and SPEAK together. A question whose switch is off is
+    not sent (FR-71 sets the defaults).
+- **FR-63** **The answers select exactly one of five outcomes for the
+  turn.** Evaluated in this order, with `p_x` the probability of yes:
+  1. `1 − p_done ≥ CHECK_MID_THOUGHT_MIN` → **silent (mid-thought)**.
+  2. `1 − p_write ≥ CHECK_NO_WRITE_MIN` and
+     `1 − p_speak ≥ CHECK_NO_SPEAK_MIN` → **silent (nothing asked)**.
+  3. `1 − p_write ≥ CHECK_NO_WRITE_MIN` otherwise → **talk only**.
+  4. `p_write ≥ CHECK_BOTH_MIN` and `p_speak ≥ CHECK_BOTH_MIN` →
+     **edit and speak**.
+  5. Anything else → **plain**: the turn runs exactly as it would
+     without the checks. This is where a plain edit lands (the model
+     makes it and confirms in FR-72's mode 1) and where every unsure
+     answer lands.
+
+  The loop acts as soon as the outcome is determined: a mid-thought
+  verdict does not wait for the other two answers. With
+  `TURN_CHECK_DONE` off, rule 1 is skipped; with `TURN_CHECK_MODE` off,
+  rules 2–4 are skipped. The thresholds are settings, tuned from FR-71's
+  bench and then by ear in live testing; the defaults in the knob table
+  are starting values, and their asymmetry is decision 4: the silence
+  thresholds sit at the midpoint or below it, the withholding threshold
+  well above it. Mandated tests: each rule's boundary on both sides; the
+  order (a mid-thought answer wins over any mode answers); each switch
+  off.
+- **FR-64** **On either silent outcome the main model is not called and
+  nothing is spoken until the user's next turn; the silence has no time
+  limit.** Mechanism:
+  - No step runs, no assistant entry is appended, and no fallback line
+    is spoken (FR-42's empty-step rule is about a model response; there
+    is none here).
+  - The user's text stays in the context as a user message, and the
+    next turn's text is appended as a further user message. Consecutive
+    user messages are sent as they are and the provider reads them as
+    one (FR-48; probed live on both Claude models, and
+    `scripts/smoke_llm.py` covers the shape), so when the model is next
+    called it sees the whole thought. Transcript logging and turn
+    numbering are unchanged: one turn per end of turn.
+  - The turn still ends for bookkeeping: the metrics buffer clears and,
+    having no first audio, the turn writes no `turn_metrics` row (FR-33,
+    FR-47).
+  - The client is told with one server message, `turn.silent`, so
+    FR-6's indicator returns from Thinking to Listening.
+  - **Recorded bounds, both accepted by the owner:** (i) a wrong silent
+    verdict on a finished request leaves the user unanswered until they
+    speak again — nothing tells them, the lean (decision 4) makes it the
+    preferred mistake, and FR-70's records make its rate measurable.
+    (ii) A listening sound ("mm-hmm") made while the agent is speaking
+    still stops the agent (FR-13) and is then judged nothing-asked: the
+    rest of that reply is not resumed. With FR-72's one-or-two-sentence
+    replies there is little to lose, and telling such a sound from a
+    real interruption is turn-detection work, not this section's.
+
+  Mandated tests: a silent outcome makes no main-model call, pushes no
+  text frame, appends no assistant entry, and emits `turn.silent`; the
+  next turn's request carries both user messages in order; the session
+  takes the next turn normally.
+- **FR-65** **On the talk-only outcome no write tool is available to
+  the model for that turn; read tools always are.** Mechanism:
+  - Every step of that turn, the forced wrap-up step included, declares
+    only the registry tools whose `is_write` is false (FR-45). Reads are
+    never withheld: a discussion should be informed by the documents.
+  - One instruction is added to each of that turn's calls and never
+    appended to the context (FR-42's wrap-up pattern): the model cannot
+    edit documents on this turn, must not say it changed anything, and,
+    if the user did ask for a change, says the change has not been made.
+  - A call naming a withheld tool is never executed: it gets a refusal
+    result and the turn continues (defense in depth — the context still
+    shows the model its own earlier calls to that tool).
+  - FR-60's gate is not involved: `create_document` is a write tool,
+    so on a talk-only turn it is not declared and the gate is not
+    reached.
+  - Implementation MUST begin by proving against the live provider that
+    a request whose history holds calls to tools absent from the
+    declared set is accepted. If it is rejected, the binding moves to
+    dispatch: all tools stay declared and a write call on a talk-only
+    turn is refused with a steering result (FR-60's shape); the
+    instruction is unchanged.
+
+  Mandated tests: on a talk-only turn the tool list handed to the
+  client contains no write tool at any step; the instruction is in the
+  call's messages and absent from the context afterwards; a write call
+  that arrives anyway runs no handler.
+- **FR-66** **On the edit-and-speak outcome the model is told, for that
+  turn only, to make the change and also say the requested substance
+  aloud.** One instruction is added to each of that turn's calls and
+  never appended to the context. All tools stay declared. Mandated
+  test: the instruction is in the call's messages and absent from the
+  context afterwards.
+- **FR-67** **A question left unanswered — by an error, or by no answer
+  within `CHECK_TIMEOUT_S` of the end of turn — is treated for that
+  turn as if its switch were off, and the turn proceeds at once.** An
+  unanswered DONE means the turn is taken as finished; an unanswered
+  WRITE or SPEAK means the plain outcome (nothing withheld, no
+  instruction, no nothing-asked silence). Mechanism:
+  - Requests still pending at the ceiling are cancelled. There are no
+    retries.
+  - Each bypass logs `turn.check_bypassed` at WARNING with the question
+    and the reason (the error's type, never its text).
+  - The direction is the opposite of FR-60's fail-closed gate, on
+    purpose: there the worst case of refusing is one extra voice turn;
+    here refusing would mute the agent for every user for as long as
+    the provider is down. A broken check costs the improvement, never
+    the conversation.
+  - The ceiling bounds a gate, not work: cutting it off loses nothing.
+    It is twice the slowest response time the provider claims, so a
+    healthy provider does not reach it.
+
+  Mandated tests: a checker that raises yields the plain outcome and
+  the WARNING; a checker that never answers lets the turn start at the
+  ceiling; an unanswered DONE with answered WRITE and SPEAK still
+  applies rules 2–4.
+- **FR-68** **Each question is sent only the current user turn, the
+  unanswered user turns directly before it, and the assistant's last
+  reply.** Mechanism:
+  - At most `CHECK_UNANSWERED_TURNS` earlier unanswered turns, newest
+    kept; each user turn capped to its last 600 characters (the end of
+    a turn is what DONE reads).
+  - The assistant's reply is the last assistant text before the first
+    of those turns, as the context holds it (a cut-off reply appears as
+    it was heard, FR-46/FR-61), capped like FR-60's (`last_assistant_
+    text`). It is what a bare "yeah" answers.
+  - Never sent: document content, the attached-documents block, tool
+    calls or results, document titles, the system prompt, or older
+    turns. The request marks all quoted text as data.
+  - The evidence is built once per turn and shared by the questions.
+
+  Mandated test: from a context holding a documents block, tool rounds
+  and older turns, the evidence contains none of them.
+- **FR-69** **The decision model is reached only through an
+  `agent/providers.py` factory that returns a provider-neutral
+  checker.** The loop sees one method — question and evidence in,
+  probability of yes out — and no provider type (C-2, the hard
+  constraint on SDK usage). Mechanism:
+  - Provider in use: TypeSafe's Jev, through its own SDK
+    (`typesafe-sdk`, added to `requirements.txt`), key in
+    `TYPESAFE_API_KEY`, model in `CHECK_MODEL`. The default is a pinned
+    version, not the provider's moving "latest" alias: FR-63's
+    thresholds are tuned to a version.
+  - Pipecat is not upgraded for this: its own Jev integration ships in
+    a release far ahead of the pinned one, and the checker needs
+    nothing from the pipeline.
+  - The provider's API is early access and its field names may change;
+    the factory is the one place that knows them.
+  - With no key configured the factory returns nothing, both switches
+    are treated as off, and a switch that is on logs one WARNING at
+    startup.
+  - Implementation MUST begin with a spike against the live API that
+    establishes the request and response shape of a yes/no decision
+    (where the probability is), whether one request can carry several
+    questions, whether token usage is reported, and the response time
+    from the development machine.
+- **FR-70** **Every checked turn leaves a log line, a usage event and a
+  trace row; only the trace row carries text.**
+  - Log: one `turn.check` line with `session_id`, `turn_id`, the three
+    probabilities (null when not asked or unanswered), each question's
+    response time, the outcome, and any bypass reason.
+  - Stages: `check.done`, `check.write` and `check.speak` (ms) join the
+    turn's FR-33 row when the turn has one. A check slower than one
+    second is, by construction, FR-67's bypass and its WARNING.
+  - Usage: one event per checked turn — `stage = 'check'`,
+    `unit = 'count'`, `quantity` = the questions sent, `detail` = the
+    outcome — silent turns included. FR-36's union therefore lists a
+    silent turn (latency "—") with its outcome, and the drill-down
+    shows each turn's outcome beside its latency. The event has no
+    rate in FR-34's config and is priced at zero. **Recorded trade:**
+    at the provider's listed price a turn's questions cost a few
+    thousandths of a cent, below what the estimate displays; a rate is
+    added if the price or the volume changes that.
+  - Trace: one `llm_traces` row per checked turn (FR-49) — purpose
+    `check`, step 0, model = `CHECK_MODEL`, the evidence in
+    `input_messages`, the answers and the outcome in `output`, the wait
+    as its duration, finish reason `interrupted` when a barge-in
+    cancelled the wait. This is the row FR-71's live results are
+    reconstructed from.
+  - All of it is enqueue-only (NFR-10) and none of it reaches an admin
+    surface as text (NFR-9).
+
+  Mandated tests: a silent turn writes the usage event and the trace
+  row and no `turn_metrics` row; the log line and the usage event carry
+  no user text; the recorder calls pass NFR-10's fake-queue split.
+- **FR-71** **Both switches are off by default, and a check is switched
+  on in production only after a bench on recorded turns, a live voice
+  run, and a privacy-policy update, on the owner's decision.** The
+  record is `docs/evals/2026-11-13-decision-gates.md`.
+  - **Bench.** `backend/scripts/bench_turn_checks.py` runs a labelled
+    set through the checker from the production VM and reports, per
+    question, the response time (p50, p95, max) and, across
+    thresholds, how often each mistake would occur: wrongly silent,
+    wrongly replying, wrongly withheld, wrongly instructed. The set is
+    about 100 of the owner's own recorded turns with the evidence FR-68
+    would have sent, labelled with the right answer to each question;
+    the owner reviews the labels, so the reference is their judgement.
+    It holds transcript text, so it lives in a gitignored folder and is
+    never committed. The same set is also run through the FR-60 judge
+    model as a reference column, to tell a hard question from a weak
+    checker. The thresholds are chosen from this table.
+  - **Live run.** The scripted voice session in the eval file: the
+    standing regression rows plus rows for each outcome, every row
+    labelled with its expected outcome and FR-72 mode.
+  - **Privacy.** The published privacy policy names TypeSafe and what
+    it receives (NFR-5) before any other user's words are sent. Until
+    then only the owner's own turns are.
+  - No pass mark is fixed in advance: any number chosen before the
+    bench would be a guess. The owner reads both results and decides,
+    per switch.
+- **FR-72** **The system prompt defines three answer modes and has the
+  model pick one per turn from the user's words.**
+  1. **Silent execution.** Asked to do something with nothing to say
+     about it: do it, then at most the one word "Done." — exactly that
+     word, so FR-43's rule recognises it.
+  2. **Summary — the default for anything spoken.** One or two
+     sentences, ideally one. A short spoken list only when the user
+     needs several items: at most five points, each one clause, two at
+     most; the sentence bound does not apply to the list, the per-point
+     bound does. It may close with an offer to go deeper.
+  3. **Explain or recite — only on an explicit ask** ("explain", "go
+     into detail", "read me that section"). As long as the content
+     needs, still conversational, and it may read the requested part of
+     a document word for word (FR-53's verbal contract is amended to
+     match).
+
+  Mechanism and bounds:
+  - A list is spoken as short separate sentences: no markdown, no
+    bullet or numbering symbols.
+  - The prompt no longer says "and completely" beside "answer
+    directly", and the mode-2 bound replaces "keep replies brief".
+  - Enforcement is instruction only: no check on the output and no
+    retry, since either adds latency to every turn.
+  - The checks do not choose between modes 2 and 3. Rejected: a fourth
+    question — its answer could only become one more instruction, at
+    the cost of another request and another way to be wrong.
+  - Acceptance is the eval: every scripted row carries its expected
+    mode and a duration class (seconds for modes 1 and 2; as long as
+    its output for mode 3), and a row that lands in a slower class
+    fails. That is the "too slow" check for ordinary turns.
+- **FR-73** **The model is never told that a bare listening sound
+  ("Hmm.", "Mm-hmm.") is an acceptable reply.** When the model is
+  called it answers with substance, or asks the user to say it again
+  when the words came through garbled. Silence for a turn that needs no
+  answer is FR-64's, decided before the model is called; an instruction
+  that offers the sound gives the model an opening to use it on turns
+  that deserved an answer. Mandated test: the assembled system prompt
+  contains no instruction offering such a reply.
+
+| Knob | Default | Where |
+|---|---|---|
+| `TURN_CHECK_DONE` / `TURN_CHECK_MODE` (the two switches) | off / off | env (`app/config.py`) |
+| `CHECK_MODEL` (pinned decision-model version) | `jev-1.14.0` | env (`app/config.py`) |
+| `CHECK_TIMEOUT_S` (ceiling on the wait; on breach the question is bypassed) | 1s | env (`app/config.py`) |
+| `CHECK_MID_THOUGHT_MIN` (confidence needed to stay silent as mid-thought) | 0.5 | env (`app/config.py`) |
+| `CHECK_NO_SPEAK_MIN` (confidence that nothing spoken is expected) | 0.5 | env (`app/config.py`) |
+| `CHECK_NO_WRITE_MIN` (confidence needed to withhold the write tools) | 0.8 | env (`app/config.py`) |
+| `CHECK_BOTH_MIN` (confidence in both WRITE and SPEAK for the edit-and-speak instruction) | 0.7 | env (`app/config.py`) |
+| `CHECK_UNANSWERED_TURNS` (earlier unanswered turns in the evidence) | 3 | `agent/checks.py` |
+| Evidence caps (chars per user turn / assistant reply) | 600 / 300 | `agent/checks.py`, `agent/context.py` |
 
 ---
 
 ## 5. Non-Functional Requirements
 
 ### 5.1 Latency
-- **NFR-1** The target for time from end-of-user-speech to first audio from the agent is 3 seconds under normal network conditions. It is a target, not a gate: it is measured on every turn and its breaches are counted (§4.9), and where the two conflict, the quality of the response takes precedence over the budget. A turn whose first step goes straight to a tool call is a known exception: it is silent until a later step speaks (FR-43), and its metrics row carries a `step.1.tool_first` stage entry, so these turns can be told apart from a regression among the counted breaches.
+- **NFR-1** The target for time from end-of-user-speech to first audio from the agent is 3 seconds under normal network conditions. It is a target, not a gate: it is measured on every turn and its breaches are counted (§4.9), and where the two conflict, the quality of the response takes precedence over the budget. A turn whose first step goes straight to a tool call is a known exception: it is silent until a later step speaks (FR-43), and its metrics row carries a `step.1.tool_first` stage entry, so these turns can be told apart from a regression among the counted breaches. The §4.15 checks sit inside this span: their wait, at most `CHECK_TIMEOUT_S`, comes before the main call.
 - **NFR-2** Audio must stream as it is generated. The agent must not wait until its full response is ready before speaking.
 - **NFR-10** Measurement must be free: capture (§4.9) adds no synchronous work to the voice hot path. The principle, independent of pipeline architecture: code on the hot path only ever enqueues to memory; background writers batch queues into the database; a failed write logs an error and drops the batch rather than disturbing a live session. Test approach: the same split the transcript-writer tests use — observers/recorders are tested against a fake queue with no database available (proving the enqueue path touches nothing), and writers are exercised separately, including the broken-database case completing without raising. (The FR-20 transcript writer is the exemplar of this discipline, not its definition — it applies equally to a future custom agent loop, where observers become direct recorder calls.)
 
@@ -2705,7 +3055,7 @@ deliberately unchanged (FR-56 states local verification and why).
 *NFR-4 (session state recovery after connection drop) — moved to §6 Out of Scope along with FR-19; they were the same requirement.*
 
 ### 5.3 Privacy
-- **NFR-5** All voice data and transcripts are processed server-side. The privacy policy must disclose this clearly.
+- **NFR-5** All voice data and transcripts are processed server-side. The privacy policy must disclose this clearly, naming every outside company that receives voice or transcript content and what each receives: Deepgram (the audio), Anthropic (the conversation and attached documents), Cartesia (the text of the agent's replies), and TypeSafe (the few turns FR-68 lists) from the moment a §4.15 check is switched on for anyone but the owner (FR-71). The repository holds no policy page today; wherever the policy is published, FR-71 treats its update as a precondition.
 - **NFR-6** Sensitive session content (transcripts, documents — uploaded and agent-produced, future memory entries) must live in dedicated database columns, separable from session metadata, so that encryption at rest can be added post-MVP without schema rework. The encryption itself is deferred — see §6 Out of Scope. (§4.11 names the deferral's true cost, which is wider than schema: the document tools' atomic DB-side edit modes — `append`'s concatenation, `str_replace`'s counting predicate, `insert`'s offset arithmetic, `ILIKE` search with SQL-side snippets, the diagnostic reads — all require plaintext in the 🔒 column. Adding encryption keeps the schema but forfeits DB-side atomicity, handing FR-46's outlived-write race back to the application layer to re-solve. Deferred knowingly, not cheaply.)
 - **NFR-7** The user must be able to delete all their data.
 - **NFR-8** User isolation: no authenticated user can read or write another
