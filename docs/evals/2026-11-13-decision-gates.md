@@ -129,7 +129,7 @@ Rows for this change:
 | 29 | say "mm-hmm" while the agent is mid-reply | silent (nothing asked) | — | recorded, not gated: the agent stops and does not resume (accepted limit); note how it feels |
 | 30 | a garbled or half-heard instruction | plain | 2 | "say that again?" in some form; never "Hmm." |
 | 31 | a real request, immediately after row 19's silence | plain or talk only | per row | the reply uses the earlier turn too if it was part of the thought, and ignores it if not |
-| 32 | an edit request on which the agent narrates first ("I'll add that…") | plain, affirm | 1 | the narration, a pause of about a second, then the confirmation; neither is dropped |
+| 32 | an edit request on which the agent narrates first ("I'll add that…") | affirm | 1 | the narration, a pause of about a second, then the confirmation; neither is dropped |
 | 33 | after the agent checks its understanding ("…is that right?"): "Yeah." | talk only, affirm | 1 | five words or fewer, not a new paragraph |
 | 34 | "Hi." mid-session | talk only, affirm | 1 | a short greeting back |
 | 35 | thinking aloud about a plan, several sentences, nothing asked | silent (nothing asked) | — | nothing spoken |
@@ -148,6 +148,9 @@ must behave as it did before.
   balance feels right, and the final values are recorded here.
 - **Wrongly withheld** (an edit request that could not edit): the agent
   must have said the change was not made, never that it was.
+- **Wrongly instructed** (the edit-and-speak instruction on a turn that
+  asked for no edit; row 23 is the shape): nothing is written. Any edit
+  on a turn that asked for none fails the run.
 - Rows 3, 16, 18 and 19: no audio from the agent, and the indicator is
   not left on Thinking.
 - Row 21: both halves, every time it is tried.
@@ -170,7 +173,8 @@ must behave as it did before.
   lines (silent turns write those too; the `check` stage key exists
   only on turns that spoke): record p50 and the worst; count
   `turn.check_bypassed` lines. A bypass is not a failure of the run,
-  but its count is recorded.
+  but its count is recorded, and so is that turn's end-of-speech →
+  first audio on its own line: it carries the whole ceiling.
 - End-of-speech → first audio on the plain and talk-only rows,
   compared with the 2026-11-12 run 2 figures: the checks should add
   about their own response time and no more.
@@ -323,7 +327,8 @@ the 87 labelled turns, the 13 mid-thought turns included, get the
 outcome FR-63 would select for their labels. The 22 that do not, by
 kind:
 
-- thinking aloud answered instead of left alone: 6 (today's behaviour);
+- thinking aloud answered instead of left alone: 6 (a normal answer in
+  this run's terms; with FR-72's fallback in the prompt, a few words);
 - a confirming "yeah" answered at summary length instead of in a few
   words: 3;
 - a mid-thought turn answered: 3 of the 13;

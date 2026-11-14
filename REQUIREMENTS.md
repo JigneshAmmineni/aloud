@@ -642,10 +642,15 @@ FR-7 still governs: the agent acts when the user asks.
   passed, so a closing confirmation never runs into the sentence
   before it ("I'll add that to the document." — a pause — "Done.").
   The loop learns that playback finished from two signals the output
-  transport already gives: the release of the earlier step's last
-  sentence (FR-61's per-sentence signal), and the bot-stopped-speaking
-  that follows that release. A stop in the gap between two sentences
-  of the same step comes before the release and is ignored. When no
+  transport already gives, by counting and never by matching text: it
+  knows how many sentences the earlier step sent to synthesis (FR-46's
+  stream) and counts the sentences the transport releases (FR-61's
+  per-sentence signal); once the released count reaches the sent
+  count, the bot-stopped-speaking that follows ends the wait. The
+  sanitizer rewrites text between those two points (FR-61's bound i)
+  but cannot change how many sentences there are. A stop in the gap
+  between two sentences of the same step comes before the last release
+  and is ignored. When no
   earlier speech of the turn is playing or queued nothing is held. A missing signal must not strand
   a reply, so the hold has a ceiling, and the ceiling scales with the
   speech being waited for: that speech's length in characters at a
@@ -668,7 +673,9 @@ FR-7 still governs: the agent acts when the user asks.
   speaks after an earlier step of the same turn spoke starts no sooner
   than the gap after that playback ended; a step that speaks first, or
   after silent steps only, is not delayed; a stop between two sentences
-  of the earlier step does not start the gap early; a step that follows a
+  of the earlier step does not start the gap early; a narration the
+  sanitizer rewrites (an identifier, a stray asterisk) still ends the
+  wait by the signal and not by the ceiling; a step that follows a
   playback far longer than the slack (a recitation) still gets its
   pause and logs nothing; the hold releases at its scaled ceiling, with
   the warning, when the signal never comes; a closing confirmation after a
@@ -2723,6 +2730,11 @@ deliberately unchanged (FR-56 states local verification and why).
     is a single sentence keeps all of it, with the suffix. The cut logs
     `context.playback_cut` like the prefix path, marked as a
     first-sentence cut.
+  - **No audio at all.** When none of the entry's sentences was
+    released and no audio played this turn — an interruption between
+    the entry's append and its first audio — the entry keeps its intact
+    text with the cut-off suffix: nothing was heard, the mark says so,
+    and no content is removed.
   - **Recorded bounds (review rounds 2–3), both no-amend exits:** (i)
     this entry's sentences played but none prefix-match — the TTS
     sanitizer rewrites markdown/identifiers before synthesis, so the
@@ -2945,8 +2957,15 @@ Five decisions shape every FR below, each with the alternative it beat:
     saying a requested change has not been made is exempt from the
     five-word bound. The bound is on the turn's closing reply; what an
     earlier step said before a tool call (FR-43) is not counted.
-  - *Edit and speak:* make the change, and after it say the requested
-    substance aloud.
+  - *Edit and speak:* if the user asked for something to be written or
+    changed, make that change, and after it say the requested substance
+    aloud; if they asked for no change, change nothing and only speak.
+    The condition is in the instruction's own wording because
+    `CHECK_BOTH_MIN` sits well below the bar for withholding tools: a
+    spoken request can land here with its write tools intact, and an
+    unconditional "make the change" would turn it into an unwanted edit
+    of the document under discussion (FR-7). FR-60 guards only a
+    create.
   - Neither is ever appended to the context (FR-42's wrap-up pattern),
     and both leave the declared tools as FR-63's decision 2 set them.
   - The instruction steers; it does not guarantee. There is no cap on
@@ -2956,7 +2975,9 @@ Five decisions shape every FR below, each with the alternative it beat:
   Mandated tests: each instruction is in the call's messages on its
   outcome, absent on every other outcome, and absent from the context
   afterwards; on a talk-only affirm turn the instruction sent forbids
-  saying a change was made, and keeps FR-65's "has not been made".
+  saying a change was made, and keeps FR-65's "has not been made"; the
+  edit-and-speak instruction makes the edit conditional on the user
+  having asked for one.
 - **FR-67** **A question left unanswered — by an error, or by no answer
   within `CHECK_TIMEOUT_S` of the end of turn — never holds the turn:
   the rules that need its answer are skipped and the turn proceeds at
@@ -2980,6 +3001,12 @@ Five decisions shape every FR below, each with the alternative it beat:
     the first bench saw it reached once in 102 requests from the
     development machine: such a turn runs plain, which is today's
     behaviour. The value is revisited with the VM's figures (FR-71).
+    **Recorded trade (the owner's value):** a bypassed turn has waited
+    the whole ceiling before it starts, so its first audio is later by
+    that much — on the slowest plain turns the bench saw, just past
+    NFR-1's three seconds. NFR-1 is a counted target, and this is about
+    one request in a hundred; the bench's p95 was 159 ms, so the VM
+    figures may well bring the ceiling down.
   - With the questions in one request (FR-62), a failed or late
     request leaves every asked question unanswered together. One
     question alone is unanswered only when the response omits it or
@@ -2999,7 +3026,10 @@ Five decisions shape every FR below, each with the alternative it beat:
     turn is what WRITE reads — cutting to the tail alone would hide it
     and withhold the tools from a turn that asked for an edit.
   - At most `CHECK_UNANSWERED_TURNS` earlier unanswered turns, newest
-    kept, each capped to its last 600 characters.
+    kept, each sent whole up to 600 characters; a longer one keeps its
+    first 200 and its last 400 with the cut marked, for the same
+    reason: a long turn silenced as mid-thought may have opened with
+    the request.
   - The assistant's reply is the last assistant text before the first
     of those turns, as the context holds it (a cut-off reply appears as
     it was heard, FR-46/FR-61), capped to its last 300 characters. It
@@ -3007,9 +3037,11 @@ Five decisions shape every FR below, each with the alternative it beat:
     unanswered user turns stand between it and the current turn**.
     That is the opposite of FR-60's adjacency rule, on purpose (there
     an older reply must not be confirmable; here it is only context
-    for a judgement that cannot create anything), so it has its own
-    accessor on the context and does not reuse FR-60's
-    `last_assistant_text`, which returns nothing in exactly this case.
+    for a judgement that cannot create anything). The context keeps
+    one accessor, `last_assistant_text`, with the adjacency rule as a
+    parameter — required for FR-60, off here — rather than a copy, so
+    the tail cap and the rule that a tool-call step's text counts stay
+    in one place.
   - Never sent: document content, the attached-documents block, tool
     calls or results, document titles, the system prompt, or older
     turns. The request marks all quoted text as data.
@@ -3018,7 +3050,8 @@ Five decisions shape every FR below, each with the alternative it beat:
   Mandated tests: from a context holding a documents block, tool rounds
   and older turns, the evidence contains none of them; after a silent
   turn the evidence still carries the agent's last reply; a turn longer
-  than the cap keeps both its start and its end.
+  than its cap keeps both its start and its end, as the current turn
+  and as an earlier unanswered one.
 - **FR-69** **The decision model is reached only through an
   `agent/providers.py` factory that returns a provider-neutral
   checker.** The loop sees one method — the turn's evidence and the
@@ -3041,8 +3074,10 @@ Five decisions shape every FR below, each with the alternative it beat:
     or `TURN_CHECK_MODE` is on without `TYPESAFE_API_KEY`
     (`app/config.py`'s fail-fast rule — the symptom of a missing key
     would otherwise be a quiet agent, which looks like the feature
-    working). With both switches off the key is not needed and no
-    checker is built. Mandated test: a switch on with no key fails
+    working). With both switches off the key is not needed. The
+    factory builds a checker whenever the key is present, whatever the
+    switches say (FR-71's bench runs it with both off); the switches
+    decide only whether the loop asks. Mandated test: a switch on with no key fails
     configuration loading; both off with no key loads.
   - Every environment setting in this section's knob table is
     documented in `.env.example` with its default. A setting reaches
@@ -3149,7 +3184,10 @@ Five decisions shape every FR below, each with the alternative it beat:
      that asks for nothing belongs here whenever it reaches the model:
      FR-64's silence is meant to catch it first, and a few words are
      the fallback when the checks let it through — never commentary on
-     what the user said.
+     what the user said. This last clause is in the prompt only while
+     both checks are on (FR-73): with either off, today's
+     listening-sound rule covers the case, and the two are never both
+     present.
   2. **Summary — the default for anything that needs an answer.** One
      or two sentences, ideally one. A short spoken list only when the
      user needs several items: at most five points, each one clause,
@@ -3200,7 +3238,8 @@ Five decisions shape every FR below, each with the alternative it beat:
   none of seven such turns to silence. Mandated tests: with both
   switches on, the assembled system prompt contains neither "Hmm" nor
   "Mm-hmm" anywhere and does name thinking aloud under mode 1; with
-  either off, it contains today's rule unchanged.
+  either off, it contains today's rule unchanged and no thinking-aloud
+  clause under mode 1 — one rule per case in every assembly.
 
 | Knob | Default | Where |
 |---|---|---|
