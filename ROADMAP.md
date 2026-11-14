@@ -193,7 +193,9 @@ below, the spec is the state and these notes are the journey:
 - **Silence, with no time limit and no "Hmm."** for a mid-thought turn
   and for a turn that asks for nothing. No canned replies. The owner
   wants the session to stay open through long gaps; the user asks
-  again when they want an answer. "Hmm." leaves the prompt entirely.
+  again when they want an answer. "Hmm." leaves the prompt while both
+  checks are on (with either off, today's rule stays, so a trailing
+  thought is never answered with advice in between).
 - **Two leans:** toward silence when unsure whether the user is done;
   toward allowing the edit when unsure whether one was asked for.
 - **The create gate stays on Haiku** (3.3.1 below is the follow-up),
@@ -816,7 +818,7 @@ forgotten:
 - **Questions and instructions never get "Hmm."** — lean talkative over
   unresponsive: a QUESTION always gets a real answer, a misheard one
   gets "say that again?", and never two "Hmm."s in a row. (The
-  shipped rule until §4.15 is built; FR-73 then removes "Hmm." from
+  shipped rule until §4.15's checks are both on; FR-73 then removes "Hmm." from
   the prompt altogether and FR-64's silence takes its place.)
 - **Silent tool work** — no narrated reasoning, steps, or workflow
   ("let me read the document", "okay I have the content").

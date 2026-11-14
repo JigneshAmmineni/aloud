@@ -389,9 +389,11 @@ principles govern every FR below:
   worst turn latency); per session, a turn-by-turn table joining latency
   (FR-33) with that turn's usage and estimated cost (FR-32's `turn_id`
   events) — "this question cost 2,400 tokens and took 1.8s" — plus session
-  usage totals. Each turn also shows its §4.15 outcome (FR-70), so a
-  turn the agent chose not to answer is listed, without a latency,
-  rather than missing. The drill-down answers "user X says it broke at 3pm"
+  usage totals. Each turn also shows its §4.15 outcome, so a turn the
+  agent chose not to answer is listed, without a latency, rather than
+  missing; the outcome is read from the turn's one `check` event
+  (FR-70's `detail`) in a lookup beside the per-turn aggregate, not
+  folded into its grouping. The drill-down answers "user X says it broke at 3pm"
   without ever showing what was said (NFR-9).
 - **FR-37** Admin overview tab, the at-a-glance view: live sessions right
   now (in-process count; resets on deploy — accepted), sessions and unique
@@ -2692,15 +2694,18 @@ deliberately unchanged (FR-56 states local verification and why).
     this turn and none of the entry's sentences was released, the cut
     landed before its first sentence finished. If the session has seen
     at least one released sentence — the signal is known to work —
-    the entry is cut to its first sentence (the first one FR-46's
-    synthesis stream recorded for it) plus the cut-off suffix: the
+    the entry is cut to its first sentence (its own text up to the
+    first `.`, `?` or `!` that is followed by whitespace or ends the
+    text) plus the cut-off suffix: the
     user heard part of that sentence and none of the rest (observed
     2026-11-12: a four-sentence answer heard for one second stayed in
     the context whole, and the agent then insisted it had said it).
     This holds whether or not earlier audio of the same turn — a
     sentence spoken before a tool call — was released. What is
-    dropped was never played; when the first sentence cannot be
-    identified, the entry keeps its intact text with the suffix.
+    dropped was never played. The cut reads only the entry itself: the
+    turn's synthesis record (FR-46) is discarded when the turn ends,
+    which is before a completed turn can be interrupted. An entry that
+    is a single sentence keeps all of it, with the suffix.
   - **Recorded bounds (review rounds 2–3), both no-amend exits:** (i)
     this entry's sentences played but none prefix-match — the TTS
     sanitizer rewrites markdown/identifiers before synthesis, so the
@@ -2747,7 +2752,12 @@ Five decisions shape every FR below, each with the alternative it beat:
    started reply costs its input tokens, a talk-only turn needs a
    refusal round, and the edit-and-speak case needs a follow-up step.
    The price accepted: one check's duration on every turn, bounded by
-   FR-67's ceiling. §4.10 principle 1 is amended to match.
+   FR-67's ceiling. §4.10 principle 1 is amended to match. **Recorded
+   trade:** this is the first serial round trip placed in front of the
+   main call, and its size is so far the provider's claim and one
+   outside measurement, not ours. FR-71's bench measures it from the
+   VM before any switch goes on, and the rejected alternative above is
+   the fallback if the measured wait is not acceptable.
 3. **Silence has no time limit.** The product is meant to stay open
    while the user moves around and talks in bursts; the user asks again
    when they want an answer. Rejected: replying on its own after N
@@ -2873,11 +2883,14 @@ Five decisions shape every FR below, each with the alternative it beat:
   test: the instruction is in the call's messages and absent from the
   context afterwards.
 - **FR-67** **A question left unanswered — by an error, or by no answer
-  within `CHECK_TIMEOUT_S` of the end of turn — is treated for that
-  turn as if its switch were off, and the turn proceeds at once.** An
-  unanswered DONE means the turn is taken as finished; an unanswered
-  WRITE or SPEAK means the plain outcome (nothing withheld, no
-  instruction, no nothing-asked silence). Mechanism:
+  within `CHECK_TIMEOUT_S` of the end of turn — never holds the turn:
+  the rules that need its answer are skipped and the turn proceeds at
+  once.** An unanswered DONE skips FR-63's rule 1: the turn is taken as
+  finished. An unanswered WRITE or an unanswered SPEAK skips rules 2–4
+  together, whichever of the two did answer: the outcome is plain
+  (nothing withheld, no instruction, no nothing-asked silence). The
+  question records its status as `timeout` or `error` (FR-70).
+  Mechanism:
   - Requests still pending at the ceiling are cancelled. There are no
     retries.
   - Each bypass logs `turn.check_bypassed` at WARNING with the question
@@ -2927,9 +2940,14 @@ Five decisions shape every FR below, each with the alternative it beat:
     nothing from the pipeline.
   - The provider's API is early access and its field names may change;
     the factory is the one place that knows them.
-  - With no key configured the factory returns nothing, both switches
-    are treated as off, and a switch that is on logs one WARNING at
-    startup.
+  - The key is required exactly when a switch is on: configuration
+    loading fails, and the server does not start, if `TURN_CHECK_DONE`
+    or `TURN_CHECK_MODE` is on without `TYPESAFE_API_KEY`
+    (`app/config.py`'s fail-fast rule — the symptom of a missing key
+    would otherwise be a quiet agent, which looks like the feature
+    working). With both switches off the key is not needed and no
+    checker is built. Mandated test: a switch on with no key fails
+    configuration loading; both off with no key loads.
   - Implementation MUST begin with a spike against the live API that
     establishes the request and response shape of a yes/no decision
     (where the probability is), whether one request can carry several
@@ -2937,15 +2955,23 @@ Five decisions shape every FR below, each with the alternative it beat:
     from the development machine.
 - **FR-70** **Every checked turn leaves a log line, a usage event and a
   trace row; only the trace row carries text.**
-  - Log: one `turn.check` line with `session_id`, `turn_id`, the three
-    probabilities (null when not asked or unanswered), each question's
+  - Log: one `turn.check` line with `session_id`, `turn_id`, each
+    question's status (`answered` | `timeout` | `error` | `off` |
+    `cancelled`), its probability (null unless answered) and its
     response time, the outcome, and any bypass reason.
   - Stages: `check.done`, `check.write` and `check.speak` (ms) join the
-    turn's FR-33 row when the turn has one. A check slower than one
-    second is, by construction, FR-67's bypass and its WARNING.
+    turn's FR-33 row when the turn has one (one shared figure if
+    FR-69's spike settles on a single request). A check slower than one
+    second logs C-1's WARNING naming the stage (FR-47), whatever
+    `CHECK_TIMEOUT_S` is set to; at the default ceiling that is the
+    same moment as FR-67's bypass.
   - Usage: one event per checked turn — `stage = 'check'`,
     `unit = 'count'`, `quantity` = the questions sent, `detail` = the
-    outcome — silent turns included. FR-36's union therefore lists a
+    outcome (`silent_mid_thought` | `silent_nothing_asked` |
+    `talk_only` | `edit_and_speak` | `plain`), with `+bypass` appended
+    when an asked question went unanswered, or `interrupted` when a
+    barge-in cancelled the wait before there was an outcome — silent
+    turns included. FR-36's union therefore lists a
     silent turn (latency "—") with its outcome, and the drill-down
     shows each turn's outcome beside its latency. The event has no
     rate in FR-34's config and is priced at zero. **Recorded trade:**
@@ -2954,10 +2980,12 @@ Five decisions shape every FR below, each with the alternative it beat:
     added if the price or the volume changes that.
   - Trace: one `llm_traces` row per checked turn (FR-49) — purpose
     `check`, step 0, model = `CHECK_MODEL`, the evidence in
-    `input_messages`, the answers and the outcome in `output`, the wait
-    as its duration, finish reason `interrupted` when a barge-in
-    cancelled the wait. This is the row FR-71's live results are
-    reconstructed from.
+    `input_messages`, each question's status and probability and the
+    outcome in `output`, the wait as its duration; finish reason
+    `stop`, or `interrupted` when a barge-in cancelled the wait. This
+    is the row FR-71's live results are reconstructed from, so a
+    question that was never answered is told from an unsure one by its
+    status, never by a null alone.
   - All of it is enqueue-only (NFR-10) and none of it reaches an admin
     surface as text (NFR-9).
 
@@ -2968,18 +2996,23 @@ Five decisions shape every FR below, each with the alternative it beat:
   on in production only after a bench on recorded turns, a live voice
   run, and a privacy-policy update, on the owner's decision.** The
   record is `docs/evals/2026-11-13-decision-gates.md`.
-  - **Bench.** `backend/scripts/bench_turn_checks.py` runs a labelled
-    set through the checker from the production VM and reports, per
-    question, the response time (p50, p95, max) and, across
-    thresholds, how often each mistake would occur: wrongly silent,
-    wrongly replying, wrongly withheld, wrongly instructed. The set is
-    about 100 of the owner's own recorded turns with the evidence FR-68
-    would have sent, labelled with the right answer to each question;
-    the owner reviews the labels, so the reference is their judgement.
-    It holds transcript text, so it lives in a gitignored folder and is
-    never committed. The same set is also run through the FR-60 judge
-    model as a reference column, to tell a hard question from a weak
-    checker. The thresholds are chosen from this table.
+  - **Bench.** `backend/scripts/bench_turn_checks.py` has two modes,
+    because accuracy does not depend on where it is measured and
+    response time does. *Accuracy*, on the development machine: a
+    labelled set goes through the checker and the script reports,
+    across thresholds, how often each mistake would occur — wrongly
+    silent, wrongly replying, wrongly withheld, wrongly instructed. The
+    set is about 100 of the owner's own recorded turns with the
+    evidence FR-68 would have sent, labelled with the right answer to
+    each question; the owner reviews the labels, so the reference is
+    their judgement. It holds transcript text, so it lives in a
+    git-ignored folder on that machine, is never committed, and is
+    never copied to the VM. The same set also goes through the FR-60
+    judge model as a reference column, to tell a hard question from a
+    weak checker. The thresholds are chosen from this table.
+    *Response time*, from the production VM: the script sends the eval
+    file's scripted sentences — no recorded turn — and reports p50,
+    p95 and max per question.
   - **Live run.** The scripted voice session in the eval file: the
     standing regression rows plus rows for each outcome, every row
     labelled with its expected outcome and FR-72 mode.
@@ -2992,8 +3025,10 @@ Five decisions shape every FR below, each with the alternative it beat:
 - **FR-72** **The system prompt defines three answer modes and has the
   model pick one per turn from the user's words.**
   1. **Silent execution.** Asked to do something with nothing to say
-     about it: do it, then at most the one word "Done." — exactly that
-     word, so FR-43's rule recognises it.
+     about it: do it, then say exactly the one word "Done." Always a
+     word, because a step with no text is FR-42's empty step and gets
+     the spoken fallback; and that word, so FR-43's rule recognises it
+     and drops it where the turn has already spoken.
   2. **Summary — the default for anything spoken.** One or two
      sentences, ideally one. A short spoken list only when the user
      needs several items: at most five points, each one clause, two at
@@ -3019,14 +3054,21 @@ Five decisions shape every FR below, each with the alternative it beat:
     mode and a duration class (seconds for modes 1 and 2; as long as
     its output for mode 3), and a row that lands in a slower class
     fails. That is the "too slow" check for ordinary turns.
-- **FR-73** **The model is never told that a bare listening sound
-  ("Hmm.", "Mm-hmm.") is an acceptable reply.** When the model is
-  called it answers with substance, or asks the user to say it again
-  when the words came through garbled. Silence for a turn that needs no
-  answer is FR-64's, decided before the model is called; an instruction
-  that offers the sound gives the model an opening to use it on turns
-  that deserved an answer. Mandated test: the assembled system prompt
-  contains no instruction offering such a reply.
+- **FR-73** **While both checks are switched on, the model is never
+  told that a bare listening sound ("Hmm.", "Mm-hmm.") is an acceptable
+  reply.** When the model is called it answers with substance, or asks
+  the user to say it again when the words came through garbled. Silence
+  for a turn that needs no answer is FR-64's, decided before the model
+  is called; an instruction that offers the sound gives the model an
+  opening to use it on turns that deserved an answer. With either
+  switch off, the prompt keeps the listening-sound rule it has today:
+  the silence that replaces it is not there, and without either one a
+  trailing thought gets advice — the failure this section exists for.
+  The prompt is assembled from the switches, so the two change together
+  in one configuration change and never in separate deploys. Mandated
+  tests: with both switches on, the assembled system prompt contains no
+  instruction offering such a reply; with either off, it contains
+  today's rule.
 
 | Knob | Default | Where |
 |---|---|---|
@@ -3055,7 +3097,7 @@ Five decisions shape every FR below, each with the alternative it beat:
 *NFR-4 (session state recovery after connection drop) — moved to §6 Out of Scope along with FR-19; they were the same requirement.*
 
 ### 5.3 Privacy
-- **NFR-5** All voice data and transcripts are processed server-side. The privacy policy must disclose this clearly, naming every outside company that receives voice or transcript content and what each receives: Deepgram (the audio), Anthropic (the conversation and attached documents), Cartesia (the text of the agent's replies), and TypeSafe (the few turns FR-68 lists) from the moment a §4.15 check is switched on for anyone but the owner (FR-71). The repository holds no policy page today; wherever the policy is published, FR-71 treats its update as a precondition.
+- **NFR-5** All voice data and transcripts are processed server-side. The privacy policy must disclose this clearly, naming every outside company that receives voice or transcript content and what each receives: Deepgram (the audio), Anthropic (the conversation and attached documents), Cartesia (the text of the agent's replies), Google Cloud (the server and its database, where transcripts, documents and traces are stored), and TypeSafe (the few turns FR-68 lists) from the moment a §4.15 check is switched on for anyone but the owner (FR-71). No policy page exists yet; publishing one is a precondition of FR-71's privacy step.
 - **NFR-6** Sensitive session content (transcripts, documents — uploaded and agent-produced, future memory entries) must live in dedicated database columns, separable from session metadata, so that encryption at rest can be added post-MVP without schema rework. The encryption itself is deferred — see §6 Out of Scope. (§4.11 names the deferral's true cost, which is wider than schema: the document tools' atomic DB-side edit modes — `append`'s concatenation, `str_replace`'s counting predicate, `insert`'s offset arithmetic, `ILIKE` search with SQL-side snippets, the diagnostic reads — all require plaintext in the 🔒 column. Adding encryption keeps the schema but forfeits DB-side atomicity, handing FR-46's outlived-write race back to the application layer to re-solve. Deferred knowingly, not cheaply.)
 - **NFR-7** The user must be able to delete all their data.
 - **NFR-8** User isolation: no authenticated user can read or write another

@@ -59,13 +59,19 @@ changes, so this runs first.
 Needs from the owner: a TypeSafe API key in the local `.env`
 (`TYPESAFE_API_KEY`), and one review pass over the labels.
 
-## Part 2 — full bench, from the production VM
+## Part 2 — full bench, once §4.15 is built
 
-The same set through `backend/scripts/bench_turn_checks.py` (FR-71),
-which goes through the provider factory rather than calling the vendor
-directly, run on the VM so the response times are the ones production
-would see. The thresholds in the knob table are set from this table.
-Record the same figures as part 1, and the thresholds chosen.
+`backend/scripts/bench_turn_checks.py` (FR-71), which goes through the
+provider factory rather than calling the vendor directly, in its two
+modes:
+
+- **Accuracy, on the development machine:** the same labelled set as
+  part 1. The recorded turns never leave that machine. Record the same
+  mistake tables as part 1, and the thresholds chosen from them.
+- **Response time, from the production VM:** the scripted sentences of
+  part 3 below, not recorded turns, so no transcript text is copied to
+  the server. Record p50, p95 and max per question: these are the
+  figures production would see.
 
 ## Part 3 — live voice run (owner, local dev server, then the live site)
 
@@ -83,7 +89,7 @@ run 2 script except for the expected columns):
 | 1 | (connect) | not checked | — | a few words of greeting |
 | 2 | a plain factual question | plain or talk only | 2 | one or two sentences, no document |
 | 3 | thinking aloud, trailing off ("…maybe two nights? Probably…") | silent (mid-thought) | — | nothing spoken; the indicator returns to Listening |
-| 4 | "Create a new document called … with what I've said so far." | plain | 1 | one document; "Done." at most |
+| 4 | "Create a new document called … with what I've said so far." | plain | 1 | one document; "Done." |
 | 5 | "Add that we need to book the campsite by Friday." | plain | 1 | edit without asking; "Done." |
 | 6 | "Give me a quick summary of the plan." | talk only | 2 | spoken, one or two sentences, nothing written |
 | 7 | "Organize the plan into three sections: …" | plain | 1 | restructured; "Done." |
@@ -135,13 +141,16 @@ must behave as it did before.
 - Row 21: both halves, every time it is tried.
 - No reply to a mode-2 row runs past two sentences, the list rows
   excepted. Record the sentence count per row.
-- No turn's transcript contains "Hmm." or "Mm-hmm." from the agent.
+- No turn's transcript contains "Hmm." or "Mm-hmm." from the agent
+  (both switches on; with a switch off, today's rule is back by
+  design, FR-73).
 - Row 28: the context after the cut holds only the reply's first
   sentence, marked as cut (`context.playback_cut` in the logs).
-- Check response time on every turn (`check.done`, `check.write`,
-  `check.speak`): record p50 and the worst; count `turn.check_bypassed`
-  lines. A bypass is not a failure of the run, but its count is
-  recorded.
+- Check response time on every turn, read from the `turn.check` log
+  lines (silent turns write those too; the `check.*` stage keys exist
+  only on turns that spoke): record p50 and the worst; count
+  `turn.check_bypassed` lines. A bypass is not a failure of the run,
+  but its count is recorded.
 - End-of-speech → first audio on the plain and talk-only rows,
   compared with the 2026-11-12 run 2 figures: the checks should add
   about their own response time and no more.
