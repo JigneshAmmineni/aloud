@@ -173,6 +173,56 @@ The rules:
 
 ### 3.3 Thinking-partner mode — proactive reasoning & ambient capture
 
+**Specced 2026-11-13 as REQUIREMENTS.md §4.15 (FR-62–FR-73), from a
+design session with the owner.** Where the spec departs from the notes
+below, the spec is the state and these notes are the journey:
+
+- **Jev first, not Haiku.** The checks run on TypeSafe's Jev behind a
+  provider factory; Haiku is only a reference column in the bench.
+  Reason: the checks sit in front of every turn, and Haiku measured
+  0.7–1.9s per call.
+- **Wait, then call**, not binding at dispatch: the main model is
+  called only after the answers are in, so a turn the agent should
+  not take costs no Claude call. Starting Claude at once and applying
+  the verdict to its output was considered and rejected (wasted
+  tokens, a refusal round, more moving parts). It stays the fallback
+  if only a slow model turns out accurate enough.
+- **Keep-listening is a text check after Flux's end of turn**, not an
+  audio-layer change. DuplexJev is ruled out (non-commercial weights,
+  needs a GPU). `FLUX_EOT_THRESHOLD` is untouched.
+- **Silence, with no time limit and no "Hmm."** for a mid-thought turn
+  and for a turn that asks for nothing. No canned replies. The owner
+  wants the session to stay open through long gaps; the user asks
+  again when they want an answer. "Hmm." leaves the prompt while both
+  checks are on (with either off, today's rule stays, so a trailing
+  thought is never answered with advice in between).
+- **Changed in the label review, 2026-11-14:** mode 1 is "affirm" (five
+  words or fewer: "Done.", "Great.", "Sounds good."), the spoken
+  question is a three-way choice (nothing / affirm / answer) so the
+  mode has a mechanism behind it, and the PR #25 rule that dropped a
+  "Done." is removed in favour of a one-second pause between two
+  spoken steps of a turn. Dropping the sentence before a tool call
+  was considered and rejected by the owner as a hack that depends on
+  what the model says; the narration's verbosity is accepted for now.
+- **Two leans:** toward silence when unsure whether the user is done;
+  toward allowing the edit when unsure whether one was asked for.
+- **The create gate stays on Haiku** (3.3.1 below is the follow-up),
+  so there is no consolidated decision bundle yet.
+- **Answer modes** are FR-72, as instructions to Claude; the summary
+  bound is tightened to one or two sentences, ideally one. Claude, not
+  the checks, picks between summary and explanation.
+- **Accepted limit, not on the roadmap by the owner's choice:** a
+  listening sound ("mm-hmm") while the agent is talking still stops
+  it, and the reply is not resumed.
+- **Parked:** preparing the context, or looking documents up, while
+  the user is still speaking. The checks are plain text-in,
+  verdict-out calls so that this stays possible (feature 5, feature
+  10).
+- **Before the spec's review rounds are spent:** a throwaway bench of
+  Jev on about 100 of the owner's recorded turns, as soon as there is
+  an API key — the design rests on a response time and an accuracy
+  nobody has measured from here.
+
 **Decisions 2026-11-12 (research: docs/notes/turn-decision-jev.md):**
 the per-turn INTENT decider (spoken-substance? × write-asked? → ack /
 silent-execute / discuss-with-read-tools / both) runs on **Claude Haiku
@@ -269,6 +319,21 @@ tool):
   CREATES are not) and against barge-in (writes mid-speech). Candidate
   shape: a capture mode the user toggles by voice ("take notes while I
   talk"), scoped to one target document.
+
+### 3.3.1 New-document check on Jev — the PR after the decision gates
+
+Owner decision 2026-11-13 (decision-gates spec grilling): the FR-60
+create gate stays on Haiku, untouched, while the decision gates ship, so
+a problem in their testing has one possible cause. The PR after that
+considers moving the gate's "did the user explicitly ask for a new
+document?" judgement to Jev (Haiku measured 0.7–1.9s per call in our
+sessions; Jev about 0.1s by one independent measurement, not yet
+measured from our VM). Conditions: Jev has proven itself in production
+on the two new checks; the judgement is replayed on the real gate rows
+(`llm_traces` where purpose='gate') plus near-miss cases before the
+switch; the gate keeps its fail-closed enforcement point. Spec-time: its
+own call when a create arrives, as now, or a third question asked
+alongside the two pre-call checks (the consolidation end-state in 3.3).
 
 ### 3.4 Playback-aware interruption context — shipped as FR-61 (§4.14)
 
@@ -601,6 +666,48 @@ is today (`ttfb_ms`, `duration_ms`, `completion_tokens`):
   the user had to ask "are you still working?" (the conversational
   version of the same signal).
 
+### 11. Automated end-to-end use-case suite — simulated inputs, judged outputs
+
+**Vision (owner, 2026-11-14).** A suite that plays real use cases
+through the whole agent without a person talking, and judges what came
+out: did it stay quiet when it should, edit the right thing, answer
+briefly, read the section when asked. Today that judgement is the owner
+running a scripted voice session by hand after every behavior change
+(`docs/evals/`); the suite makes the same check repeatable, so a change
+to the prompt, the checks, a model or a provider can be compared with
+the run before it.
+
+**Rough scope.**
+- **Inputs:** the scripted rows of the eval files, starting with the
+  standing regression set, plus turns drawn from the labelled local set
+  built for the §4.15 bench (which today tests only the three check
+  questions, not the agent). Text in first (the turn as the speech
+  recogniser would deliver it, through the agent loop with no audio);
+  recorded audio through the real pipeline later, which is the
+  promotion gate's golden-audio idea in Process infrastructure.
+- **What is judged, cheapest first:** facts the run records itself (the
+  §4.15 outcome, which tools ran, what changed in the document, whether
+  anything was spoken, the duration class); then an LLM judge for what
+  only reading can tell (did the reply answer the question, is it a
+  summary or an explanation, did it claim an edit it did not make).
+- **Output:** a per-row pass/fail table against the row's expected
+  outcome and answer mode, kept per run so two runs can be compared.
+
+**Open questions (spec-time).**
+- How multi-turn rows are driven: a fixed script, or a simulated user
+  (an LLM playing the owner) that reacts to what the agent said.
+- How far to trust the judge: it needs its own small labelled set, and
+  the owner's manual run stays the reference until it agrees with it.
+- Where it runs: on demand, nightly, or inside the promotion gate. It
+  spends real provider money on every run, so not per-PR.
+- Whether recorded turns may be used beyond the owner's machine (they
+  are transcript text; today they never leave it).
+- What it deliberately does not cover: how the voice sounds, barge-in
+  timing, and anything else only a live session shows.
+
+**Depends on:** §4.15 (the outcomes it asserts on), feature 7 (traces
+it reads), and ideally feature 5 (a context it can set up per row).
+
 ## Process infrastructure
 
 Per-PR CI (ruff + pytest, frontend build) and the tailored Claude review are
@@ -612,9 +719,14 @@ live. Still to add, roughly when its prerequisite feature lands:
   keywords, a response produced, tool fired, latency within budget) — plus a
   manual talk-through. (The deploy itself is done: the "Deploy to
   production" workflow ships any chosen main commit — and rolls back — at a
-  click; this gate would run inside it before the VM step.)
+  click; this gate would run inside it before the VM step.) Last
+  promotion: 2026-11-13, `f051bdb`, six PRs at once (#19–#25, the
+  first deploy since 2026-09-15) with no gate but the health check and
+  a model smoke test from the production container; the manual
+  talk-through on the live site is still owed.
 - **Evals** (retrieval recall, response quality) join the scheduled/nightly
-  lane once features 6–7 provide the data they run on.
+  lane once features 6–7 provide the data they run on. The agent's
+  use-case behavior gets its own suite: feature 11.
 
 ## Known risks
 
@@ -654,6 +766,18 @@ docs/evals/2026-11-12-filler-removal.md (the filler line's removal,
 whose script covers the same turns). The list, so nothing is
 forgotten:
 
+- **Sorted 2026-11-13 (decision-gates spec).** Of the carried list
+  below, these are now specced and leave this list when §4.15 is
+  built: (1) reply length (FR-72), (9) the first-sentence cut (FR-61
+  amended; its "how much was heard" column is not), (10) the trailing
+  thought (FR-62–FR-64), and from (11) the "Done." vocabulary and the
+  after-a-tool-call ordering (FR-43 amended, FR-72). The rest wait for
+  a cleanup PR of their own, none of them about what the user hears:
+  (2) and (6) narration and when it plays, (3) judge latency (see
+  3.3.1), (4) the `LLM_EFFORT=low` A/B, (5) the wrap-up instruction's
+  position, (7) the invisible server-side fallback, (8) the refusal
+  category, and from (11) the `tool_first` advisory flag and the
+  admin page's missing vitest coverage.
 - **Carried from the first Claude session (2026-11-12) into the
   decision-gates PR:** (1) replies run long — give the prompt a
   concrete bound (two or three sentences, then offer to go deeper)
@@ -726,11 +850,27 @@ forgotten:
   how much of a reply was heard is in the context and one log line
   only, not in the database;
   (10) same run: it answered a trailing thought ("Probably…") with
-  advice. The keep-listening decision this PR's decider exists for.
+  advice. The keep-listening decision this PR's decider exists for;
+  (11) from PR #25's last review, all in the "Done." rule and its
+  marker (none blocking, none fixed): a "Done." written AFTER a
+  tool call in the same step is spoken mid-work and the closing one
+  dropped (not reproduced on Sonnet; the Gemini client can
+  interleave that way); `step.N.tool_first` is recorded without
+  the slow-stage advisory even when held text came first, which
+  hides the one wait nothing else in the row measures (use
+  `advisory=bool(step_text.strip())`); the confirmation vocabulary
+  is only "done" / "all done" with `.` or `!` — a deliberately
+  narrow bet from two live runs, so "All set." and "Got it." still
+  run into the sentence before them; and `fmtStages` /
+  `isToolFirst` on the admin session page have no vitest coverage.
+  The answer modes below rework what a tool turn says, so settle
+  these there rather than patching the rule again.
 
 - **Questions and instructions never get "Hmm."** — lean talkative over
   unresponsive: a QUESTION always gets a real answer, a misheard one
-  gets "say that again?", and never two "Hmm."s in a row.
+  gets "say that again?", and never two "Hmm."s in a row. (The
+  shipped rule until §4.15's checks are both on; FR-73 then removes "Hmm." from
+  the prompt altogether and FR-64's silence takes its place.)
 - **Silent tool work** — no narrated reasoning, steps, or workflow
   ("let me read the document", "okay I have the content").
 - **Minimal confirmations** — never "it's on your screen", "I have
@@ -738,7 +878,9 @@ forgotten:
   One acknowledgment per piece of work (2026-11-12, enforced in the
   loop): no "Done." directly after a sentence the agent just spoke,
   and none in the middle of chained work; a turn that worked
-  silently still ends with one.
+  silently still ends with one. (Shipped rule until §4.15 is built:
+  FR-43 as amended replaces it with a one-second pause and drops
+  nothing.)
 - **Create-gate redirection (FR-60)** — a blocked create silently picks
   the existing document from recent conversation (usually the one under
   discussion), writes without asking; only with no fitting document
