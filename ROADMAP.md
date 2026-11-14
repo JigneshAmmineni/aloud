@@ -658,6 +658,48 @@ is today (`ttfb_ms`, `duration_ms`, `completion_tokens`):
   the user had to ask "are you still working?" (the conversational
   version of the same signal).
 
+### 11. Automated end-to-end use-case suite — simulated inputs, judged outputs
+
+**Vision (owner, 2026-11-14).** A suite that plays real use cases
+through the whole agent without a person talking, and judges what came
+out: did it stay quiet when it should, edit the right thing, answer
+briefly, read the section when asked. Today that judgement is the owner
+running a scripted voice session by hand after every behavior change
+(`docs/evals/`); the suite makes the same check repeatable, so a change
+to the prompt, the checks, a model or a provider can be compared with
+the run before it.
+
+**Rough scope.**
+- **Inputs:** the scripted rows of the eval files, starting with the
+  standing regression set, plus turns drawn from the labelled local set
+  built for the §4.15 bench (which today tests only the three check
+  questions, not the agent). Text in first (the turn as the speech
+  recogniser would deliver it, through the agent loop with no audio);
+  recorded audio through the real pipeline later, which is the
+  promotion gate's golden-audio idea in Process infrastructure.
+- **What is judged, cheapest first:** facts the run records itself (the
+  §4.15 outcome, which tools ran, what changed in the document, whether
+  anything was spoken, the duration class); then an LLM judge for what
+  only reading can tell (did the reply answer the question, is it a
+  summary or an explanation, did it claim an edit it did not make).
+- **Output:** a per-row pass/fail table against the row's expected
+  outcome and answer mode, kept per run so two runs can be compared.
+
+**Open questions (spec-time).**
+- How multi-turn rows are driven: a fixed script, or a simulated user
+  (an LLM playing the owner) that reacts to what the agent said.
+- How far to trust the judge: it needs its own small labelled set, and
+  the owner's manual run stays the reference until it agrees with it.
+- Where it runs: on demand, nightly, or inside the promotion gate. It
+  spends real provider money on every run, so not per-PR.
+- Whether recorded turns may be used beyond the owner's machine (they
+  are transcript text; today they never leave it).
+- What it deliberately does not cover: how the voice sounds, barge-in
+  timing, and anything else only a live session shows.
+
+**Depends on:** §4.15 (the outcomes it asserts on), feature 7 (traces
+it reads), and ideally feature 5 (a context it can set up per row).
+
 ## Process infrastructure
 
 Per-PR CI (ruff + pytest, frontend build) and the tailored Claude review are
@@ -675,7 +717,8 @@ live. Still to add, roughly when its prerequisite feature lands:
   a model smoke test from the production container; the manual
   talk-through on the live site is still owed.
 - **Evals** (retrieval recall, response quality) join the scheduled/nightly
-  lane once features 6–7 provide the data they run on.
+  lane once features 6–7 provide the data they run on. The agent's
+  use-case behavior gets its own suite: feature 11.
 
 ## Known risks
 

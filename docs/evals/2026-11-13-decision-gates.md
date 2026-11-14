@@ -157,4 +157,82 @@ must behave as it did before.
 
 ## Results
 
-(Appended after each part runs.)
+### Part 1, run 1 — 2026-11-14, owner's development machine
+
+102 turns, `jev-1.14.0`, all three questions in one request per turn (the
+API takes several questions per request). No errors. **The labels are
+Claude's draft: the owner has not reviewed them yet**, so every count
+below is against the draft and will move.
+
+**Response time** (one request, three answers; from the development
+machine, not the VM): p50 120 ms, p95 152 ms, mean 135 ms. Two requests
+were slow: the first of the run (383 ms) and one outlier at 1,136 ms,
+which FR-67's one-second ceiling would have bypassed. About 440 input
+tokens per request. The Haiku reference took p50 930 ms, p95 1,921 ms
+for the same three questions asked in parallel.
+
+**DONE (is the user finished?).** The 13 mid-thought turns separate
+well: 12 of them score 0.36 or lower. Split by what the turn was:
+
+| Stay silent when 1 − p_done ≥ | real requests silenced (of 52) | nothing-asked turns silenced (of 12) | mid-thought turns answered (of 13) |
+|---|---|---|---|
+| 0.4 | 7 | 6 | 0 |
+| 0.5 | 6 | 4 | 1 |
+| 0.6 | 5 | 3 | 1 |
+| 0.7 | 4 | 3 | 4 |
+| 0.8 | 1 | 1 | 5 |
+
+The real requests it silences (rows 33, 34, 40, 54, 77, 86 of the local
+set) are all rough speech: a filler word or a restart inside the
+sentence, a garbled ending, or no closing punctuation from the
+recogniser. The one mid-thought turn it answers (row 35) is arguably a
+complete question.
+
+**WRITE (was an edit asked for?).** Works as worded. At the spec's
+starting threshold (withhold when 1 − p_write ≥ 0.8) no edit request
+of 16 is wrongly withheld, and the tools are withheld on 59 of the 63
+turns that asked for no edit. The lowest-scoring real edit requests are
+a garbled one (0.45) and the two edit-plus-ideas turns (0.54, 0.66).
+
+**SPEAK (is something spoken expected back?).** Never wrongly quiet:
+all 38 turns that wanted a spoken answer score 0.76 or higher. But the
+question as worded does not pick out the turns that want nothing:
+
+- listening sounds and one-word acknowledgements score 0.25 to 0.70;
+- plain edit requests score 0.44 to 0.85, because a confirmation counts
+  as "something said back";
+- thinking-aloud statements score 0.84 to 0.90.
+
+Two consequences at the starting thresholds: the nothing-asked silence
+would fire on fewer than half of the listening sounds and on none of the
+thinking-aloud statements, and the edit-and-speak instruction would be
+added to plain edit requests (11 of them at a 0.5 threshold; at 0.7 it
+misses both real edit-plus-ideas turns, whose p_write is 0.54 and 0.66).
+
+**Haiku reference column: not usable yet.** It answered "no edit asked"
+on plain edit requests (row 44, for one), which points at the reference
+harness (its prompt or its one-word parsing), not at Haiku. Its timing
+stands; its accuracy figures are discarded until the raw replies are
+inspected.
+
+**Findings.**
+
+1. The speed the design rests on holds from here: about an eighth of a
+   second, with one request in 102 over the ceiling. The VM measurement
+   is still owed (part 2).
+2. WRITE can be used as it is.
+3. DONE catches mid-thought turns, at the cost of silencing about one
+   real request in ten at 0.6. The misses share a cause the wording can
+   address: say that the text is speech-recogniser output with unreliable
+   punctuation, and that a filler word or a restart inside a complete
+   request is not a pause. Re-run before choosing a threshold.
+4. SPEAK needs rewording to "substance beyond a brief confirmation",
+   and one labelling question is the owner's: does a thinking-aloud
+   statement, or an answer to the agent's own question, expect something
+   said back? 36 turns are marked unsure on exactly that.
+5. Only 13 mid-thought and 2 edit-plus-ideas examples exist in the
+   recordings. Both results are rough; the live run (part 3) is where
+   they get tested properly.
+
+Next: the owner's label review, then run 2 with the reworded DONE and
+SPEAK questions and a fixed reference column.
