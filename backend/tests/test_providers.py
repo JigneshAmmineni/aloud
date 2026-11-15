@@ -138,24 +138,37 @@ def test_unknown_providers_raise():
         make_tts(_settings(tts_provider="nope"), text_filters=[])
 
 
-def test_assemblyai_tts_rides_the_openai_compatible_route():
-    """TTS_PROVIDER=assemblyai: AssemblyAI-TTS-1 through its
-    OpenAI-compatible speech endpoint, on the OpenAI TTS service this
-    Pipecat ships (its native AssemblyAI TTS service needs a much newer
-    release)."""
-    from pipecat.services.openai.tts import OpenAITTSService
+def test_assemblyai_tts_is_pipecats_native_service():
+    """TTS_PROVIDER=assemblyai: Pipecat's own AssemblyAI Streaming TTS
+    service (construct-level only: no key here, so no live call)."""
+    from pipecat.services.assemblyai.tts import AssemblyAITTSService
+    from pipecat.utils.text.markdown_text_filter import MarkdownTextFilter
 
+    text_filter = MarkdownTextFilter()
     tts = make_tts(
         _settings(tts_provider="assemblyai", assemblyai_api_key="aai-key"),
+        text_filters=[text_filter],
+    )
+    assert isinstance(tts, AssemblyAITTSService)
+    assert tts._api_key == "aai-key"
+    assert tts._url == "wss://tts.us.assemblyai.com/v1/ws"
+    assert tts._settings.model == "assemblyai-tts-1"
+    # no voice configured: the service's own default voice, not None (None
+    # would leave the choice to the server)
+    assert tts._settings.voice
+    assert tts._text_filters == [text_filter]
+
+    chosen = make_tts(
+        _settings(
+            tts_provider="assemblyai",
+            assemblyai_api_key="aai-key",
+            assemblyai_tts_model="some-model",
+            assemblyai_tts_voice="aai-jane",
+        ),
         text_filters=[],
     )
-    assert isinstance(tts, OpenAITTSService)
-    assert str(tts._client.base_url).rstrip("/") == "https://tts.us.assemblyai.com/v1/openai"
-    assert tts._client.api_key == "aai-key"
-    assert tts._settings.model == "assemblyai-tts-en"
-    # the service only accepts OpenAI's voice names; AssemblyAI maps any of
-    # them to its default voice for the model's language
-    assert tts._settings.voice == "alloy"
+    assert chosen._settings.model == "some-model"
+    assert chosen._settings.voice == "aai-jane"
 
 
 def test_the_assemblyai_key_is_required_only_with_that_provider(monkeypatch):

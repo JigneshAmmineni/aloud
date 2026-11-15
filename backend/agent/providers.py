@@ -18,9 +18,9 @@ import httpx
 from google import genai
 from google.genai import types as genai_types
 from loguru import logger
+from pipecat.services.assemblyai.tts import AssemblyAITTSService
 from pipecat.services.cartesia.tts import CartesiaTTSService, GenerationConfig
 from pipecat.services.deepgram.flux.stt import DeepgramFluxSTTService
-from pipecat.services.openai.tts import OpenAITTSService
 
 from app.config import Settings
 
@@ -39,9 +39,6 @@ def make_stt(settings: Settings):
     raise ValueError(f"Unknown STT_PROVIDER: {settings.stt_provider}")
 
 
-_ASSEMBLYAI_TTS_URL = "https://tts.us.assemblyai.com/v1/openai"
-
-
 def make_tts(settings: Settings, text_filters: list):
     if settings.tts_provider == "cartesia":
         return CartesiaTTSService(
@@ -55,24 +52,20 @@ def make_tts(settings: Settings, text_filters: list):
             text_filters=text_filters,
         )
     if settings.tts_provider == "assemblyai":
-        # AssemblyAI-TTS-1 through its OpenAI-compatible speech route,
-        # spoken by the OpenAI TTS service this Pipecat already ships:
-        # Pipecat's own AssemblyAI TTS service needs a release after
-        # 1.14, far ahead of the pinned 1.3. What this route gives up
-        # against the native WebSocket one, until that upgrade:
-        #   - word timings: played text is released per SENTENCE, so
-        #     FR-61's "what was heard" is sentence-grained here;
-        #   - a chosen voice: the service accepts only OpenAI's voice
-        #     names, and AssemblyAI maps every one of them to its default
-        #     voice for the model's language;
-        #   - speed: the model has no speed control (CARTESIA_SPEED does
-        #     not apply).
-        return OpenAITTSService(
+        # Pipecat's own AssemblyAI service (Streaming TTS over WebSocket,
+        # US host): per-word timings, so played text is released per word
+        # as on Cartesia, and an interruption cancels synthesis without
+        # reconnecting. The model has no speed control (CARTESIA_SPEED
+        # does not apply).
+        tts_settings = AssemblyAITTSService.Settings(
+            model=settings.assemblyai_tts_model
+        )
+        if settings.assemblyai_tts_voice:
+            # unset = the service's default voice (Audrey)
+            tts_settings.voice = settings.assemblyai_tts_voice
+        return AssemblyAITTSService(
             api_key=settings.assemblyai_api_key,
-            base_url=_ASSEMBLYAI_TTS_URL,
-            settings=OpenAITTSService.Settings(
-                model=settings.assemblyai_tts_model, voice="alloy"
-            ),
+            settings=tts_settings,
             text_filters=text_filters,
         )
     raise ValueError(f"Unknown TTS_PROVIDER: {settings.tts_provider}")

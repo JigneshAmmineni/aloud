@@ -73,7 +73,8 @@ class Settings:
     typesafe_api_key: str = ""  # required exactly when a switch is on
     # TTS_PROVIDER=assemblyai (AssemblyAI-TTS-1; cartesia stays the default)
     assemblyai_api_key: str = ""  # required exactly then
-    assemblyai_tts_model: str = "assemblyai-tts-en"
+    assemblyai_tts_model: str = "assemblyai-tts-1"
+    assemblyai_tts_voice: str = ""  # empty = the service's default voice
     turn_check_done: bool = False
     turn_check_mode: bool = False
     check_model: str = "jev-1.14.0"  # pinned: the thresholds are tuned to it
@@ -143,7 +144,8 @@ def load_settings() -> Settings:
         rate_tts_per_1m_chars=_env_float("RATE_TTS_PER_1M_CHARS", 0.0),
         typesafe_api_key=os.getenv("TYPESAFE_API_KEY") or "",
         assemblyai_api_key=os.getenv("ASSEMBLYAI_API_KEY") or "",
-        assemblyai_tts_model=os.getenv("ASSEMBLYAI_TTS_MODEL") or "assemblyai-tts-en",
+        assemblyai_tts_model=os.getenv("ASSEMBLYAI_TTS_MODEL") or "assemblyai-tts-1",
+        assemblyai_tts_voice=os.getenv("ASSEMBLYAI_TTS_VOICE") or "",
         turn_check_done=turn_check_done,
         turn_check_mode=turn_check_mode,
         check_model=os.getenv("CHECK_MODEL") or "jev-1.14.0",
