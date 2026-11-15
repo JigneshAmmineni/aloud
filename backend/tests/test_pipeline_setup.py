@@ -21,7 +21,8 @@ def test_context_starts_with_exactly_one_system_message(make_settings):
     messages = provider.build()
     assert len(messages) == 1
     assert messages[0]["role"] == "system"
-    assert messages[0]["content"] == build_system_prompt()
+    # make_settings() leaves both turn checks off: that assembly
+    assert messages[0]["content"] == build_system_prompt(checks_on=False)
 
 
 def test_attached_documents_are_injected_into_context(make_settings):
@@ -34,7 +35,7 @@ def test_attached_documents_are_injected_into_context(make_settings):
     combined = " ".join(
         m["content"] for m in provider.build() if isinstance(m.get("content"), str)
     )
-    assert build_system_prompt() in combined
+    assert build_system_prompt(checks_on=False) in combined
     assert "arch.md" in combined
     assert "cascade pipeline" in combined
 

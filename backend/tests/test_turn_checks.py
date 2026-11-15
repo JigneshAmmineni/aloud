@@ -33,6 +33,7 @@ from agent.prompts import (
     AFFIRM_INSTRUCTION,
     AFFIRM_TALK_ONLY_INSTRUCTION,
     EDIT_AND_SPEAK_INSTRUCTION,
+    FALLBACK_LINES,
     TALK_ONLY_INSTRUCTION,
     WRAP_UP_INSTRUCTION,
     build_system_prompt,
@@ -661,10 +662,12 @@ def _run_with_playback(h, user_text, playback):
     return marks
 
 
-def _pause_setup(monkeypatch, gap=0.2, slack=5.0, cps=100000.0):
+def _pause_setup(monkeypatch, gap=0.2, slack=5.0, cps=100000.0, start=5.0, cap=60.0):
     monkeypatch.setattr(loop_mod, "STEP_SPEECH_GAP_S", gap)
     monkeypatch.setattr(loop_mod, "STEP_SPEECH_HOLD_SLACK_S", slack)
     monkeypatch.setattr(loop_mod, "STEP_SPEECH_SLOWEST_CPS", cps)
+    monkeypatch.setattr(loop_mod, "STEP_SPEECH_START_MAX_S", start)
+    monkeypatch.setattr(loop_mod, "STEP_SPEECH_HOLD_MAX_S", cap)
 
 
 def test_the_closing_word_waits_for_the_gap_after_the_narration_played(monkeypatch):
@@ -826,3 +829,152 @@ def test_the_first_sentence_rule_survives_decimals_and_single_sentences():
     one.append_assistant("Okay")
     assert one.cut_to_first_sentence()
     assert one.build()[-1]["content"] == "Okay" + INTERRUPTED_SUFFIX
+
+
+# ---------------- PR #28 review, round 1 ----------------
+
+
+def test_a_reply_after_narration_and_a_tool_call_is_still_cut_to_its_first_sentence(
+    monkeypatch,
+):
+    """The transport releases played text word by word, so the narration's
+    words land AFTER the closing step has started — during its LLM call
+    and the pause. They must not be counted as the closing reply's own:
+    with the entry scope stamped at step start they were, and a reply the
+    user never heard stayed in the context whole."""
+    _pause_setup(monkeypatch, gap=0.05)
+    h = make_loop(
+        _narrated_tool_turn([LLMTextDelta(REPLY)]), tools=[read_tool(delay=0.05)]
+    )
+
+    async def run():
+        turn = asyncio.create_task(h.loop._run_turn("what should we cook?"))
+        await asyncio.sleep(0.15)  # the closing step is waiting out the pause
+        h.loop.note_bot_spoke()
+        for word in "I'll add that to the document.".split():
+            h.loop.note_uttered_sentence(word)
+        h.loop.note_bot_stopped()
+        await turn
+
+    asyncio.run(run())
+    h.loop.note_bot_spoke()  # the reply's audio began; the user spoke over it at once
+    _interrupt_with_no_live_turn(h)
+    assert h.ctx.build()[-1]["content"] == "Foil packets are easiest." + INTERRUPTED_SUFFIX
+
+
+def test_the_fallback_line_waits_for_the_gap_too(monkeypatch):
+    """The one line the loop speaks itself must not run into the narration
+    of the step before the one that failed."""
+    _pause_setup(monkeypatch)
+    scripts = [
+        [
+            LLMTextDelta("I'll add that to the document. "),
+            LLMToolCall(name="echo", arguments={}, id="c1"),
+            _done(),
+        ],
+        [_done()],  # the closing step comes back empty
+    ]
+    h = make_loop(scripts, tools=[read_tool()])
+    times = _timed(h)
+    marks = _run_with_playback(h, "add it", [(0.02, "start"), (0.08, "stop")])
+    assert times[1][0] in FALLBACK_LINES
+    assert times[1][1] - marks["stopped"] >= 0.19
+
+
+def test_earlier_text_that_never_becomes_audio_is_not_waited_for(monkeypatch):
+    """Filters can reduce a step's text to nothing, and synthesis can
+    fail: with no playback to wait for, the wait ends after its short
+    start window — as its own event, not the missing-signal warning."""
+    _pause_setup(monkeypatch, gap=5.0, slack=5.0, start=0.1)
+    warned, warn_sink = _events("speech_gap.signal_missing")
+    noted, note_sink = _events("speech_gap.no_playback")
+    try:
+        h = make_loop(_narrated_tool_turn([LLMTextDelta("Done.")]), tools=[read_tool()])
+        start = time.monotonic()
+        asyncio.run(h.loop._run_turn("add it"))
+        elapsed = time.monotonic() - start
+    finally:
+        logger.remove(warn_sink)
+        logger.remove(note_sink)
+    assert _pushed_text(h) == "I'll add that to the document. Done."
+    assert 0.09 <= elapsed < 1.0
+    assert warned == [] and len(noted) == 1
+
+
+def test_the_ceiling_is_capped_however_long_the_earlier_speech_was(monkeypatch):
+    # 31 chars at 1 char/s plus 50s of slack would wait 81s for a stop
+    # that never comes; the cap ends it
+    _pause_setup(monkeypatch, gap=0.05, slack=50.0, cps=1.0, cap=0.2)
+    warned, sink = _events("speech_gap.signal_missing")
+    try:
+        h = make_loop(_narrated_tool_turn([LLMTextDelta("Done.")]), tools=[read_tool()])
+        start = time.monotonic()
+        _run_with_playback(h, "add it", [(0.02, "start")])  # never stops
+        elapsed = time.monotonic() - start
+    finally:
+        logger.remove(sink)
+    assert 0.19 <= elapsed < 1.5 and len(warned) == 1
+    assert _pushed_text(h).endswith("Done.")
+
+
+def test_a_failure_in_the_outcome_rules_is_a_bypass_with_its_records(monkeypatch):
+    """FR-67 covers every way of having no verdict, a bug in the rules
+    included: the turn runs plain and the check still leaves its log
+    line, usage event and trace row."""
+
+    def boom(*args, **kwargs):
+        raise KeyError("speak")
+
+    monkeypatch.setattr(loop_mod, "decide", boom)
+    seen, sink = _events("turn.check_bypassed")
+    try:
+        h = checked_loop([[LLMTextDelta("Sure."), _done()]], tools=[write_tool()])
+        asyncio.run(h.loop._run_turn("add it"))
+    finally:
+        logger.remove(sink)
+    assert _pushed_text(h) == "Sure."
+    assert [t["name"] for t in h.llm.calls[0]["tools"]] == ["save"]
+    (event,) = [e for e in _queued(h.recorder, UsageEvent) if e.stage == "check"]
+    assert event.detail == "plain+bypass"
+    assert [t.purpose for t in _queued(h.traces, LLMTrace)] == ["check", "turn"]
+    assert len(seen) == 1 and seen[0]["extra"]["reason"] == "KeyError"
+
+
+def test_probabilities_outside_zero_to_one_are_an_error_not_an_answer():
+    """A percentage-shaped response must be a bypass, never a confident
+    'nothing' that silences every turn."""
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "answers": {
+                    "done": {"noul": 0.9},
+                    "write": {"noul": 0.05},
+                    "speak": {"probabilities": {"nothing": 70, "affirm": 20, "answer": 10}},
+                }
+            },
+        )
+
+    result, _ = asyncio.run(_jev(handler).ask("E", questions_for(ON)))
+    assert result[SPEAK].status == CHECK_ERROR
+    assert result[DONE].status == CHECK_ANSWERED
+    assert decide(result, ON).detail == "plain+bypass"
+
+
+def test_a_question_whose_switch_is_off_is_recorded_as_off():
+    done_only = CheckSettings(done_on=True, model="jev-test")
+    h = checked_loop([[LLMTextDelta("Sure."), _done()]], cfg=done_only)
+    asyncio.run(h.loop._run_turn("add it"))
+    assert h.checker.calls[0][1] == [DONE]
+    (trace,) = [t for t in _queued(h.traces, LLMTrace) if t.purpose == "check"]
+    questions = json.loads(trace.output)["questions"]
+    assert questions["done"]["status"] == CHECK_ANSWERED
+    assert questions["write"]["status"] == questions["speak"]["status"] == "off"
+    (event,) = [e for e in _queued(h.recorder, UsageEvent) if e.stage == "check"]
+    assert event.quantity == 1.0  # the questions SENT
+
+
+def test_the_prompt_builder_makes_its_caller_choose_an_assembly():
+    with pytest.raises(TypeError):
+        build_system_prompt()

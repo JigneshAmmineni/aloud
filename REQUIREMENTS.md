@@ -651,12 +651,19 @@ FR-7 still governs: the agent acts when the user asks.
   arrived after it was pushed. Then `STEP_SPEECH_GAP_S` of unbroken
   silence must pass: a stop in the gap between two sentences is
   followed by a start, which re-arms the wait. When no earlier step of
-  the turn spoke nothing is held. A missing signal must not strand
+  the turn spoke nothing is held. The loop's own fallback line (FR-42)
+  waits the same way: it is the one line the loop speaks itself, and it
+  must not run into the narration of the step before the one that
+  failed. Earlier text that never becomes audio — the filters reduced
+  it to nothing, or synthesis failed — has no playback to wait for: if
+  no sign of it arrives within `STEP_SPEECH_START_MAX_S` the wait ends,
+  logged as `speech_gap.no_playback`. A missing signal must not strand
   a reply, so the hold has a ceiling, and the ceiling scales with the
   speech being waited for: that speech's length in characters at a
   deliberately slow speaking rate (`STEP_SPEECH_SLOWEST_CPS`) plus
-  `STEP_SPEECH_HOLD_SLACK_S`. A long recitation therefore keeps its
-  pause; only a signal that never arrives reaches the ceiling, and
+  `STEP_SPEECH_HOLD_SLACK_S`, and never more than
+  `STEP_SPEECH_HOLD_MAX_S`. A long recitation therefore keeps its
+  pause; only a stop signal that never arrives reaches the ceiling, and
   then the words are spoken and `speech_gap.signal_missing` is logged
   at WARNING — an event that means a broken signal and nothing else. Nothing
   the model says is dropped or rewritten: narration before a tool call
@@ -676,7 +683,10 @@ FR-7 still governs: the agent acts when the user asks.
   of the earlier step does not start the gap early; a step that follows a
   playback far longer than the slack (a recitation) still gets its
   pause and logs nothing; the hold releases at its scaled ceiling, with
-  the warning, when the signal never comes; a closing confirmation after a
+  the warning, when the signal never comes, and at the cap however long
+  the earlier speech was; earlier text that never becomes audio is not
+  waited for past its start window, and logs no warning; the fallback
+  line waits for the gap like any step; a closing confirmation after a
   spoken sentence is spoken, not dropped. The no-tool turn — the overwhelming common case — is
   one LLM call with no added synchronous work (NFR-10 applies to the
   loop itself; anything the loop does beyond the call and the
@@ -1169,6 +1179,8 @@ on session end: ONE WRITE_GRACE_S budget, spent once — End-tap/disconnect:
 | `STEP_SPEECH_GAP_S` (pause between two spoken steps of one turn) | 1s | `agent/loop.py` |
 | `STEP_SPEECH_SLOWEST_CPS` (speaking rate assumed when bounding the wait for earlier playback; kept at or below half the voice's real rate — about 12 chars/s at the current `CARTESIA_SPEED` — and revisited whenever that speed changes) | 6 chars/s | `agent/loop.py` |
 | `STEP_SPEECH_HOLD_SLACK_S` (added to that bound) | 5s | `agent/loop.py` |
+| `STEP_SPEECH_HOLD_MAX_S` (the bound's cap, however long the earlier speech) | 60s | `agent/loop.py` |
+| `STEP_SPEECH_START_MAX_S` (how long to wait for earlier text to start playing at all) | 2s | `agent/loop.py` |
 | `WRITE_GRACE_S` (teardown wait for writes) | 5 total | `agent/companion.py` (the code that awaits: session teardown + the SIGTERM drain; the loop only owns the in-flight set) |
 | Model / provider | `LLM_MODEL` / `LLM_PROVIDER` env | `agent/providers.py` |
 | Voice + tool-use behavior | system prompt | `agent/prompts.py` |
@@ -2704,9 +2716,12 @@ deliberately unchanged (FR-56 states local verification and why).
     uttered buffer that resets at the NEXT turn's start (it must span
     the playback tail, where the cut lands).
   - An interruption arriving with NO live turn compares the last
-    assistant entry against the text released SINCE that entry was
-    appended (entry-scoped — an earlier entry's audio, e.g. a sentence
-    spoken before a tool call, never vouches for the last one): fully heard is a strict
+    assistant entry against the text released SINCE that entry began
+    to speak (entry-scoped — an earlier entry's audio, e.g. a sentence
+    spoken before a tool call, never vouches for the last one; the
+    scope is stamped when the step pushes its first words, after FR-43's
+    pause, because with word-by-word releases an earlier step's words
+    arrive after the next step has started): fully heard is a strict
     no-op (every ordinary speech start broadcasts an interruption);
     otherwise the entry truncates to the longest matching word-prefix
     (15-char floor — shorter is coincidence) plus FR-46's cut-off
@@ -2757,7 +2772,9 @@ deliberately unchanged (FR-56 states local verification and why).
     same turn; a cut a few words in does the same; the same cut on a
     session's first reply changes nothing and logs the WARN once; an
     interruption before any audio keeps the entry whole, marked; a
-    fully heard reply is left alone.
+    fully heard reply is left alone; a reply that follows narration and
+    a tool call, with the narration's words released after that step
+    began, is still cut to its first sentence.
   - A context whose last message is no longer the assistant's, or whose
     entry already carries the mid-generation mark, is never amended.
 
@@ -2877,7 +2894,9 @@ Five decisions shape every FR below, each with the alternative it beat:
   write tools needs well above it. Mandated tests: each threshold on
   both sides; the order (a mid-thought answer wins over the rest); a
   nothing choice on a turn that keeps its write tools becomes affirm,
-  not silence; each switch off.
+  not silence; each switch off. The edit-and-speak instruction is never
+  given to a talk-only turn, whatever the thresholds are set to: a turn
+  with no write tools must not be told to make a change.
 - **FR-64** **On either silent outcome the main model is not called and
   nothing is spoken until the user's next turn; the silence has no time
   limit.** Mechanism:
@@ -2994,7 +3013,10 @@ Five decisions shape every FR below, each with the alternative it beat:
   finished. An unanswered WRITE or an unanswered SPEAK skips decisions
   2 and 3 together, whichever of the two did answer: the outcome is
   plain (nothing withheld, no instruction, no nothing-asked silence). The
-  question records its status as `timeout` or `error` (FR-70).
+  question records its status as `timeout` or `error` (FR-70). A
+  failure while turning the answers into a decision is one more way of
+  having no verdict and ends the same way: a plain turn, with its
+  records.
   Mechanism:
   - Requests still pending at the ceiling are cancelled. There are no
     retries.
@@ -3073,7 +3095,10 @@ Five decisions shape every FR below, each with the alternative it beat:
     integration is one POST, and the hard constraint is that the call
     lives in this file, which it does. Key in `TYPESAFE_API_KEY`, model
     in `CHECK_MODEL`. One client is shared by the process, so sessions
-    reuse its warm connections. The default is a pinned
+    reuse its warm connections; it is closed at app shutdown. Every
+    probability in a response is range-checked (0 to 1): a value outside
+    it is an unreadable answer, so a response in some other shape is a
+    bypass and never a confident verdict. The default is a pinned
     version, not the provider's moving "latest" alias: FR-63's
     thresholds are tuned to a version.
   - Pipecat is not upgraded for this: its own Jev integration ships in
@@ -3241,7 +3266,10 @@ Five decisions shape every FR below, each with the alternative it beat:
   the silence that replaces it is not there, and without either one a
   trailing thought gets advice — the failure this section exists for.
   The prompt is assembled from the switches, so the two change together
-  in one configuration change and never in separate deploys. The rule
+  in one configuration change and never in separate deploys; the
+  builder takes that choice as a required argument, and every other
+  prompt contract (the C-3 word ban included) is tested against both
+  assemblies. The rule
   leaves as a whole: the clause that offers the sound and the clauses
   that restrict it ("never twice in a row", "never to a question") go
   together, since a prompt that forbids a reply it never offered still

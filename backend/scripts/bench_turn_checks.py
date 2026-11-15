@@ -22,6 +22,7 @@ so the folder is git-ignored and is never copied to the server.
 
 import asyncio
 import csv
+import dataclasses
 import json
 import sys
 import time
@@ -198,12 +199,15 @@ async def main() -> int:
     # every question is asked, whatever the switches say: the bench is how
     # the owner decides what to switch on
     configured = CheckSettings.from_settings(settings)
-    cfg = CheckSettings(**{**configured.__dict__, **_ALL_ON})
+    cfg = dataclasses.replace(configured, **_ALL_ON)
     if "--latency" in sys.argv:
         return await latency(checker, cfg)
     if "--accuracy" in sys.argv:
-        folder = Path(sys.argv[sys.argv.index("--accuracy") + 1])
-        return await accuracy(checker, cfg, folder)
+        at = sys.argv.index("--accuracy") + 1
+        if at >= len(sys.argv) or not Path(sys.argv[at]).is_dir():
+            print("--accuracy needs the folder that holds labelled.json and labels.csv")
+            return 2
+        return await accuracy(checker, cfg, Path(sys.argv[at]))
     print(__doc__)
     return 2
 

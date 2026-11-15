@@ -47,6 +47,7 @@ def _fast_speech_gap(monkeypatch):
     monkeypatch.setattr(loop_mod, "STEP_SPEECH_GAP_S", 0.01)
     monkeypatch.setattr(loop_mod, "STEP_SPEECH_HOLD_SLACK_S", 0.02)
     monkeypatch.setattr(loop_mod, "STEP_SPEECH_SLOWEST_CPS", 100000.0)
+    monkeypatch.setattr(loop_mod, "STEP_SPEECH_START_MAX_S", 0.02)
 
 
 def _done(finish="stop", usage=None):

@@ -27,6 +27,7 @@ from agent.providers import CHECK_ANSWERED, CheckAnswer, CheckQuestion
 DONE = "done"
 WRITE = "write"
 SPEAK = "speak"
+QUESTION_IDS = (DONE, WRITE, SPEAK)
 
 # The wording carries two lessons from the bench on recorded turns
 # (docs/evals/2026-11-13-decision-gates.md): DONE has to be told the text
@@ -49,6 +50,9 @@ _WRITE = CheckQuestion(
 NOTHING = "nothing"
 AFFIRM = "affirm"
 ANSWER = "answer"
+# not a SPEAK option: the instruction a turn gets when an answer AND an
+# edit were asked for (FR-66)
+EDIT_AND_SPEAK = "edit_and_speak"
 _SPEAK = CheckQuestion(
     SPEAK,
     "What does the user expect the assistant to say out loud in reply to "
@@ -168,7 +172,7 @@ class TurnPlan:
 
     silent: str | None = None  # SILENT_* : the main model is not called
     talk_only: bool = False  # write tools withheld (FR-65)
-    speech: str | None = None  # AFFIRM | "edit_and_speak" (FR-66)
+    speech: str | None = None  # AFFIRM | EDIT_AND_SPEAK (FR-66)
     bypass: bool = False  # an asked question went unanswered (FR-67)
 
     @property
@@ -186,7 +190,7 @@ class TurnPlan:
             )
         if self.speech == AFFIRM:
             return AFFIRM_INSTRUCTION
-        if self.speech == "edit_and_speak":
+        if self.speech == EDIT_AND_SPEAK:
             return EDIT_AND_SPEAK_INSTRUCTION
         return None
 
@@ -225,16 +229,20 @@ def decide(answers: dict[str, CheckAnswer], cfg: CheckSettings) -> TurnPlan:
         return TurnPlan(bypass=bypass)
 
     talk_only = 1 - write.p_yes >= cfg.no_write_min
-    p = speak.probabilities
-    if p[NOTHING] >= cfg.nothing_min:
+    p = speak.probabilities or {}
+    if p.get(NOTHING, 0.0) >= cfg.nothing_min:
         if talk_only:
             return TurnPlan(silent=SILENT_NOTHING_ASKED, bypass=bypass)
         # an edit may have been asked for, and work is always confirmed
         speech = AFFIRM
-    elif p[AFFIRM] >= cfg.affirm_min:
+    elif p.get(AFFIRM, 0.0) >= cfg.affirm_min:
         speech = AFFIRM
     elif not talk_only and write.p_yes >= cfg.both_min:
-        speech = "edit_and_speak"
+        # `not talk_only` is not in FR-63's text because its default
+        # thresholds cannot meet (withholding needs p_write <= 0.2, this
+        # needs >= 0.6); it keeps a retuned pair from ever telling a turn
+        # with no write tools to "make the change"
+        speech = EDIT_AND_SPEAK
     else:
         speech = None
     return TurnPlan(talk_only=talk_only, speech=speech, bypass=bypass)

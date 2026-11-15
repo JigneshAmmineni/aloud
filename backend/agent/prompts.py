@@ -195,14 +195,15 @@ WRAP_UP_INSTRUCTION = (
 )
 
 
-def build_system_prompt(*, checks_on: bool = False) -> str:
+def build_system_prompt(*, checks_on: bool) -> str:
     """`checks_on` = BOTH §4.15 turn checks are on (FR-73). It decides one
     thing: whether a turn that needs no answer is handled by silence
     before the model is called (then the prompt names neither listening
     sound, and thinking aloud that still gets through closes with an
     affirm), or by today's listening-sound rule (then the prompt carries
     that rule unchanged and no thinking-aloud clause). The two never
-    appear together."""
+    appear together. Required, with no default: a caller that forgot it
+    would test or ship the assembly it did not mean."""
     listening = _LISTENING_SILENT if checks_on else _LISTENING_WITH_SOUND
     modes = _ANSWER_MODES.replace(
         "{thinking_aloud}", _THINKING_ALOUD_IS_AFFIRM if checks_on else ""

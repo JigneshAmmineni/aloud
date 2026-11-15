@@ -670,6 +670,13 @@ def _jev_http() -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0))
 
 
+async def close_turn_checker_http() -> None:
+    """App shutdown: close the shared client if one was ever built."""
+    if _jev_http.cache_info().currsize:
+        await _jev_http().aclose()
+        _jev_http.cache_clear()
+
+
 class JevTurnChecker:
     """The API is early access and its field names may change: this
     class is the one place that knows them (request: model, state,
@@ -724,8 +731,13 @@ class JevTurnChecker:
                 )
             else:
                 probs = item.get("probabilities")
+                # range-checked like the yes/no branch: a percentage-shaped
+                # response must be an error (and so a bypass), never a
+                # confident answer that silences every turn
                 ok = isinstance(probs, dict) and all(
-                    isinstance(probs.get(label), (int, float)) for label in q.options
+                    isinstance(probs.get(label), (int, float))
+                    and 0 <= probs[label] <= 1
+                    for label in q.options
                 )
                 answers[q.id] = (
                     CheckAnswer(

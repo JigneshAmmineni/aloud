@@ -45,6 +45,7 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.transports.base_output import BaseOutputTransport
 
 from agent.checks import (
+    QUESTION_IDS,
     CheckSettings,
     TurnPlan,
     build_evidence,
@@ -99,6 +100,13 @@ STEP_SPEECH_GAP_S = 1.0
 # here.
 STEP_SPEECH_SLOWEST_CPS = 6.0
 STEP_SPEECH_HOLD_SLACK_S = 5.0
+# ...and never beyond this, however long the earlier speech was.
+STEP_SPEECH_HOLD_MAX_S = 60.0
+# An earlier step's text that never becomes audio (the filters reduced it
+# to nothing, synthesis failed) has no playback to wait for: if no sign of
+# it arrives within this long, the wait is over. Its own event, not the
+# missing-signal warning.
+STEP_SPEECH_START_MAX_S = 2.0
 
 # FR-65's defense in depth: a call to a withheld tool gets this result.
 WITHHELD_REFUSAL = {
@@ -366,19 +374,22 @@ class AgentLoopProcessor(FrameProcessor):
                 # a turn the agent stays silent on is still in the context
                 self._context.append_user(user_text)
                 state.plan = await self._check_turn(state)
-            # FR-64: a silent outcome runs no step at all
-            ended = state.plan.silent is not None
-            if ended:
+            if state.plan.silent is not None:
+                # FR-64: a silent outcome runs no step at all
                 await self._stay_silent(state)
-            for step in range(1, MAX_STEPS + 1) if not ended else ():
-                state.step = step
-                # Greeting: tool selection forbidden, tools still declared
-                # (FR-42/FR-7 — a session must not open with list_documents
-                # volunteering last week's titles unprompted).
-                tool_choice = "none" if purpose == "greeting" else "auto"
-                ended = await self._run_step(state, tool_choice, purpose)
-                if ended:
-                    break
+                ended = True
+            else:
+                ended = False
+                for step in range(1, MAX_STEPS + 1):
+                    state.step = step
+                    # Greeting: tool selection forbidden, tools still
+                    # declared (FR-42/FR-7 — a session must not open with
+                    # list_documents volunteering last week's titles
+                    # unprompted).
+                    tool_choice = "none" if purpose == "greeting" else "auto"
+                    ended = await self._run_step(state, tool_choice, purpose)
+                    if ended:
+                        break
             if not ended:
                 # Cap hit: ONE forced final call, tools declared but
                 # selection forbidden, wrap-up instruction injected into
@@ -487,6 +498,16 @@ class AgentLoopProcessor(FrameProcessor):
                             if state.earlier_speech_chars:
                                 await self._hold_for_speech_gap(state)
                             state.earlier_speech_at = time.monotonic()
+                            # FR-61 entry scope, re-stamped as this step
+                            # begins to SPEAK: the transport releases
+                            # played text word by word, so an earlier
+                            # step's words land after this step STARTED
+                            # (during its LLM call and the pause above).
+                            # Left at the step-start mark they would be
+                            # counted as this entry's own, and a reply
+                            # the user never heard would stay whole
+                            # behind the mismatch valve.
+                            self._uttered_mark = len(self._uttered)
                         await self.push_frame(LLMTextFrame(event.text))
                     elif isinstance(event, LLMToolCall):
                         if (
@@ -640,13 +661,17 @@ class AgentLoopProcessor(FrameProcessor):
         usage = None
         reason = None  # why nothing came back: timeout | the error's type
         status = "cancelled"  # overwritten unless a barge-in unwinds
-        plan = TurnPlan()
+        plan: TurnPlan | None = None
         t0 = time.monotonic()
         try:
             answers, usage = await asyncio.wait_for(
                 self._checker.ask(evidence, questions), cfg.timeout_s
             )
             status = CHECK_ANSWERED
+            # inside the try on purpose: anything this raises is one more
+            # way of having no verdict, and must end as a plain turn with
+            # its records (FR-67) — not as an exception out of the finally
+            plan = decide(answers, cfg)
         except asyncio.TimeoutError:
             status = reason = "timeout"
         except asyncio.CancelledError:
@@ -656,20 +681,26 @@ class AgentLoopProcessor(FrameProcessor):
         finally:
             ms = round((time.monotonic() - t0) * 1000)
             interrupted = status == "cancelled"
-            if not interrupted:
-                plan = decide(answers, cfg)
+            if plan is None:
+                # no verdict: today's behaviour, marked as a bypass
+                plan = TurnPlan(bypass=not interrupted)
             # a request that came back without one of its answers: that
             # question is an error, not "answered" (FR-67)
             missing = CHECK_ERROR if status == CHECK_ANSWERED else status
+            asked = {q.id for q in questions}
             per_question = {
-                q.id: {
-                    "status": answers[q.id].status if q.id in answers else missing,
-                    "p_yes": answers[q.id].p_yes if q.id in answers else None,
+                qid: {
+                    "status": (
+                        "off"
+                        if qid not in asked
+                        else answers[qid].status if qid in answers else missing
+                    ),
+                    "p_yes": answers[qid].p_yes if qid in answers else None,
                     "probabilities": (
-                        answers[q.id].probabilities if q.id in answers else None
+                        answers[qid].probabilities if qid in answers else None
                     ),
                 }
-                for q in questions
+                for qid in QUESTION_IDS
             }
             detail = "interrupted" if interrupted else plan.detail
             # C-1's advisory rides the stage record, whatever the ceiling
@@ -730,11 +761,13 @@ class AgentLoopProcessor(FrameProcessor):
         STEP_SPEECH_GAP_S of silence after it — re-armed whenever speech
         resumes, so a stop between two sentences does not end the wait.
         Bounded by a ceiling that scales with the speech waited for."""
-        ceiling = (
+        ceiling = min(
             state.earlier_speech_chars / STEP_SPEECH_SLOWEST_CPS
-            + STEP_SPEECH_HOLD_SLACK_S
+            + STEP_SPEECH_HOLD_SLACK_S,
+            STEP_SPEECH_HOLD_MAX_S,
         )
         pushed_at = state.earlier_speech_at or 0.0
+        start_by = time.monotonic() + STEP_SPEECH_START_MAX_S
 
         def earlier_speech_seen() -> bool:
             # it is playing now, or a start or a stop came after it was
@@ -744,24 +777,39 @@ class AgentLoopProcessor(FrameProcessor):
                 for at in (self._bot_started_at, self._bot_stopped_at)
             )
 
-        async def wait() -> None:
+        async def wait() -> bool:
+            """False: the earlier speech never started playing."""
             while True:
                 self._speech_changed.clear()
-                if not earlier_speech_seen() or self._bot_speaking:
+                if not earlier_speech_seen():
+                    left = start_by - time.monotonic()
+                    if left <= 0:
+                        return False
+                    try:
+                        await asyncio.wait_for(self._speech_changed.wait(), left)
+                    except asyncio.TimeoutError:
+                        return False
+                    continue
+                if self._bot_speaking:
                     await self._speech_changed.wait()
                     continue
                 remaining = STEP_SPEECH_GAP_S - (
                     time.monotonic() - (self._bot_stopped_at or 0.0)
                 )
                 if remaining <= 0:
-                    return
+                    return True
                 try:
                     await asyncio.wait_for(self._speech_changed.wait(), remaining)
                 except asyncio.TimeoutError:
-                    return  # the silence held for the whole gap
+                    return True  # the silence held for the whole gap
 
         try:
-            await asyncio.wait_for(wait(), ceiling)
+            if not await asyncio.wait_for(wait(), ceiling):
+                self._log.bind(
+                    event="speech_gap.no_playback",
+                    turn_id=state.turn_id,
+                    step=state.step,
+                ).info("the earlier step's text produced no audio; not waiting")
         except asyncio.TimeoutError:
             # means a broken signal and nothing else: the ceiling is far
             # above how long that speech can take to play
@@ -1078,6 +1126,13 @@ class AgentLoopProcessor(FrameProcessor):
         self._log.bind(
             event="agent.fallback", turn_id=state.turn_id, reason=reason
         ).warning(f"spoken fallback (reason: {reason})")
+        # FR-43: the one line the loop speaks itself must not run into
+        # what the turn already said — an earlier step's narration, or
+        # this step's own text before it failed.
+        if state.step_text.strip():
+            state.earlier_speech_chars += len(state.step_text)
+        if state.earlier_speech_chars:
+            await self._hold_for_speech_gap(state)
         try:
             await self.push_frame(LLMFullResponseStartFrame())
             await self.push_frame(LLMTextFrame(line))
