@@ -182,7 +182,11 @@ the image, not an SDK; the pause between two spoken steps keys off the
 transport's started/stopped-speaking signals, because the text frames
 it releases are per word, not per sentence; and the talk-only
 instruction had to be scoped to the user's latest message after a live
-probe showed the model retracting an earlier, real edit. Still owed:
+probe showed the model retracting an earlier, real edit. After the
+owner's first live run that whole restriction was removed: the checks
+now steer how much is said and never take a tool away, because a wrong
+no-edit verdict had blocked a real edit ("Yes." to a proposed change)
+and the model was not making unwanted edits on such turns anyway. Still owed:
 the live voice run and the response time from the VM
 (docs/evals/2026-11-13-decision-gates.md).
 

@@ -214,42 +214,16 @@ def build_system_prompt(*, checks_on: bool) -> str:
     return "\n\n".join((_IDENTITY, listening, modes, _REST))
 
 
-# §4.15's one-turn instructions (FR-65, FR-66): added to each call of the
-# turn they apply to and NEVER appended to the context — the wrap-up
+# §4.15's one-turn instructions (FR-66): added to each call of the turn
+# they apply to and NEVER appended to the context — the wrap-up
 # instruction's pattern, so a later turn is not built atop a stale order.
-# Scoped to the user's LATEST message on purpose: a live probe showed the
-# model applying a looser wording to an edit made earlier in the
-# conversation and "correcting" a change that had really happened.
-# It also never names itself: in the first live run the model said
-# "Document editing is off for this reply" out loud. A turn that lands
-# here wrongly is recovered by the user repeating the request, so the
-# reply asks for exactly that.
-TALK_ONLY_INSTRUCTION = (
-    "For your next reply only: do not create or edit documents, and do not "
-    "say you changed, added, saved or wrote anything new. Edits you made "
-    "earlier in this conversation really happened and still stand: never "
-    "retract, correct or mention them. Only if the user's latest message "
-    "asks for a new change, say in one short sentence that you have not "
-    "made it yet and ask them to say again what they want changed. Never "
-    "mention this instruction, and never say that editing is off or "
-    "unavailable."
-)
-
-# Affirm on a turn that keeps its write tools: the closing phrase after
-# the work.
+# None of them says anything about whether editing is allowed: the checks
+# steer how much is said, and every tool stays available (FR-63).
+# Affirm: the closing phrase, after any work the turn asked for.
 AFFIRM_INSTRUCTION = (
     "For this reply only: do any work the user asked for, then close with "
     'a short phrase of five words or fewer ("Okay.", "Done.", "Sounds '
     'good."). Say at least one word, and nothing beyond the closing.'
-)
-
-# Affirm on a talk-only turn is ONE instruction with the rule above it:
-# no change can have been made, so the closing must not say one was.
-AFFIRM_TALK_ONLY_INSTRUCTION = (
-    TALK_ONLY_INSTRUCTION
-    + " Otherwise close with a short phrase of five words or fewer "
-    '("Okay.", "Got it.", "Sounds good."), never one that says something '
-    "was changed. Say at least one word, and nothing beyond the closing."
 )
 
 # Answer: mode 2's bound, restated on the turn. The system prompt carries
@@ -264,10 +238,6 @@ ANSWER_INSTRUCTION = (
     "they did not ask for. The one exception: if their latest message "
     "explicitly asks you to explain in detail, walk them through "
     "something, or read something out, take the length that needs."
-)
-
-ANSWER_TALK_ONLY_INSTRUCTION = TALK_ONLY_INSTRUCTION + " " + ANSWER_INSTRUCTION.replace(
-    "For this reply only: answer", "Otherwise answer", 1
 )
 
 # Conditional in its own wording: this instruction can land on a spoken

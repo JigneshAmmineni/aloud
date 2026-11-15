@@ -345,7 +345,7 @@ backend/
               insert/append/replace/rename, announce payload cap),
               checks.py (§4.15: the three questions, the evidence
               builder, and the rules that turn answers into a turn's
-              plan — silent, talk-only, affirm, edit-and-speak, plain;
+              plan — silent, affirm, answer, edit-and-speak, plain;
               pure functions, the provider is behind providers.py),
               gate.py (FR-60 create gate: a bounded yes/no judge call
               through the FR-48 seam, on the smaller judge model, in
@@ -456,9 +456,10 @@ Two architectural seams everything hangs on:
    asked for, and how much they expect said back. Mid-thought or
    nothing asked → the LLM is not called, nothing is spoken, the client
    gets `turn.silent` (its indicator returns to Listening) and the text
-   waits in the context for the next turn. No edit asked → the turn
-   declares only the read tools. "Affirm", "answer" and "edit and speak"
-   each add one instruction to that turn's calls only. No answer within 1s, or an
+   waits in the context for the next turn. Otherwise the verdict adds
+   one instruction to that turn's calls only — "affirm" (a few words),
+   "answer" (one or two sentences) or "edit and speak". The checks
+   steer what is said; they never take a tool away. No answer within 1s, or an
    error → the turn runs unchecked, as before the checks existed. Every
    checked turn leaves a `turn.check` log line, a `check` usage event
    (its `detail` is the outcome the admin drill-down shows) and one
@@ -687,7 +688,7 @@ Full original rationale: `git show a84df1b:SDD.md` (§0).
 | 9 | Git: `main` = workbench, `prod` = deploy pointer; PR + CI + Claude review gate on `main` | Two-branch model matching a solo dev with a live demo |
 | 10 | Everything in Docker; commit-at-checkpoints, push/PR only on confirmation | CLAUDE.md workflow rules |
 | 11 | Hand-rolled agent loop in the pipeline's LLM slot (§4.10) | One hot-path LLM call per turn (the one thing asked first is §4.15's turn check: a small decision model, about 0.1s, 1s ceiling); Pipecat stays the audio chassis, the loop is plain Python behind our seams (context provider, tool registry, provider client) so features 4–6 extend seams, not control flow, and a Pipecat retirement would strand nothing. Both mandated spikes ran first: stage swap + barge-in (the interruption hook is `_start_interruption`, not a frame), and live Gemini streaming (function calls arrive ATOMICALLY; raw API defaults thinking ON — pinned off per call) |
-| 12 | Turn checks before the LLM (§4.15): TypeSafe Jev, one request per user turn | Deepgram says the user stopped talking, not that they are finished or what they want. Asking first means a turn the agent should not take costs no LLM call, and a turn that asked for no edit cannot edit. Wait-then-call was chosen over starting the LLM at once and applying the verdict to its output (wasted tokens, a refusal round). A missing answer falls back to the old behaviour, so the provider being down never mutes the agent. Rejected: tuning Flux's threshold alone, an audio-level turn model (non-commercial weights, needs a GPU), Haiku as the checker (about 1s per turn) |
+| 12 | Turn checks before the LLM (§4.15): TypeSafe Jev, one request per user turn | Deepgram says the user stopped talking, not that they are finished or what they want. Asking first means a turn the agent should not take costs no LLM call, and an answer turn carries its length bound. The checks steer and never restrict: withholding the edit tools on a no-edit verdict was built, run live and removed, because a wrong verdict blocked a real edit. Wait-then-call was chosen over starting the LLM at once and applying the verdict to its output (wasted tokens, a refusal round). A missing answer falls back to the old behaviour, so the provider being down never mutes the agent. Rejected: tuning Flux's threshold alone, an audio-level turn model (non-commercial weights, needs a GPU), Haiku as the checker (about 1s per turn) |
 
 ## 9. Scaling notes (when the time comes)
 

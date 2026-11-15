@@ -115,11 +115,7 @@ def _expected(row: dict) -> str | None:
         return None
     if row["write"] == "y":
         return "edit_and_speak" if row["speak"] == "y" else "affirm"
-    return {
-        "n": SILENT_NOTHING_ASKED,
-        "a": "talk_only+affirm",
-        "y": "talk_only+answer",
-    }[row["speak"]]
+    return {"n": SILENT_NOTHING_ASKED, "a": "affirm", "y": "answer"}[row["speak"]]
 
 
 async def accuracy(checker, cfg, folder: Path) -> int:
@@ -158,11 +154,11 @@ async def accuracy(checker, cfg, folder: Path) -> int:
     no_edits = [(r, a) for r, a in results if r["write"] == "n"]
     print(f"\nWRITE (edit asked: {len(edits)}, not asked: {len(no_edits)})")
     for th in (0.5, 0.6, 0.7, 0.8, 0.9):
-        withheld = [r["n"] for r, a in edits if 1 - a[WRITE].p_yes >= th]
-        kept = sum(1 for r, a in no_edits if 1 - a[WRITE].p_yes >= th)
+        missed = [r["n"] for r, a in edits if 1 - a[WRITE].p_yes >= th]
+        right = sum(1 for r, a in no_edits if 1 - a[WRITE].p_yes >= th)
         print(
-            f"  withhold when 1 - p_write >= {th:.1f}: wrongly withheld "
-            f"{len(withheld)} {withheld} | correctly withheld {kept} of {len(no_edits)}"
+            f"  'no edit asked' when 1 - p_write >= {th:.1f}: wrong on "
+            f"{len(missed)} {missed} of the edits | right on {right} of {len(no_edits)}"
         )
 
     scored = [(r, decide(a, cfg).detail, _expected(r)) for r, a in results]
@@ -170,7 +166,7 @@ async def accuracy(checker, cfg, folder: Path) -> int:
     right = sum(got == want for _, got, want in scored)
     print(
         f"\nOUTCOME at the configured thresholds (mid-thought {cfg.mid_thought_min}, "
-        f"withhold {cfg.no_write_min}, nothing {cfg.nothing_min}, affirm "
+        f"no-edit {cfg.no_write_min}, nothing {cfg.nothing_min}, affirm "
         f"{cfg.affirm_min}, edit-and-speak {cfg.both_min}): "
         f"{right} of {len(scored)} labelled turns get the outcome their labels call for"
     )
@@ -187,7 +183,6 @@ async def accuracy(checker, cfg, folder: Path) -> int:
     print("\nBy kind of mistake (row numbers in labels.csv, never text):")
     print("  wrongly silent:    ", count(lambda r, g, w: g.startswith("silent") and not w.startswith("silent")))
     print("  wrongly replying:  ", count(lambda r, g, w: w.startswith("silent") and not g.startswith("silent")))
-    print("  wrongly withheld:  ", count(lambda r, g, w: r["write"] == "y" and "talk_only" in g))
     print("  wrongly instructed:", count(lambda r, g, w: g == "edit_and_speak" and w != "edit_and_speak"))
     return 0
 

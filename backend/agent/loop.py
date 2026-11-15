@@ -108,18 +108,6 @@ STEP_SPEECH_HOLD_MAX_S = 60.0
 # missing-signal warning.
 STEP_SPEECH_START_MAX_S = 2.0
 
-# FR-65's defense in depth: a call to a withheld tool gets this result.
-WITHHELD_REFUSAL = {
-    "status": "refused",
-    "error": (
-        "This call did nothing and no change was made. Do not say it was "
-        "done. Tell the user in one short sentence that you have not made "
-        "the change yet and ask them to say again what they want changed. "
-        "Do not mention tools or why."
-    ),
-}
-
-
 class _TurnState:
     """Live state for one turn — what the interruption handler finalizes
     from. Everything here is owned by the turn task while it runs and read
@@ -198,10 +186,6 @@ class AgentLoopProcessor(FrameProcessor):
         self._llm = llm
         self._tools = {t.name: t for t in registry}
         self._schemas = registry_schemas(registry)
-        # FR-65: what a talk-only turn declares — reads are never withheld
-        self._read_schemas = registry_schemas(
-            [t for t in registry if not t.is_write]
-        )
         self._checker = checker
         self._checks = checks
         self._session_id = session_id
@@ -433,14 +417,11 @@ class AgentLoopProcessor(FrameProcessor):
         self._uttered_mark = len(self._uttered)
         messages = self._context.build(turn_id=state.turn_id, step=state.step)
         # §4.15: the turn's one instruction rides every call of the turn
-        # and is never appended to the context (FR-65/FR-66)
+        # and is never appended to the context (FR-66)
         if state.plan.instruction:
             messages = messages + [
                 {"role": "system", "content": state.plan.instruction}
             ]
-        # FR-65: a talk-only turn declares only the read tools, at every
-        # step, the forced wrap-up included
-        schemas = self._read_schemas if state.plan.talk_only else self._schemas
         if wrap_up:
             messages = messages + [{"role": "system", "content": WRAP_UP_INSTRUCTION}]
         elif purpose == "greeting":
@@ -484,7 +465,7 @@ class AgentLoopProcessor(FrameProcessor):
             # aclosing: barge-in cancellation closes the provider stream —
             # and its HTTP connection — deterministically, not at GC time.
             async with aclosing(
-                self._llm.stream(messages, tools=schemas, tool_choice=tool_choice)
+                self._llm.stream(messages, tools=self._schemas, tool_choice=tool_choice)
             ) as stream:
                 async for event in stream:
                     elapsed_ms = round((time.monotonic() - state.t0) * 1000)
@@ -855,14 +836,8 @@ class AgentLoopProcessor(FrameProcessor):
             if sum(1 for c in state.calls if c.name == call.name) > 1
             else ""
         )
-        # FR-65's defense in depth: on a talk-only turn the write tools
-        # were not declared, but the context still shows the model its own
-        # earlier calls to them. Checked BEFORE the gate: no judge call is
-        # paid for a call that is refused either way.
-        withheld = tool is not None and tool.is_write and state.plan.talk_only
         denied = (
             tool is not None
-            and not withheld
             and tool.name in GATED_TOOLS
             and not await self._gate_allows(state, call, log, stage_suffix)
         )
@@ -873,9 +848,6 @@ class AgentLoopProcessor(FrameProcessor):
         if tool is None:
             result = {"status": "error", "error": f"unknown tool: {call.name}"}
             outcome = "error"
-        elif withheld:
-            result = dict(WITHHELD_REFUSAL)
-            outcome = "withheld"
         elif denied:
             # FR-60: the judge said no (or failed — the gate fails
             # closed). The refusal steers the model to edit_document or

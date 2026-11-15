@@ -5,8 +5,8 @@ Deepgram's end of turn says the user stopped talking. These checks ask
 a small decision model three things before the main model is called
 (FR-62): is the user finished, did they ask for an edit, and how much do
 they expect said back. The answers decide, in order (FR-63), whether the
-turn is taken at all, whether the model may edit, and which one-turn
-instruction it gets.
+turn is taken at all and which one-turn instruction it gets. They steer;
+they never restrict: every tool stays available on every turn that runs.
 
 Everything here is plain data and pure functions: the provider lives
 behind agent/providers.py's checker (FR-69), and the loop owns the
@@ -18,11 +18,8 @@ from dataclasses import dataclass
 
 from agent.prompts import (
     AFFIRM_INSTRUCTION,
-    AFFIRM_TALK_ONLY_INSTRUCTION,
     ANSWER_INSTRUCTION,
-    ANSWER_TALK_ONLY_INSTRUCTION,
     EDIT_AND_SPEAK_INSTRUCTION,
-    TALK_ONLY_INSTRUCTION,
 )
 from agent.providers import CHECK_ANSWERED, CheckAnswer, CheckQuestion
 
@@ -46,8 +43,8 @@ _DONE = CheckQuestion(
 )
 # "...or agrees to a change" is from the first live run: the agent asked
 # 'Did you mean "put the first aid kit under gear"?', the user said
-# "Yes.", and the narrower wording scored that 0.06 — the edit tools were
-# withheld from a turn that was confirming an edit. Reworded: 0.93.
+# "Yes.", and the narrower wording scored that 0.06 on a turn that was
+# confirming an edit. Reworded: 0.93.
 _WRITE = CheckQuestion(
     WRITE,
     "In their latest turn the user asks the assistant to write, add, "
@@ -175,25 +172,23 @@ SILENT_NOTHING_ASKED = "silent_nothing_asked"
 
 @dataclass(frozen=True)
 class TurnPlan:
-    """What the checks decided for one turn (FR-63)."""
+    """What the checks decided for one turn (FR-63). A plan can make the
+    turn silent or add one instruction to it; it never takes a tool away
+    (owner decision, 2026-11-14: withholding the write tools on a no-edit
+    verdict blocked a real edit whenever the verdict was wrong, and the
+    model was not making unwanted edits on such turns to begin with)."""
 
     silent: str | None = None  # SILENT_* : the main model is not called
-    talk_only: bool = False  # write tools withheld (FR-65)
     speech: str | None = None  # AFFIRM | ANSWER | EDIT_AND_SPEAK (FR-66)
     bypass: bool = False  # an asked question went unanswered (FR-67)
 
     @property
     def instruction(self) -> str | None:
         """The one instruction added to this turn's calls, never appended
-        to the context. A talk-only affirm is ONE instruction: there the
-        closing phrase must not say a change was made."""
+        to the context. None of them says anything about editing being
+        allowed or not."""
         if self.silent:
             return None
-        if self.talk_only:
-            return {
-                AFFIRM: AFFIRM_TALK_ONLY_INSTRUCTION,
-                ANSWER: ANSWER_TALK_ONLY_INSTRUCTION,
-            }.get(self.speech, TALK_ONLY_INSTRUCTION)
         return {
             AFFIRM: AFFIRM_INSTRUCTION,
             ANSWER: ANSWER_INSTRUCTION,
@@ -203,13 +198,7 @@ class TurnPlan:
     @property
     def detail(self) -> str:
         """FR-70's outcome vocabulary for the usage event and the log."""
-        if self.silent:
-            name = self.silent
-        else:
-            bindings = (["talk_only"] if self.talk_only else []) + (
-                [self.speech] if self.speech else []
-            )
-            name = "+".join(bindings) or "plain"
+        name = self.silent or self.speech or "plain"
         return name + ("+bypass" if self.bypass else "")
 
 
@@ -234,24 +223,23 @@ def decide(answers: dict[str, CheckAnswer], cfg: CheckSettings) -> TurnPlan:
     if write is None or speak is None:
         return TurnPlan(bypass=bypass)
 
-    talk_only = 1 - write.p_yes >= cfg.no_write_min
+    # WRITE never touches the tools. It decides two things only: whether a
+    # turn that expects nothing may be SILENT (never, if an edit may have
+    # been asked for), and whether an answer turn also asked for an edit.
+    no_edit = 1 - write.p_yes >= cfg.no_write_min
     p = speak.probabilities or {}
     if p.get(NOTHING, 0.0) >= cfg.nothing_min:
-        if talk_only:
+        if no_edit:
             return TurnPlan(silent=SILENT_NOTHING_ASKED, bypass=bypass)
         # an edit may have been asked for, and work is always confirmed
         speech = AFFIRM
     elif p.get(AFFIRM, 0.0) >= cfg.affirm_min:
         speech = AFFIRM
-    elif not talk_only and write.p_yes >= cfg.both_min:
-        # `not talk_only` is not in FR-63's text because its default
-        # thresholds cannot meet (withholding needs p_write <= 0.2, this
-        # needs >= 0.6); it keeps a retuned pair from ever telling a turn
-        # with no write tools to "make the change"
+    elif not no_edit and write.p_yes >= cfg.both_min:
         speech = EDIT_AND_SPEAK
     else:
         # an answer is expected: the turn carries mode 2's bound (FR-66).
         # The prompt alone did not hold it — the first live run's answers
         # ran to three sentences and an unasked "also..."
         speech = ANSWER
-    return TurnPlan(talk_only=talk_only, speech=speech, bypass=bypass)
+    return TurnPlan(speech=speech, bypass=bypass)

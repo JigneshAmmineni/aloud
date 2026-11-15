@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent.checks import CheckSettings, questions_for  # noqa: E402
 from agent.gate import judge_allows, judge_messages  # noqa: E402
-from agent.prompts import TALK_ONLY_INSTRUCTION  # noqa: E402
+from agent.prompts import ANSWER_INSTRUCTION  # noqa: E402
 from agent.providers import (  # noqa: E402
     CHECK_ANSWERED,
     FINISH_STOP,
@@ -57,8 +57,9 @@ _TOOL_ROUND = [
     {"role": "tool", "tool_call_id": "toolu_smoke1", "name": "read_document", "content": {"status": "cancelled"}},
 ]
 _ASK = {"role": "user", "content": "Say hello, then tell me what two plus two is."}
-# FR-65: a talk-only turn declares only the read tools, while the history
-# still holds an earlier call to a write tool that is NOT declared now
+# A history that holds a call to a tool the request does not declare: the
+# provider accepts it (first proven for a design since removed; kept
+# because a tool leaving the registry produces the same shape)
 _EDIT_ROUND = [
     {"role": "user", "content": "Add milk to the list."},
     {
@@ -81,11 +82,11 @@ _CASES = [
     ("conversation opening with the assistant", [_SYSTEM, {"role": "assistant", "content": "Hi there."}, _ASK], "auto"),
     # the greeting and the forced wrap-up: tools declared, selection forbidden
     ("tool_choice none", [_SYSTEM, _ASK], "none"),
-    # FR-65's probe: the history calls a tool the request does not declare,
-    # and the turn's one instruction rides as a trailing system message
+    # FR-66: a turn's one instruction rides as a trailing system message
+    # (and the history calls a tool this request does not declare)
     (
-        "talk-only turn after an edit (undeclared tool in history)",
-        [_SYSTEM, *_EDIT_ROUND, _ASK, {"role": "system", "content": TALK_ONLY_INSTRUCTION}],
+        "one-turn instruction after an edit (undeclared tool in history)",
+        [_SYSTEM, *_EDIT_ROUND, _ASK, {"role": "system", "content": ANSWER_INSTRUCTION}],
         "auto",
     ),
 ]

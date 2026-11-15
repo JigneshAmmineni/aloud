@@ -31,12 +31,9 @@ from agent.checks import (
 from agent.context import INTERRUPTED_SUFFIX, ContextProvider
 from agent.prompts import (
     AFFIRM_INSTRUCTION,
-    AFFIRM_TALK_ONLY_INSTRUCTION,
     ANSWER_INSTRUCTION,
-    ANSWER_TALK_ONLY_INSTRUCTION,
     EDIT_AND_SPEAK_INSTRUCTION,
     FALLBACK_LINES,
-    TALK_ONLY_INSTRUCTION,
     WRAP_UP_INSTRUCTION,
     build_system_prompt,
 )
@@ -110,10 +107,14 @@ def test_the_mid_thought_threshold_on_both_sides(p_done, silent):
     assert (decide(answers(done=p_done), ON).silent is not None) is silent
 
 
-@pytest.mark.parametrize("p_write, talk_only", [(0.2, True), (0.21, False)])
-def test_the_withholding_threshold_on_both_sides(p_write, talk_only):
-    assert decide(answers(write=p_write), ON).talk_only is talk_only
-
+@pytest.mark.parametrize("p_write, silent", [(0.2, True), (0.21, False)])
+def test_the_no_edit_threshold_gates_only_the_nothing_asked_silence(p_write, silent):
+    """WRITE never touches the tools. Being sure no edit was asked is what
+    lets a turn that expects nothing be silent; short of that it closes
+    with a few words, because an edit may have been asked for."""
+    plan = decide(answers(write=p_write, nothing=0.9, answer=0.1), ON)
+    assert (plan.silent == SILENT_NOTHING_ASKED) is silent
+    assert plan.speech == (None if silent else AFFIRM)
 
 def test_nothing_asked_is_silence_only_when_no_edit_can_have_been_asked():
     quiet = answers(write=0.05, nothing=0.9, answer=0.1)
@@ -121,13 +122,13 @@ def test_nothing_asked_is_silence_only_when_no_edit_can_have_been_asked():
     # the same choice on a turn that keeps its write tools becomes affirm:
     # an edit may have been asked for, and work is always confirmed
     kept = decide(answers(write=0.5, nothing=0.9, answer=0.1), ON)
-    assert kept.silent is None and kept.speech == AFFIRM and not kept.talk_only
+    assert kept.silent is None and kept.speech == AFFIRM
 
 
 @pytest.mark.parametrize("p, speech", [(0.5, AFFIRM), (0.49, ANSWER)])
 def test_the_affirm_threshold_on_both_sides(p, speech):
     plan = decide(answers(write=0.05, affirm=p, answer=1 - p), ON)
-    assert plan.speech == speech and plan.talk_only
+    assert plan.speech == speech
 
 
 def test_a_plain_edit_request_gets_the_affirm_instruction_with_its_tools():
@@ -140,20 +141,19 @@ def test_edit_and_speak_needs_an_answer_and_enough_confidence_in_the_edit(
     p_write, speech
 ):
     plan = decide(answers(write=p_write, answer=0.97, affirm=0.02), ON)
-    assert plan.speech == speech and not plan.talk_only
+    assert plan.speech == speech
 
 
-def test_an_expected_answer_carries_mode_two_s_bound_and_keeps_its_tools_when_unsure():
+def test_an_expected_answer_carries_mode_two_s_bound_whatever_the_edit_answer():
     """First live run: the prompt alone did not hold answers to one or two
-    sentences. An answer turn now carries the bound itself — and when the
-    edit question is unsure, it still keeps its write tools."""
-    plan = decide(answers(write=0.4, answer=0.9), ON)
-    assert plan.detail == "answer" and not plan.talk_only
-    assert plan.instruction == ANSWER_INSTRUCTION
-    talk = decide(answers(write=0.05, answer=0.9), ON)
-    assert talk.detail == "talk_only+answer"
-    assert talk.instruction == ANSWER_TALK_ONLY_INSTRUCTION
-
+    sentences, so an answer turn carries the bound itself. The edit answer
+    changes nothing about that instruction: sure or unsure that no edit
+    was asked, it is the same line, and it never mentions editing."""
+    for p_write in (0.05, 0.4):
+        plan = decide(answers(write=p_write, answer=0.9), ON)
+        assert plan.detail == "answer" and plan.instruction == ANSWER_INSTRUCTION
+    assert "edit" not in ANSWER_INSTRUCTION.lower()
+    assert "document" not in ANSWER_INSTRUCTION.lower()
 
 def test_no_verdict_is_today_s_behaviour():
     assert decide({}, CheckSettings()).detail == "plain"
@@ -177,15 +177,10 @@ def test_each_switch_off_skips_its_decisions():
     assert decide(answers(done=0.0), mode_only).silent is None
 
 
-def test_a_talk_only_affirm_is_one_instruction_that_never_confirms_work():
+def test_a_confirming_yeah_gets_the_affirm_instruction_and_nothing_about_edits():
     plan = decide(answers(write=0.0, affirm=0.9, answer=0.1), ON)
-    assert plan.detail == "talk_only+affirm"
-    assert plan.instruction == AFFIRM_TALK_ONLY_INSTRUCTION
-    assert "have not made it yet" in plan.instruction
-    assert "say again what they want changed" in plan.instruction
-    assert "never one that says something was changed" in plan.instruction
-    assert '"Done."' not in plan.instruction
-
+    assert plan.detail == "affirm" and plan.instruction == AFFIRM_INSTRUCTION
+    assert "five words or fewer" in AFFIRM_INSTRUCTION
 
 def test_the_edit_and_speak_instruction_is_conditional_on_an_edit_being_asked():
     assert "if the user asked" in EDIT_AND_SPEAK_INSTRUCTION.lower()
@@ -385,16 +380,18 @@ def test_the_prompt_says_to_answer_the_newest_message_when_one_went_unanswered()
     assert "reply to the newest" in build_system_prompt(checks_on=True)
 
 
-def test_no_instruction_names_itself_or_says_editing_is_off():
-    """First live run: the model said "Document editing is off for this
-    reply" out loud."""
-    for text in (TALK_ONLY_INSTRUCTION, AFFIRM_TALK_ONLY_INSTRUCTION, ANSWER_TALK_ONLY_INSTRUCTION):
-        assert "switched off" not in text
-        assert "Never mention this instruction" in text
-        assert "say again what they want changed" in text
-    assert "tools" in loop_mod.WITHHELD_REFUSAL["error"]  # "do not mention tools"
-    assert "cannot be created or edited" not in loop_mod.WITHHELD_REFUSAL["error"]
+def test_no_instruction_restricts_editing_or_talks_about_it():
+    """Owner decision after the first live run: the checks steer, they
+    never restrict. A wrong no-edit verdict used to take the edit tools
+    away and make the model say "Document editing is off for this reply";
+    there is no such instruction, and no refusal for it, any more."""
+    import agent.prompts as prompts_mod
 
+    assert not hasattr(prompts_mod, "TALK_ONLY_INSTRUCTION")
+    assert not hasattr(loop_mod, "WITHHELD_REFUSAL")
+    for text in (AFFIRM_INSTRUCTION, ANSWER_INSTRUCTION):
+        lowered = text.lower()
+        assert "cannot" not in lowered and "do not create or edit" not in lowered
 
 def test_agreeing_to_an_offered_change_counts_as_asking_for_it():
     """First live run: "Yes." to 'Did you mean put the first aid kit under
@@ -486,7 +483,7 @@ def test_the_greeting_and_a_loop_with_the_switches_off_are_never_checked():
 # ---------------- the loop: FR-65, FR-66 ----------------
 
 
-def test_a_talk_only_turn_declares_no_write_tool_at_any_step_and_drops_its_instruction():
+def test_a_no_edit_verdict_never_touches_the_tools_and_only_bounds_the_answer():
     scripts = [
         [LLMToolCall(name="echo", arguments={}, id="c1"), _done()],
         [LLMTextDelta("It mentions pricing twice."), _done()],
@@ -495,48 +492,42 @@ def test_a_talk_only_turn_declares_no_write_tool_at_any_step_and_drops_its_instr
     asyncio.run(h.loop._run_turn("which document mentions pricing?"))
     assert len(h.llm.calls) == 2
     for call in h.llm.calls:
-        assert [t["name"] for t in call["tools"]] == ["echo"]
-        assert call["messages"][-1] == {
-            "role": "system",
-            "content": ANSWER_TALK_ONLY_INSTRUCTION,
-        }
-    assert not any(TALK_ONLY_INSTRUCTION in str(m) for m in h.ctx.build())
+        assert [t["name"] for t in call["tools"]] == ["echo", "save"]  # all of them
+        assert call["messages"][-1] == {"role": "system", "content": ANSWER_INSTRUCTION}
+    assert not any(ANSWER_INSTRUCTION in str(m) for m in h.ctx.build())
 
-
-def test_a_write_call_that_arrives_on_a_talk_only_turn_runs_no_handler_and_no_judge():
+def test_an_edit_the_checks_did_not_expect_still_runs():
+    """The verdict steers; it never restricts. When the checks were sure no
+    edit was asked and the model edits anyway — because the user did ask —
+    the edit happens."""
     ran = []
 
     async def handler(args, ctx):
         ran.append(args)
-        return {"status": "created"}
+        return {"status": "ok"}
 
-    create = write_tool(name="create_document")
-    create = type(create)(**{**create.__dict__, "handler": handler})
+    save = write_tool()
+    save = type(save)(**{**save.__dict__, "handler": handler})
     scripts = [
-        [LLMToolCall(name="create_document", arguments={"title": "x"}, id="c1"), _done()],
-        [LLMTextDelta("I have not made that change."), _done()],
+        [LLMToolCall(name="save", arguments={"text": "first aid kit"}, id="c1"), _done()],
+        [LLMTextDelta("Done."), _done()],
     ]
-    h = checked_loop(scripts, answers(write=0.02), tools=[create])
-    asyncio.run(h.loop._run_turn("what do you think?"))
-    assert ran == []
+    h = checked_loop(scripts, answers(write=0.02, affirm=0.9, answer=0.1), tools=[save])
+    asyncio.run(h.loop._run_turn("yes"))
+    assert ran == [{"text": "first aid kit"}]
     result = next(m for m in h.ctx.build() if m["role"] == "tool")["content"]
-    assert result["status"] == "refused" and "did nothing" in result["error"]
-    # the gate's judge was never consulted: only the two loop calls ran
-    assert len(h.llm.calls) == 2
-    assert not [t for t in _queued(h.traces, LLMTrace) if t.purpose == "gate"]
+    assert result == {"status": "ok"}
 
-
-def test_the_forced_wrap_up_on_a_talk_only_turn_keeps_the_filtered_tools():
+def test_the_forced_wrap_up_still_carries_the_turn_s_instruction_and_every_tool():
     scripts = [[LLMToolCall(name="echo", arguments={}, id=f"c{i}"), _done()] for i in range(5)]
     scripts.append([LLMTextDelta("Here is where things stand."), _done()])
     h = checked_loop(scripts, answers(write=0.02), tools=[read_tool(), write_tool()])
     asyncio.run(h.loop._run_turn("look into it"))
     last = h.llm.calls[-1]
     assert last["tool_choice"] == "none"
-    assert [t["name"] for t in last["tools"]] == ["echo"]
+    assert [t["name"] for t in last["tools"]] == ["echo", "save"]
     contents = [m["content"] for m in last["messages"] if m["role"] == "system"]
-    assert ANSWER_TALK_ONLY_INSTRUCTION in contents and WRAP_UP_INSTRUCTION in contents
-
+    assert ANSWER_INSTRUCTION in contents and WRAP_UP_INSTRUCTION in contents
 
 @pytest.mark.parametrize(
     "result, instruction",
@@ -556,7 +547,6 @@ def test_each_instruction_rides_its_own_outcome_and_never_reaches_the_context(
         AFFIRM_INSTRUCTION,
         ANSWER_INSTRUCTION,
         EDIT_AND_SPEAK_INSTRUCTION,
-        TALK_ONLY_INSTRUCTION,
     )
     assert [i for i in every if i in sent] == [instruction]
     assert [t["name"] for t in h.llm.calls[0]["tools"]] == ["save"]  # tools kept

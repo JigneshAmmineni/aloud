@@ -20,8 +20,9 @@ numbers below are recorded and read, not gated.
   something to be written or changed?), SPEAK (do they expect nothing,
   a few words, or a real answer?).
 - What those answers decide (FR-63): silence (mid-thought, or nothing
-  asked), a talk-only turn, the affirm instruction, the edit-and-speak
-  instruction, or a plain turn.
+  asked), the affirm instruction, the answer instruction, the
+  edit-and-speak instruction, or a plain turn. They never take a tool
+  away.
 - The answer modes (FR-72): 1 affirm in five words or fewer, 2 summary
   in one or two sentences, 3 explain or recite on an explicit ask.
   "Hmm." is gone from the prompt while both checks are on (FR-73).
@@ -93,46 +94,46 @@ run 2 script except for the expected columns):
 | # | Spoken turn | Outcome | Mode | Required result |
 |---|---|---|---|---|
 | 1 | (connect) | not checked | — | a few words of greeting |
-| 2 | a plain factual question | plain or talk only | 2 | one or two sentences, no document |
+| 2 | a plain factual question | answer | 2 | one or two sentences, no document |
 | 3 | thinking aloud, trailing off ("…maybe two nights? Probably…") | silent (mid-thought) | — | nothing spoken; the indicator returns to Listening |
 | 4 | "Create a new document called … with what I've said so far." | affirm | 1 | one document; a few words of confirmation |
 | 5 | "Add that we need to book the campsite by Friday." | affirm | 1 | edit without asking; a few words of confirmation |
-| 6 | "Give me a quick summary of the plan." | talk only | 2 | spoken, one or two sentences, nothing written |
+| 6 | "Give me a quick summary of the plan." | answer | 2 | spoken, one or two sentences, nothing written |
 | 7 | "Organize the plan into three sections: …" | affirm | 1 | restructured; a few words of confirmation |
-| 8 | "What am I missing?" | talk only | 2 | spoken, no write; a short list is allowed here |
-| 9 | "Poke holes in this plan." | talk only | 2 | spoken critique, no write |
+| 8 | "What am I missing?" | answer | 2 | spoken, no write; a short list is allowed here |
+| 9 | "Poke holes in this plan." | answer | 2 | spoken critique, no write |
 | 10 | "Rename the document to …" | affirm | 1 | one rename; a few words of confirmation |
-| 11 | "Which of my documents mention a budget?" | talk only | 2 | silent search (a read tool on a talk-only turn), then the answer |
+| 11 | "Which of my documents mention a budget?" | answer | 2 | silent search, then the answer |
 | 12 | "Change the line about X to Y." (no such line) | plain | 2 | one short sentence that it could not; no tool names |
-| 13 | "Actually, never mind. Let's go back to the trip." | silent (nothing asked) or plain | 2 | no tool; silence is acceptable |
-| 14 | "Walk me through the whole plan in detail." / "Hold on." / "Okay. Continue." | talk only, then silent or plain, then plain | 3 | long answer; resumes from what was heard |
+| 13 | "Actually, never mind. Let's go back to the trip." | silent (nothing asked) or affirm | 2 | no tool; silence is acceptable |
+| 14 | "Walk me through the whole plan in detail." / "Hold on." / "Okay. Continue." | answer, then silent, then answer | 3 | long answer; resumes from what was heard |
 | 15 | "Stop." mid-reply | silent (nothing asked) | — | the agent stops and stays stopped |
 | 16 | "Can you put the…" | silent (mid-thought) | — | nothing spoken; then finish the sentence and it acts on the whole thought |
-| 17 | "That's all for now." | silent (nothing asked) or plain | 2 | silence or one short line |
+| 17 | "That's all for now." | silent (nothing asked) or affirm | 2 | silence or one short line |
 
 Rows for this change:
 
 | # | Spoken turn | Outcome | Mode | Required result |
 |---|---|---|---|---|
-| 18 | "I think we should probably…" (pause five seconds or more) "…go with the cheaper campsite." | silent (mid-thought), then plain or talk only | 2 | silence through the pause, however long; then one reply to the whole thought |
+| 18 | "I think we should probably…" (pause five seconds or more) "…go with the cheaper campsite." | silent (mid-thought), then answer | 2 | silence through the pause, however long; then one reply to the whole thought |
 | 19 | "Okay." / "Right, right." / "Hmm." after a reply | silent (nothing asked) | — | nothing spoken, each time |
 | 20 | after the agent asks a yes/no question: "Yeah." | affirm | 1 | it acts on the yes; not judged mid-thought or nothing-asked |
 | 21 | "Split the list into client side and server side, and give me your ideas for each." | edit and speak | 1 then 2 | the edit lands AND the ideas are spoken |
-| 22 | "What do you think of that split?" | talk only | 2 | spoken opinion, one or two sentences, no write |
-| 23 | "Should we add a budget section? What would go in it?" | talk only | 2 | spoken answer; nothing written, and it does not claim to have written anything |
+| 22 | "What do you think of that split?" | answer | 2 | spoken opinion, one or two sentences, no write |
+| 23 | "Should we add a budget section? What would go in it?" | answer | 2 | spoken answer; nothing written, and it does not claim to have written anything |
 | 24 | "Add a budget section with those." | affirm | 1 | the edit lands; a few words of confirmation |
-| 25 | "Explain the schedule section in detail." | talk only | 3 | a full explanation |
-| 26 | "Read me the gear section." | talk only | 3 | the section read word for word |
-| 27 | "Give me five things I should double-check before leaving." | talk only | 2 | a spoken list: at most five points, one clause each, no bullet words |
+| 25 | "Explain the schedule section in detail." | answer | 3 | a full explanation |
+| 26 | "Read me the gear section." | answer | 3 | the section read word for word |
+| 27 | "Give me five things I should double-check before leaving." | answer | 2 | a spoken list: at most five points, one clause each, no bullet words |
 | 28 | a question, then barge in inside the reply's first second with a different question | plain | 2 | the second answer does not treat the first reply as heard |
 | 29 | say "mm-hmm" while the agent is mid-reply | silent (nothing asked) | — | recorded, not gated: the agent stops and does not resume (accepted limit); note how it feels |
 | 30 | a garbled or half-heard instruction | plain | 2 | "say that again?" in some form; never "Hmm." |
-| 31 | a real request, immediately after row 19's silence | plain or talk only | per row | the reply uses the earlier turn too if it was part of the thought, and ignores it if not |
+| 31 | a real request, immediately after row 19's silence | answer | per row | the reply uses the earlier turn too if it was part of the thought, and ignores it if not |
 | 32 | an edit request on which the agent narrates first ("I'll add that…") | affirm | 1 | the narration, a pause of about a second, then the confirmation; neither is dropped |
-| 33 | after the agent checks its understanding ("…is that right?"): "Yeah." | talk only, affirm | 1 | five words or fewer, not a new paragraph |
-| 34 | "Hi." mid-session | talk only, affirm | 1 | a short greeting back |
+| 33 | after the agent checks its understanding ("…is that right?"): "Yeah." | affirm | 1 | five words or fewer, not a new paragraph |
+| 34 | "Hi." mid-session | affirm | 1 | a short greeting back |
 | 35 | thinking aloud about a plan, several sentences, nothing asked | silent (nothing asked) | — | nothing spoken |
-| 36 | answer a question the agent asked, with new information | talk only | 2 | one or two sentences back |
+| 36 | answer a question the agent asked, with new information | answer | 2 | one or two sentences back |
 
 Also run once with each switch off in turn (rows 3, 6, 19 and 21 are
 enough): with a switch off, its outcomes must not occur and the agent
@@ -145,8 +146,8 @@ must behave as it did before.
   `turn.check` log lines and the owner's notes. The owner prefers the
   first mistake to the second; the thresholds are tuned until the
   balance feels right, and the final values are recorded here.
-- **Wrongly withheld** (an edit request that could not edit): the agent
-  must have said the change was not made, never that it was.
+- **An edit request always edits.** No outcome takes the tools away,
+  so "I can't edit right now" in any form fails the run.
 - **Wrongly instructed** (the edit-and-speak instruction on a turn that
   asked for no edit; row 23 is the shape): nothing is written. Any edit
   on a turn that asked for none fails the run.
@@ -174,7 +175,7 @@ must behave as it did before.
   `turn.check_bypassed` lines. A bypass is not a failure of the run,
   but its count is recorded, and so is that turn's end-of-speech →
   first audio on its own line: it carries the whole ceiling.
-- End-of-speech → first audio on the plain and talk-only rows,
+- End-of-speech → first audio on the answer rows,
   compared with the 2026-11-12 run 2 figures: the checks should add
   about their own response time and no more.
 
@@ -459,3 +460,24 @@ fixed build once the voice provider has credits.
   0.91 to 0.93).
 - With the mid-thought line at 0.6: one real request still silenced
   (row 40), three mid-thought fragments answered (rows 24, 30, 35).
+
+### Design change after run 1 — owner, 2026-11-14
+
+The no-edit verdict no longer touches the tools and no instruction
+mentions editing (FR-63, decision 4; FR-65 removed). Run 1's row 16 is
+why: a wrong verdict on a "Yes." that confirmed an edit left the turn
+unable to edit. Before removing it, a softer form was probed live with
+every tool available and one line saying no edit seemed to be asked,
+three tries per case:
+
+| Case | Result |
+|---|---|
+| "Yes." confirming an edit, wrongly steered | edited, 3 of 3 |
+| "Sure." to an offered edit, wrongly steered | edited, 3 of 3 |
+| a plain edit request, wrongly steered | edited, 3 of 3 — and said the conflict aloud each time ("The note says not to edit, but you've clearly asked…"), even when told never to mention the note |
+| opinion and "tell me what you have" questions, rightly steered | no edit, 3 of 3 each |
+| the same question with no steer at all | no edit, 3 of 3 |
+
+So a line about edits is audible when it is wrong and unnecessary when
+it is right. What a no-edit verdict now adds is only the answer
+instruction's length bound.

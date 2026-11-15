@@ -21,6 +21,7 @@ export function modeForServerMessage(type: unknown): VoiceMode | null {
 const LABELS: Record<string, string> = {
   silent_mid_thought: "silent: mid-thought",
   silent_nothing_asked: "silent: nothing asked",
+  // sessions recorded before the checks stopped withholding tools
   talk_only: "talk only",
   affirm: "affirm",
   answer: "answer",

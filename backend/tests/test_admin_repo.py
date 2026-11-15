@@ -1,4 +1,4 @@
-"""Admin query family (FR-35/36/37) on sqlite — aggregate correctness and
+"""Admin query family (FR-35/36/37) on sqlite â€” aggregate correctness and
 the NFR-9 serialization contract. RLS-proper admin tests live in test_rls.py
 (Postgres); here admin_scoped_session's dialect guard skips the SET calls."""
 
@@ -69,7 +69,7 @@ async def _seed(tmp_path):
                 eot_to_first_audio_ms=1200, stages_ms={"ttfb.llm": 700},
             )
         )
-        # turn 3: latency but zero usage — must still appear in the union
+        # turn 3: latency but zero usage â€” must still appear in the union
         db.add(
             TurnMetric(
                 user_id="uid-a", session_id="sa1", turn_id=3, ts=ts,
@@ -148,7 +148,7 @@ def test_sessions_for_user(tmp_path):
 
 
 def test_session_detail_union_of_latency_and_usage(tmp_path):
-    """FR-33's barge-in mandate: the per-turn table is the UNION — turn 2
+    """FR-33's barge-in mandate: the per-turn table is the UNION â€” turn 2
     has cost but no latency row; turn 3 has latency but no cost."""
 
     async def run():
@@ -172,14 +172,14 @@ def test_session_detail_union_of_latency_and_usage(tmp_path):
 
 def test_session_detail_lists_a_silent_turn_with_its_outcome(tmp_path):
     """FR-36/FR-70: a turn the agent chose not to answer has no latency
-    row and no LLM spend — its one `check` event is what lists it, and
+    row and no LLM spend â€” its one `check` event is what lists it, and
     that event's detail is the outcome the drill-down shows."""
 
     async def run():
         await _seed(tmp_path)
         ts = NOW - timedelta(days=3)
         async with user_scoped_session("uid-a") as db:
-            for turn, outcome in ((1, "talk_only"), (4, "silent_mid_thought")):
+            for turn, outcome in ((1, "answer"), (4, "silent_mid_thought")):
                 db.add(
                     UsageEvent(
                         user_id="uid-a", session_id="sa1", turn_id=turn, ts=ts,
@@ -193,9 +193,9 @@ def test_session_detail_lists_a_silent_turn_with_its_outcome(tmp_path):
         assert turns[4]["outcome"] == "silent_mid_thought"
         assert turns[4]["eot_to_first_audio_ms"] is None
         assert turns[4]["usage"] == {"check.count": 3.0}
-        assert turns[1]["outcome"] == "talk_only"
+        assert turns[1]["outcome"] == "answer"
         assert turns[1]["eot_to_first_audio_ms"] == 1200
-        assert turns[2]["outcome"] is None  # never checked: before §4.15
+        assert turns[2]["outcome"] is None  # never checked: before Â§4.15
 
     asyncio.run(run())
 
@@ -248,7 +248,7 @@ def test_overview_aggregates(tmp_path):
 
 
 def test_admin_scoped_session_requires_admin():
-    """FR-38: the gate is structural — a non-admin AuthedUser (or a plain
+    """FR-38: the gate is structural â€” a non-admin AuthedUser (or a plain
     string) is a loud PermissionError before any SQL runs."""
     not_admin = AuthedUser(
         user_id="u", email=None, email_verified=True, name=None, is_admin=False

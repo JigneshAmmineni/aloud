@@ -2799,8 +2799,9 @@ Five decisions shape every FR below, each with the alternative it beat:
    called, so a turn the agent should not take costs no main-model call
    at all. Rejected: starting the main call at once and applying the
    answers when its output arrives — no added wait, but every wrongly
-   started reply costs its input tokens, a talk-only turn needs a
-   refusal round, and the edit-and-speak case needs a follow-up step.
+   started reply costs its input tokens, a silent verdict has to cancel
+   a reply already under way, and the edit-and-speak case needs a
+   follow-up step.
    The price accepted: one check's duration on every turn, bounded by
    FR-67's ceiling. §4.10 principle 1 is amended to match. **Recorded
    trade:** this is the first serial round trip placed in front of the
@@ -2812,10 +2813,20 @@ Five decisions shape every FR below, each with the alternative it beat:
    while the user moves around and talks in bursts; the user asks again
    when they want an answer. Rejected: replying on its own after N
    seconds of quiet, and a spoken "Hmm." in place of silence.
-4. **Two leans, on purpose.** Silence leans toward silence (asking
-   again is cheaper than cutting off a wrong reply). Withholding the
-   edit tools leans toward allowing (editing by voice is the core
-   feature, so a wrongly blocked edit is the costlier mistake).
+4. **The checks steer; they never restrict.** A verdict can make the
+   turn silent, or add one instruction about how much to say. It never
+   takes a tool away, and no instruction says whether editing is
+   allowed. Rejected, after it was built and run live: withholding the
+   write tools when the checks judged that no edit was asked. When
+   that verdict was wrong on a real edit — a bare "yes" to a change
+   the agent had proposed — the turn could not edit, and said so. A
+   softer line telling the model not to edit made it voice the
+   conflict aloud whenever the user had in fact asked. And on the
+   turns the restriction was for, the model was not making unwanted
+   edits to begin with. FR-60's gate on new documents is the one
+   restriction on a write, and it is not part of these checks. Where
+   the checks do lean, it is toward silence: asking again is cheaper
+   than cutting off a wrong reply.
 5. **The create gate is untouched.** FR-60 keeps its judge, its
    evidence rule and its fail-closed dispatch point. FR-64 records what
    that costs after a silent turn.
@@ -2864,16 +2875,15 @@ Five decisions shape every FR below, each with the alternative it beat:
   - Two switches: `TURN_CHECK_DONE` governs DONE, `TURN_CHECK_MODE`
     governs WRITE and SPEAK together. A question whose switch is off is
     not sent (FR-71 sets the defaults).
-- **FR-63** **The answers decide three things about the turn, in this
-  order: whether it is taken at all, whether the model may edit, and
-  how much it is asked to say.**
+- **FR-63** **The answers decide two things about the turn, in this
+  order: whether it is taken at all, and how much it is asked to say.
+  They never change which tools the model has.**
   1. *Taken at all.* `1 − p_done ≥ CHECK_MID_THOUGHT_MIN` → **silent
      (mid-thought)**, and nothing below applies.
-  2. *May edit.* `1 − p_write ≥ CHECK_NO_WRITE_MIN` → the write tools
-     are withheld for the turn: a **talk-only** turn (FR-65).
-  3. *How much to say*, from SPEAK:
-     - `p_nothing ≥ CHECK_NOTHING_MIN`: on a talk-only turn → **silent
-       (nothing asked)**. On any other turn it is treated as affirm:
+  2. *How much to say*, from SPEAK, with WRITE consulted twice:
+     - `p_nothing ≥ CHECK_NOTHING_MIN`: when the checks are also sure
+       that no edit was asked (`1 − p_write ≥ CHECK_NO_WRITE_MIN`) →
+       **silent (nothing asked)**. Otherwise it is treated as affirm:
        an edit may have been asked for, and work is always confirmed.
      - `p_affirm ≥ CHECK_AFFIRM_MIN`, or the case above → the
        **affirm** instruction (FR-66).
@@ -2885,23 +2895,23 @@ Five decisions shape every FR below, each with the alternative it beat:
   missing (FR-67) — is **plain**: it runs exactly as it would without
   the checks. Answer is SPEAK's default, so an unsure SPEAK gets the
   answer instruction, which only restates the prompt's own default
-  mode. **Recorded coupling:** `CHECK_NO_WRITE_MIN` gates two
-  things, the withholding of the write tools and the nothing-asked
-  silence, on purpose: the agent never goes silent on a turn that may
-  hold an edit request. The cost is on the bench's record: of 63 turns
-  that asked for no edit, 4 kept their tools, and a nothing-asked turn
-  among those gets a few words instead of silence. With
-  `TURN_CHECK_DONE` off, decision 1 is skipped; with `TURN_CHECK_MODE`
-  off, decisions 2 and 3 are skipped. The thresholds are settings,
-  tuned from FR-71's bench and then by ear in live testing; the
-  defaults in the knob table are starting values, and their asymmetry
-  is decision 4 above: silence needs a little past the midpoint,
-  withholding the write tools needs well above it. Mandated tests: each threshold on
-  both sides; the order (a mid-thought answer wins over the rest); a
-  nothing choice on a turn that keeps its write tools becomes affirm,
-  not silence; each switch off. The edit-and-speak instruction is never
-  given to a talk-only turn, whatever the thresholds are set to: a turn
-  with no write tools must not be told to make a change.
+  mode. WRITE has exactly those two uses, and neither is a
+  restriction: it keeps the agent from going silent on a turn that may
+  hold an edit request, and it picks out the turn that wants an edit
+  and an answer. The cost of the first is on the bench's record: of 63
+  turns that asked for no edit the checks were sure of 47, and a
+  nothing-asked turn among the rest gets a few words instead of
+  silence. With `TURN_CHECK_DONE` off, decision 1 is skipped; with
+  `TURN_CHECK_MODE` off, decision 2 is skipped. The thresholds are
+  settings, tuned from FR-71's bench and then by ear in live testing;
+  the defaults in the knob table are starting values. Silence for a
+  mid-thought needs a little past the midpoint; silence for a turn that
+  asks for nothing also needs the checks well sure that no edit was
+  asked. Mandated tests: each threshold on both sides; the order (a
+  mid-thought answer wins over the rest); a nothing choice without that
+  sureness becomes affirm, not silence; each switch off; the tools
+  handed to the model are the same on every outcome, and an edit the
+  checks did not expect still runs.
 - **FR-64** **On either silent outcome the main model is not called and
   nothing is spoken until the user's next turn; the silence has no time
   limit.** Mechanism:
@@ -2949,42 +2959,10 @@ Five decisions shape every FR below, each with the alternative it beat:
   takes the next turn normally; in the client, a `turn.silent` message
   moves the indicator from Thinking to Listening (FR-6) — without it a
   silent turn looks like a hung session.
-- **FR-65** **On a talk-only turn no write tool is available to the
-  model; read tools always are.** Mechanism:
-  - Every step of that turn, the forced wrap-up step included, declares
-    only the registry tools whose `is_write` is false (FR-45). Reads are
-    never withheld: a discussion should be informed by the documents.
-  - One instruction is added to each of that turn's calls and never
-    appended to the context (FR-42's wrap-up pattern): the model cannot
-    edit documents on this turn, must not say it changed anything, and,
-    if the user did ask for a change, says it has not made the change
-    yet and asks them to say again what they want changed — the repeat
-    is what recovers a turn that landed here wrongly. It never mentions
-    the instruction or says that editing is off (first live run: the
-    model said "Document editing is off for this reply" aloud).
-    It is scoped to the user's LATEST message and says that edits made
-    earlier in the conversation stand: a live probe showed a looser
-    wording retracting an edit that had really happened.
-  - A call naming a withheld tool is never executed: it gets a refusal
-    result and the turn continues (defense in depth — the context still
-    shows the model its own earlier calls to that tool).
-  - FR-60's gate is not involved: `create_document` is a write tool,
-    so on a talk-only turn it is not declared and the gate is not
-    reached.
-  - The provider in use accepts a request whose history holds calls to
-    tools absent from the declared set (proven live, 2026-11-14).
-    `scripts/smoke_llm.py` carries that case, so a provider or model
-    change that rejects it is caught by the smoke run before a deploy.
-    For a provider that does reject it, the binding moves to
-    dispatch: all tools stay declared and a write call on a talk-only
-    turn is refused with a steering result (FR-60's shape) before
-    FR-60's judge is consulted — no judge call is paid for a call that
-    is refused either way; the instruction is unchanged.
+*FR-65 (withholding the write tools on a turn judged to ask for no
+edit) is removed: the checks steer and never restrict (decision 4).
+Requirement numbering stays stable; removed numbers are not reused.*
 
-  Mandated tests: on a talk-only turn the tool list handed to the
-  client contains no write tool at any step; the instruction is in the
-  call's messages and absent from the context afterwards; a write call
-  that arrives anyway runs no handler.
 - **FR-66** **The affirm, answer and edit-and-speak outcomes are each
   bound by one instruction, added to that turn's calls only.**
   - *Affirm:* close the exchange with any short phrase, five words or
@@ -2993,12 +2971,8 @@ Five decisions shape every FR below, each with the alternative it beat:
     say — and always with at least a word (a step with no text is
     FR-42's empty step and gets the spoken fallback). The phrase is a
     closing, not a report: it does not by itself mean that work was
-    done. One guard follows from that. On a talk-only turn no change
-    can have been made, so the phrase must not say one was. There FR-65
-    governs: the two are sent as one instruction, and its sentence
-    saying a requested change has not been made is exempt from the
-    five-word bound. The bound is on the turn's closing reply; what an
-    earlier step said before a tool call (FR-43) is not counted.
+    done. The bound is on the turn's closing reply; what an earlier
+    step said before a tool call (FR-43) is not counted.
   - *Answer:* one or two sentences, ideally one; when the user needs
     several items, at most five short points and nothing after them; no
     extra observation, caveat, follow-up question or offer that was not
@@ -3008,36 +2982,34 @@ Five decisions shape every FR below, each with the alternative it beat:
     the model's to choose (FR-72). This restates the system prompt's
     mode 2 on the turn itself, because in the first live run the prompt
     alone did not hold: answers ran to three sentences and an unasked
-    "also…". On a talk-only turn it is sent as one instruction with
-    FR-65's.
+    "also…".
   - *Edit and speak:* if the user asked for something to be written or
     changed, make that change, and after it say the requested substance
     aloud; if they asked for no change, change nothing and only speak.
-    The condition is in the instruction's own wording because
-    `CHECK_BOTH_MIN` sits well below the bar for withholding tools: a
-    spoken request can land here with its write tools intact, and an
-    unconditional "make the change" would turn it into an unwanted edit
-    of the document under discussion (FR-7). FR-60 guards only a
-    create.
-  - Neither is ever appended to the context (FR-42's wrap-up pattern),
-    and both leave the declared tools as FR-63's decision 2 set them.
+    The condition is in the instruction's own wording because the
+    instruction can land on a spoken request that asked for no edit
+    (the bench saw it on 2 of 87 turns), and an unconditional "make the
+    change" would turn that into an unwanted edit of the document under
+    discussion (FR-7). FR-60 guards only a create.
+  - None is ever appended to the context (FR-42's wrap-up pattern), and
+    none says anything about whether editing is allowed: every tool is
+    declared on every turn (FR-63).
   - The instruction steers; it does not guarantee. There is no cap on
     the reply's length (a capped reply ends truncated, which FR-42
     treats as a failure) and no retry. The eval counts the words.
 
   Mandated tests: each instruction is in the call's messages on its
   outcome, absent on every other outcome, and absent from the context
-  afterwards; on a talk-only affirm turn the instruction sent forbids
-  saying a change was made, and keeps FR-65's "has not been made"; the
-  edit-and-speak instruction makes the edit conditional on the user
-  having asked for one.
+  afterwards; no instruction restricts editing or mentions it, the
+  conditional edit-and-speak one aside; the edit-and-speak instruction
+  makes the edit conditional on the user having asked for one.
 - **FR-67** **A question left unanswered — by an error, or by no answer
   within `CHECK_TIMEOUT_S` of the end of turn — never holds the turn:
   the rules that need its answer are skipped and the turn proceeds at
   once.** An unanswered DONE skips FR-63's decision 1: the turn is taken as
-  finished. An unanswered WRITE or an unanswered SPEAK skips decisions
-  2 and 3 together, whichever of the two did answer: the outcome is
-  plain (nothing withheld, no instruction, no nothing-asked silence). The
+  finished. An unanswered WRITE or an unanswered SPEAK skips decision 2,
+  whichever of the two did answer: the outcome is plain (no
+  instruction, no nothing-asked silence). The
   question records its status as `timeout` or `error` (FR-70). A
   failure while turning the answers into a decision is one more way of
   having no verdict and ends the same way: a plain turn, with its
@@ -3072,15 +3044,15 @@ Five decisions shape every FR below, each with the alternative it beat:
   the WARNING; a checker that never answers lets the turn start at the
   ceiling; a failed request yields the plain outcome for the whole turn;
   a response that lacks DONE but carries WRITE and SPEAK still applies
-  decisions 2 and 3.
+  decision 2.
 - **FR-68** **Each question is sent only the current user turn, the
   unanswered user turns directly before it, and the assistant's last
   reply.** Mechanism:
   - The current turn is sent whole up to 2,000 characters. A longer
     one keeps its first 500 and its last 1,500 with the cut marked: the
     end is what DONE reads, and a request made at the start of a long
-    turn is what WRITE reads — cutting to the tail alone would hide it
-    and withhold the tools from a turn that asked for an edit.
+    turn is what WRITE reads — cutting to the tail alone would hide it,
+    and the checks would misjudge a turn that asked for an edit.
   - At most `CHECK_UNANSWERED_TURNS` earlier unanswered turns, newest
     kept, each sent whole up to 600 characters; a longer one keeps its
     first 200 and its last 400 with the cut marked, for the same
@@ -3173,9 +3145,8 @@ Five decisions shape every FR below, each with the alternative it beat:
     same moment as FR-67's bypass.
   - Usage: one event per checked turn — `stage = 'check'`,
     `unit = 'count'`, `quantity` = the questions sent, `detail` = the
-    outcome (`silent_mid_thought` | `silent_nothing_asked` | `plain`,
-    or the bindings that applied joined by `+`: `affirm`, `answer`,
-    `talk_only+affirm`, `talk_only+answer`, `edit_and_speak`), with `+bypass` appended
+    outcome (`silent_mid_thought` | `silent_nothing_asked` | `affirm` |
+    `answer` | `edit_and_speak` | `plain`), with `+bypass` appended
     when an asked question went unanswered, or `interrupted` when a
     barge-in cancelled the wait before there was an outcome — silent
     turns included. FR-36's union therefore lists a
@@ -3210,7 +3181,7 @@ Five decisions shape every FR below, each with the alternative it beat:
     response time does. *Accuracy*, on the development machine: a
     labelled set goes through the checker and the script reports,
     across thresholds, how often each mistake would occur — wrongly
-    silent, wrongly replying, wrongly withheld, wrongly instructed. The
+    silent, wrongly replying, wrongly instructed. The
     set is about 100 of the owner's own recorded turns with the
     evidence FR-68 would have sent, labelled with the right answer to
     each question; the owner reviews the labels, so the reference is
@@ -3315,7 +3286,7 @@ Five decisions shape every FR below, each with the alternative it beat:
 | `CHECK_MID_THOUGHT_MIN` (confidence needed to stay silent as mid-thought; 0.6 since the first live run, where a garbled but complete request scored 0.44 for "done" and was met with silence — every real mid-thought there scored 0.32 or lower) | 0.6 | env (`app/config.py`) |
 | `CHECK_NOTHING_MIN` (SPEAK probability needed for "nothing") | 0.5 | env (`app/config.py`) |
 | `CHECK_AFFIRM_MIN` (SPEAK probability needed for "affirm") | 0.5 | env (`app/config.py`) |
-| `CHECK_NO_WRITE_MIN` (confidence needed to withhold the write tools) | 0.8 | env (`app/config.py`) |
+| `CHECK_NO_WRITE_MIN` (how sure the checks must be that no edit was asked before a turn that expects nothing may be silent) | 0.8 | env (`app/config.py`) |
 | `CHECK_BOTH_MIN` (WRITE probability needed, beside an "answer", for the edit-and-speak instruction) | 0.6 | env (`app/config.py`) |
 | `CHECK_UNANSWERED_TURNS` (earlier unanswered turns in the evidence) | 3 | `agent/checks.py` |
 | Evidence caps (chars: current turn / each earlier unanswered turn / assistant reply) | 2,000 / 600 / 300 | `agent/checks.py` |
