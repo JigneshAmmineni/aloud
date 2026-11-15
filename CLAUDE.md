@@ -18,6 +18,7 @@ A voice-first work assistant for people who think and work by talking out loud. 
 | Transport | WebRTC via Pipecat SmallWebRTC |
 | STT + turn detection | Deepgram Flux |
 | LLM (default) | Claude Sonnet 5.5 for the agent loop, Claude Haiku 5.5 for the small judge/decision calls; thinking off on both — swappable; the Gemini Flash client is kept as the swap-back |
+| Turn checks | TypeSafe Jev, asked before the LLM on every user turn (REQUIREMENTS.md §4.15): is the user done, was an edit asked for, how much to say |
 | TTS | Cartesia Sonic-3 |
 | DB | PostgreSQL |
 | Auth | Firebase Auth — Google + email/password, Bearer ID tokens verified via firebase-admin in `get_current_user_id`; admin via custom claims (REQUIREMENTS.md §4.8) |
@@ -41,7 +42,7 @@ All provider-specific construction (STT/LLM/TTS service classes, SDK imports) is
 
 ### Encryption (add after MVP)
 
-Cloud processing is fine — the privacy policy discloses that voice and transcripts are processed by Deepgram, Anthropic, and Cartesia.
+Cloud processing is fine. Voice and transcripts are processed by Deepgram, Anthropic, Cartesia and TypeSafe (the turn checks, which see a few turns of text and never documents), and stored on Google Cloud. No privacy policy is published yet: the live site is a demo with no users but the owner, and the policy is written, naming all of these, before it has any (REQUIREMENTS.md NFR-5, FR-71). Do not gate features on it before then.
 
 Server-side encryption (key held by us) is added post-MVP. To make this painless:
 - **Keep sensitive columns clearly separated from metadata at schema design time.** Transcripts, summaries, memory entries, and artifacts get their own columns; timestamps, IDs, and session metadata stay unencrypted.

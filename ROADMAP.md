@@ -173,6 +173,19 @@ The rules:
 
 ### 3.3 Thinking-partner mode — proactive reasoning & ambient capture
 
+**Built 2026-11-14 on `feature/turn-checks`** (the checks are on by
+default for every user, by the owner's decision: no gate on a privacy
+policy while the live site is a demo). Three things turned out
+different from the spec during the build and the spec was amended to
+match: the integration is one HTTP request with the client already in
+the image, not an SDK; the pause between two spoken steps keys off the
+transport's started/stopped-speaking signals, because the text frames
+it releases are per word, not per sentence; and the talk-only
+instruction had to be scoped to the user's latest message after a live
+probe showed the model retracting an earlier, real edit. Still owed:
+the live voice run and the response time from the VM
+(docs/evals/2026-11-13-decision-gates.md).
+
 **Specced 2026-11-13 as REQUIREMENTS.md §4.15 (FR-62–FR-73), from a
 design session with the owner.** Where the spec departs from the notes
 below, the spec is the state and these notes are the journey:

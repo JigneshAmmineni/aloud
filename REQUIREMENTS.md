@@ -641,17 +641,17 @@ FR-7 still governs: the agent acts when the user asks.
   earlier speech has finished playing and `STEP_SPEECH_GAP_S` has
   passed, so a closing confirmation never runs into the sentence
   before it ("I'll add that to the document." — a pause — "Done.").
-  The loop learns that playback finished from two signals the output
-  transport already gives, by counting and never by matching text: it
-  knows how many sentences the earlier step sent to synthesis (FR-46's
-  stream) and counts the sentences the transport releases (FR-61's
-  per-sentence signal); once the released count reaches the sent
-  count, the bot-stopped-speaking that follows ends the wait. The
-  sanitizer rewrites text between those two points (FR-61's bound i)
-  but cannot change how many sentences there are. A stop in the gap
-  between two sentences of the same step comes before the last release
-  and is ignored. When no
-  earlier speech of the turn is playing or queued nothing is held. A missing signal must not strand
+  The loop knows playback only through the output transport's
+  bot-started-speaking and bot-stopped-speaking signals. Nothing is
+  counted or matched: the text the transport releases is per WORD on
+  this pipeline (the voice service reports word timestamps), so there
+  are no sentences to count, and the sanitizer rewrites text between
+  the loop and the speaker. The wait has two parts. The earlier speech
+  must have started playing — it is playing now, or a start or a stop
+  arrived after it was pushed. Then `STEP_SPEECH_GAP_S` of unbroken
+  silence must pass: a stop in the gap between two sentences is
+  followed by a start, which re-arms the wait. When no earlier step of
+  the turn spoke nothing is held. A missing signal must not strand
   a reply, so the hold has a ceiling, and the ceiling scales with the
   speech being waited for: that speech's length in characters at a
   deliberately slow speaking rate (`STEP_SPEECH_SLOWEST_CPS`) plus
@@ -673,9 +673,7 @@ FR-7 still governs: the agent acts when the user asks.
   speaks after an earlier step of the same turn spoke starts no sooner
   than the gap after that playback ended; a step that speaks first, or
   after silent steps only, is not delayed; a stop between two sentences
-  of the earlier step does not start the gap early; a narration the
-  sanitizer rewrites (an identifier, a stray asterisk) still ends the
-  wait by the signal and not by the ceiling; a step that follows a
+  of the earlier step does not start the gap early; a step that follows a
   playback far longer than the slack (a recitation) still gets its
   pause and logs nothing; the hold releases at its scaled ceiling, with
   the warning, when the signal never comes; a closing confirmation after a
@@ -2697,25 +2695,29 @@ deliberately unchanged (FR-56 states local verification and why).
   live 2026-10-11: the agent named two documents, playback was cut after
   the first, and the context recorded both as said — "continue" would
   have been a no-op). Mechanism:
-  - The output transport releases a sentence's TTSTextFrame downstream
-    only after the preceding audio was sent, and discards queued frames
-    on interruption — so a transport-released text frame means
-    "actually played". The loop's observer feeds these to a per-turn
+  - The output transport releases a TTSTextFrame downstream only after
+    the preceding audio was sent, and discards queued frames on
+    interruption — so a transport-released text frame means "actually
+    played". On this pipeline the frames are per word (the voice
+    service reports word timestamps), so "released" below means words
+    that played. The loop's observer feeds these to a per-turn
     uttered buffer that resets at the NEXT turn's start (it must span
     the playback tail, where the cut lands).
   - An interruption arriving with NO live turn compares the last
-    assistant entry against the sentences released SINCE that entry was
+    assistant entry against the text released SINCE that entry was
     appended (entry-scoped — an earlier entry's audio, e.g. a sentence
     spoken before a tool call, never vouches for the last one): fully heard is a strict
     no-op (every ordinary speech start broadcasts an interruption);
     otherwise the entry truncates to the longest matching word-prefix
     (15-char floor — shorter is coincidence) plus FR-46's cut-off
-    suffix. An entry none of whose sentences was released is the
-    first-sentence cut below.
+    suffix. An entry of which nothing was released, or only its
+    opening words (fewer than the floor), is the first-sentence cut
+    below.
   - **A cut inside the entry's first sentence.** When audio played
-    this turn and none of the entry's sentences was released, the cut
-    landed before its first sentence finished. If the session has seen
-    at least one released sentence — the signal is known to work —
+    this turn and nothing of the entry was released — or only its
+    opening words, fewer than the prefix floor — the cut landed before
+    its first sentence finished. If the session has seen any text
+    released — the signal is known to work —
     the entry is cut to its first sentence (its own text up to the
     first `.`, `?` or `!` that is followed by whitespace or ends the
     text) plus the cut-off suffix: the
@@ -2730,17 +2732,17 @@ deliberately unchanged (FR-56 states local verification and why).
     is a single sentence keeps all of it, with the suffix. The cut logs
     `context.playback_cut` like the prefix path, marked as a
     first-sentence cut.
-  - **No audio at all.** When none of the entry's sentences was
+  - **No audio at all.** When nothing of the entry was
     released and no audio played this turn — an interruption between
     the entry's append and its first audio — the entry keeps its intact
     text with the cut-off suffix: nothing was heard, the mark says so,
     and no content is removed.
   - **Recorded bounds (review rounds 2–3), both no-amend exits:** (i)
-    this entry's sentences played but none prefix-match — the TTS
+    this entry's words played but do not prefix-match — the TTS
     sanitizer rewrites markdown/identifiers before synthesis, so the
     raw entry can never match the spoken form; counted as heard (the
     FR-46 over-approximation direction) with a `context.playback_
-    mismatch` WARN. (ii) Audio played this turn but no sentence has
+    mismatch` WARN. (ii) Audio played this turn but no text has
     been released at any point in the session — the signal itself is
     unproven, so the entry is left whole: no-op with one
     `fr61.signal_suspect` WARN per session, never a mark on every turn.
@@ -2752,8 +2754,10 @@ deliberately unchanged (FR-56 states local verification and why).
   - Mandated tests: a reply cut before its first sentence is
     released, in a session that has seen releases, keeps only that
     sentence with the mark, with and without earlier audio in the
-    same turn; the same cut on a session's first reply changes
-    nothing and logs the WARN once.
+    same turn; a cut a few words in does the same; the same cut on a
+    session's first reply changes nothing and logs the WARN once; an
+    interruption before any audio keeps the entry whole, marked; a
+    fully heard reply is left alone.
   - A context whose last message is no longer the assistant's, or whose
     entry already carries the mid-generation mark, is never amended.
 
@@ -2925,15 +2929,20 @@ Five decisions shape every FR below, each with the alternative it beat:
     appended to the context (FR-42's wrap-up pattern): the model cannot
     edit documents on this turn, must not say it changed anything, and,
     if the user did ask for a change, says the change has not been made.
+    It is scoped to the user's LATEST message and says that edits made
+    earlier in the conversation stand: a live probe showed a looser
+    wording retracting an edit that had really happened.
   - A call naming a withheld tool is never executed: it gets a refusal
     result and the turn continues (defense in depth — the context still
     shows the model its own earlier calls to that tool).
   - FR-60's gate is not involved: `create_document` is a write tool,
     so on a talk-only turn it is not declared and the gate is not
     reached.
-  - Implementation MUST begin by proving against the live provider that
-    a request whose history holds calls to tools absent from the
-    declared set is accepted. If it is rejected, the binding moves to
+  - The provider in use accepts a request whose history holds calls to
+    tools absent from the declared set (proven live, 2026-11-14).
+    `scripts/smoke_llm.py` carries that case, so a provider or model
+    change that rejects it is caught by the smoke run before a deploy.
+    For a provider that does reject it, the binding moves to
     dispatch: all tools stay declared and a write call on a talk-only
     turn is refused with a steering result (FR-60's shape) before
     FR-60's judge is consulted — no judge call is paid for a call that
@@ -3059,9 +3068,12 @@ Five decisions shape every FR below, each with the alternative it beat:
   status: a probability of yes for DONE and for WRITE, a probability
   per option for SPEAK — and no provider type (C-2, the hard constraint
   on SDK usage). One call is one provider request (FR-62). Mechanism:
-  - Provider in use: TypeSafe's Jev, through its own SDK
-    (`typesafe-sdk`, added to `requirements.txt`), key in
-    `TYPESAFE_API_KEY`, model in `CHECK_MODEL`. The default is a pinned
+  - Provider in use: TypeSafe's Jev, over its HTTP API with the HTTP
+    client the image already has (`httpx`). No SDK is added: the whole
+    integration is one POST, and the hard constraint is that the call
+    lives in this file, which it does. Key in `TYPESAFE_API_KEY`, model
+    in `CHECK_MODEL`. One client is shared by the process, so sessions
+    reuse its warm connections. The default is a pinned
     version, not the provider's moving "latest" alias: FR-63's
     thresholds are tuned to a version.
   - Pipecat is not upgraded for this: its own Jev integration ships in
@@ -3094,9 +3106,10 @@ Five decisions shape every FR below, each with the alternative it beat:
     probability per option for a choice), that one request carries
     several questions, that token usage is reported, and the response
     time from the development machine; the eval file records them.
-    What implementation MUST do first is reproduce that one request
-    through the factory and the SDK, and confirm the same fields come
-    back.
+    `scripts/smoke_llm.py` reproduces that one request through the
+    factory and checks that the same fields come back; it runs from
+    the production container before a deploy, beside the model smoke
+    test.
 - **FR-70** **Every checked turn leaves a log line, a usage event and a
   trace row; only the trace row carries text.**
   - Log: one `turn.check` line with `session_id`, `turn_id`, each

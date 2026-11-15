@@ -29,6 +29,8 @@ results), [deployment.md](deployment.md) (step-by-step VM runbook),
    ├─▶ Deepgram Flux ─── STT + end-of-turn detection   (wss, outbound)
    ├─▶ Anthropic ─────── LLM (Claude Sonnet 5.5 loop +
    │                      Haiku 5.5 judge, thinking off) (https, outbound)
+   ├─▶ TypeSafe ──────── turn checks (Jev: is the user done, was an
+   │                      edit asked, how much to say)   (https, outbound)
    ├─▶ Cartesia ──────── TTS (Sonic-3)                 (https, outbound)
    └─▶ Firebase Auth ─── identity (project aloud-c74f5): Google + email/
                           password sign-in; backend verifies Bearer ID tokens
@@ -40,7 +42,7 @@ results), [deployment.md](deployment.md) (step-by-step VM runbook),
  email alerts).
 ```
 
-One human-facing product surface (the web app), three paid AI provider
+One human-facing product surface (the web app), four paid AI provider
 dependencies on the voice path, one identity provider (incoming).
 
 ## 2. Tech stack
@@ -53,6 +55,7 @@ dependencies on the voice path, one identity provider (incoming).
 | Transport | WebRTC | Pipecat SmallWebRTC; server-side peer on the VM; STUN `stun.l.google.com` |
 | STT + turns | Deepgram Flux | transcription and end-of-turn in one model |
 | LLM | Claude Sonnet 5.5 (agent loop) + Claude Haiku 5.5 (FR-60 gate judge) | `anthropic~=2.8` SDK; thinking off on both; built by `make_loop_llm()` / `make_judge_llm()` — see "LLM models and thinking" below. Gemini 2.5 Flash remains selectable (`LLM_PROVIDER=google`) |
+| Turn checks | TypeSafe Jev (`jev-1.14.0`, pinned) | REQUIREMENTS.md §4.15. One HTTP request per user turn, before the LLM is called, through `make_turn_checker()` in `agent/providers.py` (`httpx`, no SDK). About 0.1s; 1s ceiling, then the turn runs unchecked. Both checks on by default (`TURN_CHECK_DONE`, `TURN_CHECK_MODE`) |
 | TTS | Cartesia Sonic-3 | speed 0.85, markdown/identifier sanitizer in front |
 | DB | PostgreSQL 16 | `postgres:16-alpine`; SQLAlchemy async + asyncpg (tests: aiosqlite) |
 | Auth | Firebase Auth | Google + email/password, open signup; Bearer ID tokens verified in `app/auth.py`; admin via `admin: true` custom claim; RLS on user-owned tables through a dedicated `aloud_app` Postgres role |
@@ -84,6 +87,7 @@ consoles are the source of truth.)
 |---|---|---|---|---|
 | Deepgram | STT + turn detection (Flux) | `DEEPGRAM_API_KEY` | pay-per-audio-minute against prepaid credits | [console.deepgram.com](https://console.deepgram.com) → Usage |
 | Anthropic (Claude API) | LLM: Sonnet 5.5 for the agent loop, Haiku 5.5 for the FR-60 judge | `ANTHROPIC_API_KEY` | per input/output token against prepaid credits — Sonnet 5.5 $2 / $10 per 1M, Haiku 5.5 $0.10 / $0.50 per 1M (prompts up to 100K tokens) | [console.anthropic.com](https://console.anthropic.com) → Usage / Billing |
+| TypeSafe (Jev) | the §4.15 turn checks: one small request per user turn | `TYPESAFE_API_KEY` | per input token ($0.042 per 1M listed; output free) — about 500 tokens a turn, a few thousandths of a cent; not in the admin cost estimate (FR-70's recorded trade). Receives the current turn, unanswered turns before it and the agent's last reply — never documents | TypeSafe console |
 | Cartesia | TTS (Sonic-3) | `CARTESIA_API_KEY` | per-character credits on the subscription tier | [play.cartesia.ai](https://play.cartesia.ai) → Usage/Subscription |
 | Firebase Auth | identity (project `aloud-c74f5`) | service-account JSON | free ≤ 50K MAU (email/password + Google) | [Firebase console → Authentication → Usage](https://console.firebase.google.com/project/aloud-c74f5/authentication/usage) |
 | Google Cloud | the GCE VM, static IP, egress | — | ~$14–15/mo flat | [GCP Billing](https://console.cloud.google.com/billing) · [Compute Engine](https://console.cloud.google.com/compute/instances) |
@@ -321,7 +325,9 @@ backend/
               detection, caps; runs via threadpool + semaphore)
   agent/      companion.py (CompanionAgent: builds/runs one session's pipeline)
               loop.py (§4.10 AgentLoopProcessor: the agent loop IN the
-              pipeline's LLM slot — steps, tools, the FR-60 gate,
+              pipeline's LLM slot — the §4.15 turn checks before the
+              first step, steps, tools, the FR-60 gate, the pause
+              between two spoken steps,
               barge-in disposal, FR-61 playback-cut amendment,
               self-instrumentation; + AgentLoopObserver, its eyes
               downstream: bot-speaking, the synthesis stream,
@@ -330,12 +336,17 @@ backend/
               only message source — feature 5 re-implements behind it),
               providers.py (THE provider seam: SDK construction for
               STT/TTS + the FR-48 loop LLM streaming clients — Claude in
-              use, Gemini kept — and the loop/judge factories),
+              use, Gemini kept — the loop/judge factories, and the
+              FR-69 turn checker: Jev over HTTP),
               prompts.py (system prompt, FALLBACK lines, wrap-up,
               the per-document attach-block renderer),
               tools.py (FR-53 registry: create/list/read/search/
               edit_document — paged reads, two-scope search, str_replace/
               insert/append/replace/rename, announce payload cap),
+              checks.py (§4.15: the three questions, the evidence
+              builder, and the rules that turn answers into a turn's
+              plan — silent, talk-only, affirm, edit-and-speak, plain;
+              pure functions, the provider is behind providers.py),
               gate.py (FR-60 create gate: a bounded yes/no judge call
               through the FR-48 seam, on the smaller judge model, in
               front of gated writes —
@@ -438,15 +449,29 @@ Two architectural seams everything hangs on:
    backend; session-owned — the sessionless variant was removed), then WebRTC
    audio flows browser ↔ backend directly over UDP (bypasses Caddy).
 3. Turn loop (FR-42): Flux detects end-of-turn → the aggregator emits the
-   assembled user message → the loop appends it to the context and steps:
+   assembled user message → the loop appends it to the context, then
+   runs the §4.15 turn checks: one request to Jev with the turn, any
+   unanswered turns before it and the agent's last reply (never
+   documents), asking whether the user is done, whether an edit was
+   asked for, and how much they expect said back. Mid-thought or
+   nothing asked → the LLM is not called, nothing is spoken, the client
+   gets `turn.silent` (its indicator returns to Listening) and the text
+   waits in the context for the next turn. No edit asked → the turn
+   declares only the read tools. "Affirm" and "edit and speak" add one
+   instruction to that turn's calls only. No answer within 1s, or an
+   error → the turn runs unchecked, as before the checks existed. Every
+   checked turn leaves a `turn.check` log line, a `check` usage event
+   (its `detail` is the outcome the admin drill-down shows) and one
+   `llm_traces` row. Then the loop steps:
    one streaming Claude Sonnet call per step (thinking off), text deltas
    forwarded to TTS as they arrive; tool calls execute concurrently
    (10s timeout = a tool result; reads abandoned on barge-in, writes run
    in tasks outside pipeline cancellation and always finish); tool steps
    append atomically and loop (MAX 5 steps + one forced tool-free wrap-up
    call); a silent tool round stays silent — the loop speaks no line of
-   its own, and drops a bare "Done." that is premature or redundant
-   (FR-43); any loop error degrades to a spoken canned fallback. The
+   its own and drops nothing the model says; when two steps of a turn
+   both speak, the later one waits for the earlier speech to finish
+   playing plus one second of silence (FR-43); any loop error degrades to a spoken canned fallback. The
    greeting is one tool-forbidden step with no user turn, carrying the
    FR-24 preferred name on its ephemeral trigger — one bounded (1s)
    `users` read at session setup, degrading to a nameless greeting on
@@ -661,7 +686,8 @@ Full original rationale: `git show a84df1b:SDD.md` (§0).
 | 8 | Single VM, host networking, Caddy | Cheapest thing that runs real WebRTC (bridge networking can't forward ephemeral UDP); Caddy for zero-config TLS |
 | 9 | Git: `main` = workbench, `prod` = deploy pointer; PR + CI + Claude review gate on `main` | Two-branch model matching a solo dev with a live demo |
 | 10 | Everything in Docker; commit-at-checkpoints, push/PR only on confirmation | CLAUDE.md workflow rules |
-| 11 | Hand-rolled agent loop in the pipeline's LLM slot (§4.10) | One hot-path LLM call per turn (a "decider" call is serial latency for nothing — Flash selects tools and speaks in the same call); Pipecat stays the audio chassis, the loop is plain Python behind our seams (context provider, tool registry, provider client) so features 4–6 extend seams, not control flow, and a Pipecat retirement would strand nothing. Both mandated spikes ran first: stage swap + barge-in (the interruption hook is `_start_interruption`, not a frame), and live Gemini streaming (function calls arrive ATOMICALLY; raw API defaults thinking ON — pinned off per call) |
+| 11 | Hand-rolled agent loop in the pipeline's LLM slot (§4.10) | One hot-path LLM call per turn (the one thing asked first is §4.15's turn check: a small decision model, about 0.1s, 1s ceiling); Pipecat stays the audio chassis, the loop is plain Python behind our seams (context provider, tool registry, provider client) so features 4–6 extend seams, not control flow, and a Pipecat retirement would strand nothing. Both mandated spikes ran first: stage swap + barge-in (the interruption hook is `_start_interruption`, not a frame), and live Gemini streaming (function calls arrive ATOMICALLY; raw API defaults thinking ON — pinned off per call) |
+| 12 | Turn checks before the LLM (§4.15): TypeSafe Jev, one request per user turn | Deepgram says the user stopped talking, not that they are finished or what they want. Asking first means a turn the agent should not take costs no LLM call, and a turn that asked for no edit cannot edit. Wait-then-call was chosen over starting the LLM at once and applying the verdict to its output (wasted tokens, a refusal round). A missing answer falls back to the old behaviour, so the provider being down never mutes the agent. Rejected: tuning Flux's threshold alone, an audio-level turn model (non-commercial weights, needs a GPU), Haiku as the checker (about 1s per turn) |
 
 ## 9. Scaling notes (when the time comes)
 

@@ -368,3 +368,49 @@ a factor of eight.
    tune against.
 3. Mid-thought has 13 examples and edit-plus-ideas has 2. Neither
    threshold should be trusted from this file; the live run sets them.
+
+### Build checks — 2026-11-14, development machine, branch `feature/turn-checks`
+
+Run while §4.15 was being built, against the live providers.
+
+**The request shape FR-65 depends on is accepted.** `scripts/smoke_llm.py`
+gained a case whose history calls `edit_document` while the request
+declares only a read tool, with the turn's instruction as a trailing
+system message: Claude Sonnet 5.5 accepts it.
+
+**That same case caught a wording bug.** With the first wording of the
+talk-only instruction the model retracted the earlier, real edit ("I
+need to correct my earlier reply… milk has not been added"), on both of
+two tries. Scoped to the user's latest message and told that earlier
+edits stand, it answered the question and left the edit alone, 3 of 3.
+
+**The one-turn instructions, on the real system prompt** (both checks
+on), two tries each, all as intended:
+
+| Case | What the model did |
+|---|---|
+| talk-only, the latest message asks for an edit | "I can't make that change right now, so eggs haven't been added to the list." No tool call |
+| talk-only + affirm, a "Yeah." that confirms | "Okay." |
+| affirm, a plain edit request | called `edit_document`, said nothing before it |
+| edit-and-speak on a turn that asked for no edit | answered in one sentence; no edit |
+| thinking aloud that reached the model | "Sounds good." |
+
+**The checker through the factory** (`make_turn_checker`, the real
+questions, evidence builder and outcome rules;
+`scripts/bench_turn_checks.py`):
+
+- Response time, 36 scripted requests on one warm connection: p50 74 ms,
+  p95 99 ms, max 300 ms, none over a second. (The earlier runs opened a
+  connection per request; the app shares one.) From the development
+  machine: the VM figure is still owed.
+- Accuracy on the labelled set, at the knob table's values: 64 of 87
+  turns get the outcome their labels call for (run 2's scratch script
+  gave 65; the evidence text differs by a line). Wrongly silent: 1
+  (row 40). Wrongly withheld: 0. Wrongly replying: 9 — the two short
+  fragments and the thinking-aloud statements, which now close with a
+  few words when they reach the model. Wrongly instructed: 5 (rows 33,
+  51, 54, 59, 100), three of them plain edit requests in rough speech
+  that SPEAK read as wanting an answer; the instruction's own wording
+  keeps that from causing an edit nobody asked for.
+
+Part 2's response time from the VM and all of part 3 remain to run.
