@@ -1,5 +1,27 @@
 # Turn-decision classifier (Jev) — research & viability, 2026-11-12
 
+> **Superseded 2026-11-13 by REQUIREMENTS.md §4.15**, which is what
+> implementation is held to. Corrections from a fact check that day,
+> where this note is wrong or stale:
+> - Current model is `jev-1.14.0`, not 1.13.0.
+> - Pipecat's Jev classifier arrived in Pipecat 1.12.0 (the extra was
+>   renamed `pipecat-ai[typesafe]` in 1.13.0). We are on 1.3.0, so it
+>   is not available to us; §4.15 calls the vendor SDK directly.
+> - DuplexJev is a community package, not part of Pipecat. Its weights
+>   are CC BY-NC 4.0 and it needs a GPU with about 10 GB: ruled out.
+> - The "0.83s end to end" figure below could not be sourced. One
+>   independent evaluator measured about 0.1s median.
+> - The vendor's 67.8% is agreement with larger models, not
+>   correctness, and one independent test ranked Jev last of twelve on
+>   a legal task. Our own bench decides (FR-71).
+> - Data terms: no training on customer data without consent; kept "as
+>   long as necessary" with no stated period; zero retention only for
+>   enterprise customers on request; DPA automatic; US-hosted.
+> - The design below changed in the spec: no canned replies, silence
+>   instead of "Hmm.", three questions (done / write / speak), and the
+>   create gate stays where it is. "FR-63's ingest classifier" refers
+>   to the unmerged PII spec branch's numbering, not to §4.15's FR-63.
+
 The proposal (owner, from live testing): at each end-of-user-turn, a
 cheap decision model classifies the turn and drives the agent's response
 mode: `incoherent | coherent→silent execution | coherent→respond |

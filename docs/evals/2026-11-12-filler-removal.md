@@ -246,3 +246,17 @@ the database records heard against unheard.
 
 Still open: rows 9 and 15 (voided by speech recognition both times they
 were tried).
+
+**Deferred — run 3, owner, on the merged build (now also live at
+work-aloud.com, deployed 2026-11-13 as `f051bdb`).** Run 2 heard the
+round-2 form of the confirmation rule; the shipped form (dropped when
+premature or redundant) is unit-tested only. Resume point: the run-2
+script, plus one turn that chains two edits from a silent first step
+("add bug spray to the packing list and add a first aid kit to the gear
+section") and one that narrates first. Listen for a "Done." in the
+middle of the work, and for a turn that ends with nothing spoken.
+This run tests the rule as it is shipped. Once §4.15 is built the rule
+is gone (FR-43 as amended drops nothing, neither a redundant
+confirmation nor a premature one, and puts a one-second pause between
+spoken steps), and this run is void: listen for the pause instead
+(docs/evals/2026-11-13-decision-gates.md, row 32).
