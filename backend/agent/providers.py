@@ -20,6 +20,7 @@ from google.genai import types as genai_types
 from loguru import logger
 from pipecat.services.cartesia.tts import CartesiaTTSService, GenerationConfig
 from pipecat.services.deepgram.flux.stt import DeepgramFluxSTTService
+from pipecat.services.openai.tts import OpenAITTSService
 
 from app.config import Settings
 
@@ -38,6 +39,9 @@ def make_stt(settings: Settings):
     raise ValueError(f"Unknown STT_PROVIDER: {settings.stt_provider}")
 
 
+_ASSEMBLYAI_TTS_URL = "https://tts.us.assemblyai.com/v1/openai"
+
+
 def make_tts(settings: Settings, text_filters: list):
     if settings.tts_provider == "cartesia":
         return CartesiaTTSService(
@@ -47,6 +51,27 @@ def make_tts(settings: Settings, text_filters: list):
                 voice=settings.cartesia_voice_id,
                 # Sonic-3 speech rate; 1.0 = normal, lower = slower.
                 generation_config=GenerationConfig(speed=settings.cartesia_speed),
+            ),
+            text_filters=text_filters,
+        )
+    if settings.tts_provider == "assemblyai":
+        # AssemblyAI-TTS-1 through its OpenAI-compatible speech route,
+        # spoken by the OpenAI TTS service this Pipecat already ships:
+        # Pipecat's own AssemblyAI TTS service needs a release after
+        # 1.14, far ahead of the pinned 1.3. What this route gives up
+        # against the native WebSocket one, until that upgrade:
+        #   - word timings: played text is released per SENTENCE, so
+        #     FR-61's "what was heard" is sentence-grained here;
+        #   - a chosen voice: the service accepts only OpenAI's voice
+        #     names, and AssemblyAI maps every one of them to its default
+        #     voice for the model's language;
+        #   - speed: the model has no speed control (CARTESIA_SPEED does
+        #     not apply).
+        return OpenAITTSService(
+            api_key=settings.assemblyai_api_key,
+            base_url=_ASSEMBLYAI_TTS_URL,
+            settings=OpenAITTSService.Settings(
+                model=settings.assemblyai_tts_model, voice="alloy"
             ),
             text_filters=text_filters,
         )

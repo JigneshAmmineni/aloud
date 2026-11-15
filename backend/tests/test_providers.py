@@ -136,3 +136,37 @@ def test_unknown_providers_raise():
         make_judge_llm(_settings(llm_provider="nope"))
     with pytest.raises(ValueError):
         make_tts(_settings(tts_provider="nope"), text_filters=[])
+
+
+def test_assemblyai_tts_rides_the_openai_compatible_route():
+    """TTS_PROVIDER=assemblyai: AssemblyAI-TTS-1 through its
+    OpenAI-compatible speech endpoint, on the OpenAI TTS service this
+    Pipecat ships (its native AssemblyAI TTS service needs a much newer
+    release)."""
+    from pipecat.services.openai.tts import OpenAITTSService
+
+    tts = make_tts(
+        _settings(tts_provider="assemblyai", assemblyai_api_key="aai-key"),
+        text_filters=[],
+    )
+    assert isinstance(tts, OpenAITTSService)
+    assert str(tts._client.base_url).rstrip("/") == "https://tts.us.assemblyai.com/v1/openai"
+    assert tts._client.api_key == "aai-key"
+    assert tts._settings.model == "assemblyai-tts-en"
+    # the service only accepts OpenAI's voice names; AssemblyAI maps any of
+    # them to its default voice for the model's language
+    assert tts._settings.voice == "alloy"
+
+
+def test_the_assemblyai_key_is_required_only_with_that_provider(monkeypatch):
+    from app.config import load_settings
+
+    monkeypatch.setenv("TTS_PROVIDER", "assemblyai")
+    monkeypatch.delenv("ASSEMBLYAI_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="ASSEMBLYAI_API_KEY"):
+        load_settings()
+    monkeypatch.setenv("ASSEMBLYAI_API_KEY", "k")
+    assert load_settings().tts_provider == "assemblyai"
+    monkeypatch.delenv("TTS_PROVIDER")
+    monkeypatch.delenv("ASSEMBLYAI_API_KEY")
+    assert load_settings().tts_provider == "cartesia"  # cartesia needs no such key

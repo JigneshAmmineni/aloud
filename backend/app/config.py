@@ -71,6 +71,9 @@ class Settings:
     # by hand (tests) runs without a checker; load_settings() is where the
     # product default — both on — lives (FR-71).
     typesafe_api_key: str = ""  # required exactly when a switch is on
+    # TTS_PROVIDER=assemblyai (AssemblyAI-TTS-1; cartesia stays the default)
+    assemblyai_api_key: str = ""  # required exactly then
+    assemblyai_tts_model: str = "assemblyai-tts-en"
     turn_check_done: bool = False
     turn_check_mode: bool = False
     check_model: str = "jev-1.14.0"  # pinned: the thresholds are tuned to it
@@ -92,6 +95,12 @@ def load_settings() -> Settings:
             "Missing required environment variables: "
             + ", ".join(missing)
             + " — add them to .env (see .env.example)."
+        )
+    tts_provider = os.getenv("TTS_PROVIDER") or "cartesia"
+    if tts_provider == "assemblyai" and not os.getenv("ASSEMBLYAI_API_KEY"):
+        raise RuntimeError(
+            "ASSEMBLYAI_API_KEY is required while TTS_PROVIDER=assemblyai — "
+            "add it to .env (see .env.example)."
         )
     llm_effort = os.getenv("LLM_EFFORT") or "medium"
     if llm_effort not in _LLM_EFFORTS:
@@ -121,7 +130,7 @@ def load_settings() -> Settings:
         llm_effort=llm_effort,
         stt_provider=os.getenv("STT_PROVIDER") or "deepgram_flux",
         llm_provider=llm_provider,
-        tts_provider=os.getenv("TTS_PROVIDER") or "cartesia",
+        tts_provider=tts_provider,
         tts_sanitize_enabled=_env_bool("TTS_SANITIZE_ENABLED", True),
         cartesia_speed=_env_float("CARTESIA_SPEED", 0.85),
         flux_eot_threshold=_env_float("FLUX_EOT_THRESHOLD", 0.8),
@@ -133,6 +142,8 @@ def load_settings() -> Settings:
         rate_llm_per_1m_tokens_out=_env_float("RATE_LLM_PER_1M_TOKENS_OUT", 0.0),
         rate_tts_per_1m_chars=_env_float("RATE_TTS_PER_1M_CHARS", 0.0),
         typesafe_api_key=os.getenv("TYPESAFE_API_KEY") or "",
+        assemblyai_api_key=os.getenv("ASSEMBLYAI_API_KEY") or "",
+        assemblyai_tts_model=os.getenv("ASSEMBLYAI_TTS_MODEL") or "assemblyai-tts-en",
         turn_check_done=turn_check_done,
         turn_check_mode=turn_check_mode,
         check_model=os.getenv("CHECK_MODEL") or "jev-1.14.0",
