@@ -23,6 +23,7 @@ const LABELS: Record<string, string> = {
   silent_nothing_asked: "silent: nothing asked",
   talk_only: "talk only",
   affirm: "affirm",
+  answer: "answer",
   edit_and_speak: "edit and speak",
   plain: "plain",
   interrupted: "check interrupted",

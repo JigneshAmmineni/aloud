@@ -75,7 +75,7 @@ class Settings:
     turn_check_mode: bool = False
     check_model: str = "jev-1.14.0"  # pinned: the thresholds are tuned to it
     check_timeout_s: float = 1.0
-    check_mid_thought_min: float = 0.5
+    check_mid_thought_min: float = 0.6
     check_no_write_min: float = 0.8
     check_nothing_min: float = 0.5
     check_affirm_min: float = 0.5
@@ -137,7 +137,7 @@ def load_settings() -> Settings:
         turn_check_mode=turn_check_mode,
         check_model=os.getenv("CHECK_MODEL") or "jev-1.14.0",
         check_timeout_s=_env_float("CHECK_TIMEOUT_S", 1.0),
-        check_mid_thought_min=_env_float("CHECK_MID_THOUGHT_MIN", 0.5),
+        check_mid_thought_min=_env_float("CHECK_MID_THOUGHT_MIN", 0.6),
         check_no_write_min=_env_float("CHECK_NO_WRITE_MIN", 0.8),
         check_nothing_min=_env_float("CHECK_NOTHING_MIN", 0.5),
         check_affirm_min=_env_float("CHECK_AFFIRM_MIN", 0.5),

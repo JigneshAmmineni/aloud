@@ -414,3 +414,48 @@ questions, evidence builder and outcome rules;
   keeps that from causing an edit nobody asked for.
 
 Part 2's response time from the VM and all of part 3 remain to run.
+
+### Part 3, run 1 — owner, local dev server, 2026-11-14 (session `5cf0c0e2…`)
+
+On commit `add3129`, both checks on. 31 turns, rows 1 to 20 of the
+spoken script; it ended there because the voice provider ran out of
+credits. 85 trace rows; check response time 111 to 340 ms, no bypass.
+
+| Row | What happened | Cause | Fix |
+|---|---|---|---|
+| 3 | "…Probably" arrived as its own one-word turn, twice, and got "Got it." and "Okay." | DONE scored the bare word 0.53 and 0.76 | none yet: better than the advice it used to get, not the silence wanted. Carried |
+| 8 | "What am I missing?" got four sentences ending in an unasked "Also… worth confirming" | the answer mode's bound lives in the prompt only, and did not hold (also 3 sentences on rows 2 and 20) | FR-66 gains an **answer** instruction on the turn. Re-probed live: two sentences, twice |
+| 10 | the rename got silence | speech recognition delivered "Receiving the document to late weekend plan"; DONE scored it 0.44, just inside the 0.5 line | `CHECK_MID_THOUGHT_MIN` 0.5 → 0.6. Every real mid-thought in the session scored 0.32 or lower |
+| 14 | "Hold on" had to be said four times; "continue" got "Okay, holding" | (a) the server registered no speech for 29 s of playback: the microphone path, not this change. (b) "continue" was transcribed as "Good evening", and the model answered the earlier, unanswered "Hold on" | (a) none here: roadmap feature 8. (b) the prompt now says to answer the newest message |
+| 15 | "Stop" had to be said three times | same as 14(a): 9 s before speech registered; all three arrived as one turn | none here |
+| 16 | after 'Did you mean "put the first aid kit under gear"?' and "Yes.", the agent said "Document editing is off for this reply" | WRITE scored the "Yes." 0.05, so the tools were withheld; and the instruction's wording was repeated aloud | WRITE now includes agreeing to an offered change (0.06 → 0.93 on this turn, live); the instruction never names itself and asks the user to say it again |
+| 20 | stuck on Thinking for 20 s and on every turn after | Cartesia returned `quota_exceeded` from 05:45:59 UTC: replies were generated and could not be spoken | owner tops up. A voice-provider failure showing as endless Thinking is older than this change, and is not fixed here |
+
+Worked as intended: the mid-thought silences on "After that," (twice),
+"I said" and "Can you put"; the nothing-asked silences on "Okay.",
+"Right. Right." and "Stop. Stop. Stop."; the create, the edits and the
+restructure, each closed in a word ("Done.", "Added.", "Fixed.",
+"Renamed."); the playback cut on rows 14 and 15 once the interruption
+registered.
+
+Not reached: rows 21 to 36. The run is repeated from the top on the
+fixed build once the voice provider has credits.
+
+**What the fixes cost on the labelled set** (`bench_turn_checks.py
+--accuracy`, same 102 turns, after the fixes):
+
+- The reworded WRITE question withholds the edit tools less often: on
+  47 of the 63 turns that asked for no edit, down from 59. It still
+  withholds them from none of the 16 that did. The turns it no longer
+  withholds keep their tools as they did before the checks existed,
+  which is the lean FR-63 chose. Two "Great."-type turns now get a
+  short closing word where they got silence, because a turn that keeps
+  its tools is never silent.
+- A tighter wording was tried ("saying yes to the assistant's question
+  about making a specific change counts; a yes to any other question
+  does not"). It kept 60 of 63, and scored the first-aid-kit "Yes." at
+  0.17, which is still withheld. Rejected: the wording has to fix the
+  turn it was written for with room to spare (the chosen one scores it
+  0.91 to 0.93).
+- With the mid-thought line at 0.6: one real request still silenced
+  (row 40), three mid-thought fragments answered (rows 24, 30, 35).

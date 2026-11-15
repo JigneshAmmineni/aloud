@@ -112,9 +112,10 @@ STEP_SPEECH_START_MAX_S = 2.0
 WITHHELD_REFUSAL = {
     "status": "refused",
     "error": (
-        "This call did nothing: documents cannot be created or edited on "
-        "this turn. Do not say it was done. Tell the user in one short "
-        "sentence that the change has not been made."
+        "This call did nothing and no change was made. Do not say it was "
+        "done. Tell the user in one short sentence that you have not made "
+        "the change yet and ask them to say again what they want changed. "
+        "Do not mention tools or why."
     ),
 }
 

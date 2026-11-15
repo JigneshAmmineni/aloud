@@ -2826,7 +2826,11 @@ Five decisions shape every FR below, each with the alternative it beat:
   - DONE (yes or no) — has the user finished what they were saying, as
     opposed to pausing mid-thought?
   - WRITE (yes or no) — did the user ask for something to be written
-    or changed in a document?
+    or changed in a document, or agree to a change the agent had just
+    offered or asked them to confirm? (A bare "yes" to "did you mean
+    put the first aid kit under gear?" is an edit request: the
+    narrower wording scored it 0.06 in the first live run and the turn
+    lost its tools.)
   - SPEAK (one of three) — what does the user expect said back?
     **Nothing**: they are thinking aloud, acknowledging what was said,
     or telling the agent to stop or wait, and asked for nothing.
@@ -2873,14 +2877,15 @@ Five decisions shape every FR below, each with the alternative it beat:
        an edit may have been asked for, and work is always confirmed.
      - `p_affirm ≥ CHECK_AFFIRM_MIN`, or the case above → the
        **affirm** instruction (FR-66).
-     - otherwise the turn wants an answer and gets no instruction —
-       unless `p_write ≥ CHECK_BOTH_MIN` as well, which adds the
-       **edit-and-speak** instruction (FR-66).
+     - otherwise the turn wants an answer: the **answer** instruction
+       (FR-66) — or, when `p_write ≥ CHECK_BOTH_MIN` as well, the
+       **edit-and-speak** instruction.
 
-  A turn that is not silent, not talk-only and not instructed is
-  **plain**: it runs exactly as it would without the checks. Answer is
-  the default because it is today's behaviour, so every unsure SPEAK
-  lands there. **Recorded coupling:** `CHECK_NO_WRITE_MIN` gates two
+  A turn with no verdict — its check is off, or an answer it needs is
+  missing (FR-67) — is **plain**: it runs exactly as it would without
+  the checks. Answer is SPEAK's default, so an unsure SPEAK gets the
+  answer instruction, which only restates the prompt's own default
+  mode. **Recorded coupling:** `CHECK_NO_WRITE_MIN` gates two
   things, the withholding of the write tools and the nothing-asked
   silence, on purpose: the agent never goes silent on a turn that may
   hold an edit request. The cost is on the bench's record: of 63 turns
@@ -2890,8 +2895,8 @@ Five decisions shape every FR below, each with the alternative it beat:
   off, decisions 2 and 3 are skipped. The thresholds are settings,
   tuned from FR-71's bench and then by ear in live testing; the
   defaults in the knob table are starting values, and their asymmetry
-  is decision 4 above: silence needs only the midpoint, withholding the
-  write tools needs well above it. Mandated tests: each threshold on
+  is decision 4 above: silence needs a little past the midpoint,
+  withholding the write tools needs well above it. Mandated tests: each threshold on
   both sides; the order (a mid-thought answer wins over the rest); a
   nothing choice on a turn that keeps its write tools becomes affirm,
   not silence; each switch off. The edit-and-speak instruction is never
@@ -2910,6 +2915,11 @@ Five decisions shape every FR below, each with the alternative it beat:
     `scripts/smoke_llm.py` covers the shape), so when the model is next
     called it sees the whole thought. Transcript logging and turn
     numbering are unchanged: one turn per end of turn.
+  - The prompt tells the model to reply to the newest message when an
+    earlier one went unanswered, and to treat the earlier one only as
+    context (first live run: a "Hold on." met with silence was answered
+    one turn later, with "Okay, holding", in reply to a different
+    message).
   - The turn still ends for bookkeeping: the metrics buffer clears and,
     having no first audio, the turn writes no `turn_metrics` row (FR-33,
     FR-47).
@@ -2947,7 +2957,11 @@ Five decisions shape every FR below, each with the alternative it beat:
   - One instruction is added to each of that turn's calls and never
     appended to the context (FR-42's wrap-up pattern): the model cannot
     edit documents on this turn, must not say it changed anything, and,
-    if the user did ask for a change, says the change has not been made.
+    if the user did ask for a change, says it has not made the change
+    yet and asks them to say again what they want changed — the repeat
+    is what recovers a turn that landed here wrongly. It never mentions
+    the instruction or says that editing is off (first live run: the
+    model said "Document editing is off for this reply" aloud).
     It is scoped to the user's LATEST message and says that edits made
     earlier in the conversation stand: a live probe showed a looser
     wording retracting an edit that had really happened.
@@ -2971,8 +2985,8 @@ Five decisions shape every FR below, each with the alternative it beat:
   client contains no write tool at any step; the instruction is in the
   call's messages and absent from the context afterwards; a write call
   that arrives anyway runs no handler.
-- **FR-66** **The affirm and the edit-and-speak outcomes are each bound
-  by one instruction, added to that turn's calls only.**
+- **FR-66** **The affirm, answer and edit-and-speak outcomes are each
+  bound by one instruction, added to that turn's calls only.**
   - *Affirm:* close the exchange with any short phrase, five words or
     fewer ("Okay.", "Done.", "Sounds good.") — after a task or tool
     call the user gave has finished, or when there is nothing more to
@@ -2985,6 +2999,17 @@ Five decisions shape every FR below, each with the alternative it beat:
     saying a requested change has not been made is exempt from the
     five-word bound. The bound is on the turn's closing reply; what an
     earlier step said before a tool call (FR-43) is not counted.
+  - *Answer:* one or two sentences, ideally one; when the user needs
+    several items, at most five short points and nothing after them; no
+    extra observation, caveat, follow-up question or offer that was not
+    asked for. One exception, in the instruction's own words: a message
+    that explicitly asks for an explanation in detail, a walk-through
+    or something read out takes the length it needs, so mode 3 stays
+    the model's to choose (FR-72). This restates the system prompt's
+    mode 2 on the turn itself, because in the first live run the prompt
+    alone did not hold: answers ran to three sentences and an unasked
+    "also…". On a talk-only turn it is sent as one instruction with
+    FR-65's.
   - *Edit and speak:* if the user asked for something to be written or
     changed, make that change, and after it say the requested substance
     aloud; if they asked for no change, change nothing and only speak.
@@ -3149,8 +3174,8 @@ Five decisions shape every FR below, each with the alternative it beat:
   - Usage: one event per checked turn — `stage = 'check'`,
     `unit = 'count'`, `quantity` = the questions sent, `detail` = the
     outcome (`silent_mid_thought` | `silent_nothing_asked` | `plain`,
-    or the bindings that applied joined by `+`: `talk_only`, `affirm`,
-    `talk_only+affirm`, `edit_and_speak`), with `+bypass` appended
+    or the bindings that applied joined by `+`: `affirm`, `answer`,
+    `talk_only+affirm`, `talk_only+answer`, `edit_and_speak`), with `+bypass` appended
     when an asked question went unanswered, or `interrupted` when a
     barge-in cancelled the wait before there was an outcome — silent
     turns included. FR-36's union therefore lists a
@@ -3239,7 +3264,7 @@ Five decisions shape every FR below, each with the alternative it beat:
 
   Mechanism and bounds:
   - The checks decide between nothing, affirm and an answer (FR-63) and
-    steer mode 1 with FR-66's instruction. The prompt carries the same
+    steer modes 1 and 2 with FR-66's instructions. The prompt carries the same
     mode, so the model applies it on its own when a check is off,
     unanswered or unsure.
   - The checks do not choose between modes 2 and 3. Rejected: one more
@@ -3287,7 +3312,7 @@ Five decisions shape every FR below, each with the alternative it beat:
 | `TURN_CHECK_DONE` / `TURN_CHECK_MODE` (the two switches) | on / on | env (`app/config.py`) |
 | `CHECK_MODEL` (pinned decision-model version) | `jev-1.14.0` | env (`app/config.py`) |
 | `CHECK_TIMEOUT_S` (ceiling on the wait; on breach the question is bypassed) | 1s | env (`app/config.py`) |
-| `CHECK_MID_THOUGHT_MIN` (confidence needed to stay silent as mid-thought) | 0.5 | env (`app/config.py`) |
+| `CHECK_MID_THOUGHT_MIN` (confidence needed to stay silent as mid-thought; 0.6 since the first live run, where a garbled but complete request scored 0.44 for "done" and was met with silence — every real mid-thought there scored 0.32 or lower) | 0.6 | env (`app/config.py`) |
 | `CHECK_NOTHING_MIN` (SPEAK probability needed for "nothing") | 0.5 | env (`app/config.py`) |
 | `CHECK_AFFIRM_MIN` (SPEAK probability needed for "affirm") | 0.5 | env (`app/config.py`) |
 | `CHECK_NO_WRITE_MIN` (confidence needed to withhold the write tools) | 0.8 | env (`app/config.py`) |

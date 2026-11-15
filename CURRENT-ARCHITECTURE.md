@@ -457,8 +457,8 @@ Two architectural seams everything hangs on:
    nothing asked → the LLM is not called, nothing is spoken, the client
    gets `turn.silent` (its indicator returns to Listening) and the text
    waits in the context for the next turn. No edit asked → the turn
-   declares only the read tools. "Affirm" and "edit and speak" add one
-   instruction to that turn's calls only. No answer within 1s, or an
+   declares only the read tools. "Affirm", "answer" and "edit and speak"
+   each add one instruction to that turn's calls only. No answer within 1s, or an
    error → the turn runs unchecked, as before the checks existed. Every
    checked turn leaves a `turn.check` log line, a `check` usage event
    (its `detail` is the outcome the admin drill-down shows) and one

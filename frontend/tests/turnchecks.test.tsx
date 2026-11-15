@@ -83,6 +83,8 @@ describe("the outcome label (FR-70 vocabulary)", () => {
     expect(fmtOutcome("silent_mid_thought")).toBe("silent: mid-thought");
     expect(fmtOutcome("silent_nothing_asked")).toBe("silent: nothing asked");
     expect(fmtOutcome("talk_only+affirm")).toBe("talk only, affirm");
+    expect(fmtOutcome("talk_only+answer")).toBe("talk only, answer");
+    expect(fmtOutcome("answer")).toBe("answer");
     expect(fmtOutcome("edit_and_speak")).toBe("edit and speak");
     expect(fmtOutcome("plain")).toBe("plain");
   });

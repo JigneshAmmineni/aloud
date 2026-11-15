@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from agent.prompts import (
     AFFIRM_INSTRUCTION,
     AFFIRM_TALK_ONLY_INSTRUCTION,
+    ANSWER_INSTRUCTION,
+    ANSWER_TALK_ONLY_INSTRUCTION,
     EDIT_AND_SPEAK_INSTRUCTION,
     TALK_ONLY_INSTRUCTION,
 )
@@ -42,10 +44,15 @@ _DONE = CheckQuestion(
     "self-corrections inside it do not count against that. They did not "
     "stop in the middle of a sentence or with the thought left hanging.",
 )
+# "...or agrees to a change" is from the first live run: the agent asked
+# 'Did you mean "put the first aid kit under gear"?', the user said
+# "Yes.", and the narrower wording scored that 0.06 — the edit tools were
+# withheld from a turn that was confirming an edit. Reworded: 0.93.
 _WRITE = CheckQuestion(
     WRITE,
     "In their latest turn the user asks the assistant to write, add, "
-    "change, remove, rename or create something in a document.",
+    "change, remove, rename or create something in a document, or agrees "
+    "to a change the assistant has just offered or asked them to confirm.",
 )
 NOTHING = "nothing"
 AFFIRM = "affirm"
@@ -94,7 +101,7 @@ class CheckSettings:
     mode_on: bool = False
     model: str = ""
     timeout_s: float = 1.0
-    mid_thought_min: float = 0.5
+    mid_thought_min: float = 0.6
     no_write_min: float = 0.8
     nothing_min: float = 0.5
     affirm_min: float = 0.5
@@ -172,7 +179,7 @@ class TurnPlan:
 
     silent: str | None = None  # SILENT_* : the main model is not called
     talk_only: bool = False  # write tools withheld (FR-65)
-    speech: str | None = None  # AFFIRM | EDIT_AND_SPEAK (FR-66)
+    speech: str | None = None  # AFFIRM | ANSWER | EDIT_AND_SPEAK (FR-66)
     bypass: bool = False  # an asked question went unanswered (FR-67)
 
     @property
@@ -183,16 +190,15 @@ class TurnPlan:
         if self.silent:
             return None
         if self.talk_only:
-            return (
-                AFFIRM_TALK_ONLY_INSTRUCTION
-                if self.speech == AFFIRM
-                else TALK_ONLY_INSTRUCTION
-            )
-        if self.speech == AFFIRM:
-            return AFFIRM_INSTRUCTION
-        if self.speech == EDIT_AND_SPEAK:
-            return EDIT_AND_SPEAK_INSTRUCTION
-        return None
+            return {
+                AFFIRM: AFFIRM_TALK_ONLY_INSTRUCTION,
+                ANSWER: ANSWER_TALK_ONLY_INSTRUCTION,
+            }.get(self.speech, TALK_ONLY_INSTRUCTION)
+        return {
+            AFFIRM: AFFIRM_INSTRUCTION,
+            ANSWER: ANSWER_INSTRUCTION,
+            EDIT_AND_SPEAK: EDIT_AND_SPEAK_INSTRUCTION,
+        }.get(self.speech)
 
     @property
     def detail(self) -> str:
@@ -244,5 +250,8 @@ def decide(answers: dict[str, CheckAnswer], cfg: CheckSettings) -> TurnPlan:
         # with no write tools to "make the change"
         speech = EDIT_AND_SPEAK
     else:
-        speech = None
+        # an answer is expected: the turn carries mode 2's bound (FR-66).
+        # The prompt alone did not hold it — the first live run's answers
+        # ran to three sentences and an unasked "also..."
+        speech = ANSWER
     return TurnPlan(talk_only=talk_only, speech=speech, bypass=bypass)

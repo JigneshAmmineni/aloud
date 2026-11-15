@@ -115,9 +115,11 @@ def _expected(row: dict) -> str | None:
         return None
     if row["write"] == "y":
         return "edit_and_speak" if row["speak"] == "y" else "affirm"
-    return {"n": SILENT_NOTHING_ASKED, "a": "talk_only+affirm", "y": "talk_only"}[
-        row["speak"]
-    ]
+    return {
+        "n": SILENT_NOTHING_ASKED,
+        "a": "talk_only+affirm",
+        "y": "talk_only+answer",
+    }[row["speak"]]
 
 
 async def accuracy(checker, cfg, folder: Path) -> int:
