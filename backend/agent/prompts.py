@@ -213,11 +213,16 @@ def build_system_prompt(*, checks_on: bool = False) -> str:
 # §4.15's one-turn instructions (FR-65, FR-66): added to each call of the
 # turn they apply to and NEVER appended to the context — the wrap-up
 # instruction's pattern, so a later turn is not built atop a stale order.
+# Scoped to the user's LATEST message on purpose: a live probe showed the
+# model applying a looser wording to an edit made earlier in the
+# conversation and "correcting" a change that had really happened.
 TALK_ONLY_INSTRUCTION = (
-    "For this reply only: you cannot create or edit documents on this turn. "
-    "Do not say you changed, added, saved or wrote anything. If the user "
-    "did ask for a change, tell them in one short sentence that it has not "
-    "been made."
+    "For your next reply only, document editing is switched off. Edits you "
+    "made earlier in this conversation really happened and still stand: "
+    "never retract, correct or mention them. In this reply do not say you "
+    "changed, added, saved or wrote anything new. Only if the user's "
+    "latest message asks for a new change, tell them in one short sentence "
+    "that it has not been made."
 )
 
 # Affirm on a turn that keeps its write tools: the closing phrase after

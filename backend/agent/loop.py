@@ -104,10 +104,9 @@ STEP_SPEECH_HOLD_SLACK_S = 5.0
 WITHHELD_REFUSAL = {
     "status": "refused",
     "error": (
-        "No change was made: documents cannot be created or edited on "
-        "this turn. Do not say anything was changed. If the user asked "
-        "for a change, tell them in one short sentence that it has not "
-        "been made."
+        "This call did nothing: documents cannot be created or edited on "
+        "this turn. Do not say it was done. Tell the user in one short "
+        "sentence that the change has not been made."
     ),
 }
 

@@ -469,7 +469,7 @@ def test_a_write_call_that_arrives_on_a_talk_only_turn_runs_no_handler_and_no_ju
     asyncio.run(h.loop._run_turn("what do you think?"))
     assert ran == []
     result = next(m for m in h.ctx.build() if m["role"] == "tool")["content"]
-    assert result["status"] == "refused" and "No change was made" in result["error"]
+    assert result["status"] == "refused" and "did nothing" in result["error"]
     # the gate's judge was never consulted: only the two loop calls ran
     assert len(h.llm.calls) == 2
     assert not [t for t in _queued(h.traces, LLMTrace) if t.purpose == "gate"]

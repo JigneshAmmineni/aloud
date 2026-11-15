@@ -19,14 +19,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from agent.checks import CheckSettings, questions_for  # noqa: E402
 from agent.gate import judge_allows, judge_messages  # noqa: E402
+from agent.prompts import TALK_ONLY_INSTRUCTION  # noqa: E402
 from agent.providers import (  # noqa: E402
+    CHECK_ANSWERED,
     FINISH_STOP,
     LLMDone,
     LLMTextDelta,
     LLMToolCall,
     make_judge_llm,
     make_loop_llm,
+    make_turn_checker,
 )
 from app.config import load_settings  # noqa: E402
 
@@ -53,6 +57,18 @@ _TOOL_ROUND = [
     {"role": "tool", "tool_call_id": "toolu_smoke1", "name": "read_document", "content": {"status": "cancelled"}},
 ]
 _ASK = {"role": "user", "content": "Say hello, then tell me what two plus two is."}
+# FR-65: a talk-only turn declares only the read tools, while the history
+# still holds an earlier call to a write tool that is NOT declared now
+_EDIT_ROUND = [
+    {"role": "user", "content": "Add milk to the list."},
+    {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{"id": "toolu_smoke2", "name": "edit_document", "arguments": {"document_id": 1, "append": "milk"}}],
+    },
+    {"role": "tool", "tool_call_id": "toolu_smoke2", "name": "edit_document", "content": {"status": "ok"}},
+    {"role": "assistant", "content": "Done."},
+]
 
 # (label, messages, tool_choice): the shapes the context really produces
 _CASES = [
@@ -65,6 +81,13 @@ _CASES = [
     ("conversation opening with the assistant", [_SYSTEM, {"role": "assistant", "content": "Hi there."}, _ASK], "auto"),
     # the greeting and the forced wrap-up: tools declared, selection forbidden
     ("tool_choice none", [_SYSTEM, _ASK], "none"),
+    # FR-65's probe: the history calls a tool the request does not declare,
+    # and the turn's one instruction rides as a trailing system message
+    (
+        "talk-only turn after an edit (undeclared tool in history)",
+        [_SYSTEM, *_EDIT_ROUND, _ASK, {"role": "system", "content": TALK_ONLY_INSTRUCTION}],
+        "auto",
+    ),
 ]
 
 
@@ -114,6 +137,25 @@ async def main() -> int:
     print(f"judge: {judge_ms}ms finish={finish} verdict={verdict!r} allowed={allowed} usage={usage}")
 
     ok = ok and finish == FINISH_STOP and allowed
+
+    # FR-69: one request through the factory, the same fields back
+    checker = make_turn_checker(settings)
+    if checker is None:
+        print("check: skipped, no TYPESAFE_API_KEY")
+    else:
+        questions = questions_for(CheckSettings(done_on=True, mode_on=True))
+        t0 = time.monotonic()
+        answers, usage = await checker.ask(
+            "A voice conversation between a user and a work assistant. "
+            "The user's latest turn: 'Add milk to the shopping list.'",
+            questions,
+        )
+        check_ms = round((time.monotonic() - t0) * 1000)
+        print(f"check: {check_ms}ms model={settings.check_model} usage={usage}")
+        for q in questions:
+            a = answers[q.id]
+            print(f"       {q.id}: {a.status} p_yes={a.p_yes} probabilities={a.probabilities}")
+        ok = ok and all(answers[q.id].status == CHECK_ANSWERED for q in questions)
     print("OK" if ok else "FAILED")
     return 0 if ok else 1
 
