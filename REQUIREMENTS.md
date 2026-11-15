@@ -2785,8 +2785,8 @@ Five decisions shape every FR below, each with the alternative it beat:
    trade:** this is the first serial round trip placed in front of the
    main call, and its size is so far the provider's claim and one
    outside measurement, not ours. FR-71's bench measures it from the
-   VM before any switch goes on, and the rejected alternative above is
-   the fallback if the measured wait is not acceptable.
+   VM before the checks are deployed, and the rejected alternative
+   above is the fallback if the measured wait is not acceptable.
 3. **Silence has no time limit.** The product is meant to stay open
    while the user moves around and talks in bursts; the user asks again
    when they want an answer. Rejected: replying on its own after N
@@ -3069,25 +3069,26 @@ Five decisions shape every FR below, each with the alternative it beat:
     nothing from the pipeline.
   - The provider's API is early access and its field names may change;
     the factory is the one place that knows them.
-  - The key is required exactly when a switch is on: configuration
+  - The key is required exactly when a switch is on — which, with both
+    on by default (FR-71), means in every environment that does not
+    set them off, the test and CI lanes included: configuration
     loading fails, and the server does not start, if `TURN_CHECK_DONE`
     or `TURN_CHECK_MODE` is on without `TYPESAFE_API_KEY`
     (`app/config.py`'s fail-fast rule — the symptom of a missing key
     would otherwise be a quiet agent, which looks like the feature
     working). With both switches off the key is not needed. The
     factory builds a checker whenever the key is present, whatever the
-    switches say (FR-71's bench runs it with both off); the switches
+    switches say (FR-71's bench calls it directly); the switches
     decide only whether the loop asks. Mandated test: a switch on with no key fails
     configuration loading; both off with no key loads.
   - Every environment setting in this section's knob table is
     documented in `.env.example` with its default. A setting reaches
     the VM only through the owner's own `.env`, which
     `scripts/sync-env.sh` copies there in place of the VM's file: a key
-    missing from the local file is removed from the VM. The key may be
-    present while both switches are off — FR-71's response-time bench
-    on the VM needs exactly that, so it must be in the local `.env`
-    before the sync that precedes the bench — and is then unused by the
-    running app.
+    missing from the local file is removed from the VM. The key must
+    therefore be in the local `.env` before the sync that precedes
+    FR-71's response-time bench on the VM, and before any deploy that
+    carries this section.
   - The early bench already established, against the live API, the
     request and response shape (a probability for a yes/no question, a
     probability per option for a choice), that one request carries
@@ -3135,10 +3136,12 @@ Five decisions shape every FR below, each with the alternative it beat:
   Mandated tests: a silent turn writes the usage event and the trace
   row and no `turn_metrics` row; the log line and the usage event carry
   no user text; the recorder calls pass NFR-10's fake-queue split.
-- **FR-71** **Both switches are off by default, and a check is switched
-  on in production only after a bench on recorded turns, a live voice
-  run, and a privacy-policy update, on the owner's decision.** The
-  record is `docs/evals/2026-11-13-decision-gates.md`.
+- **FR-71** **Both checks are on by default, for every user, and each
+  has a switch that turns it off.** With a switch off the agent behaves
+  as it did before this section (FR-63, FR-73). The bench and the live
+  run below are the behavior change's acceptance record
+  (`docs/evals/2026-11-13-decision-gates.md`), read by the owner before
+  the deploy like any other; they are not a gate in the configuration.
   - **Bench.** `backend/scripts/bench_turn_checks.py` has two modes,
     because accuracy does not depend on where it is measured and
     response time does. *Accuracy*, on the development machine: a
@@ -3152,27 +3155,24 @@ Five decisions shape every FR below, each with the alternative it beat:
     git-ignored folder on that machine, is never committed, and is
     never copied to the VM. The thresholds are chosen from this table.
     The set includes thinking-aloud statements, and the share of them
-    SPEAK sends to nothing is on the record before `TURN_CHECK_MODE`
-    goes on.
-    *Response time*, from the production VM: the script sends the eval
-    file's scripted sentences — no recorded turn — and reports p50,
-    p95 and max per question.
+    SPEAK sends to nothing is on the record. *Response time*, from the
+    production VM: the script sends the eval file's scripted sentences
+    — no recorded turn — and reports p50, p95 and max.
   - **Live run.** The scripted voice session in the eval file, on the
-    owner's development server — the one place the switches may be on
-    before these conditions are met, and only the owner's turns pass
-    through it: the standing regression rows plus rows for each
+    owner's development server before the deploy and again on the live
+    site after it: the standing regression rows plus rows for each
     outcome, every row labelled with its expected outcome and FR-72
-    mode. The same script is repeated on the live site after
-    switch-on, as a check of that deploy and not as a condition of it.
-  - **Privacy.** The switches are process-wide settings: on in
-    production means on for every signed-in user, and nothing in this
-    section can limit them to one account. So the published privacy
-    policy names TypeSafe and what it receives (NFR-5) before either
-    switch goes on in production. No policy page exists yet; until one
-    does, the checks run on development machines only.
+    mode.
+  - **Recorded trade (owner, 2026-11-14): no privacy gate.** The
+    decision model's provider is a fourth company that receives users'
+    words (NFR-5), and no privacy policy is published yet. The checks
+    are not held back for one, and nothing limits them to particular
+    accounts: the live site is a demo with no users but the owner, and
+    the policy is written, naming all the providers at once, before it
+    has any.
   - No pass mark is fixed in advance: any number chosen before the
-    bench would be a guess. The owner reads both results and decides,
-    per switch.
+    bench would be a guess. The owner reads both results, decides
+    whether to deploy, and can switch either check off afterwards.
 - **FR-72** **The system prompt defines three answer modes and has the
   model pick one per turn from the user's words.**
   1. **Affirm.** Any short phrase that closes the exchange, five words
@@ -3243,7 +3243,7 @@ Five decisions shape every FR below, each with the alternative it beat:
 
 | Knob | Default | Where |
 |---|---|---|
-| `TURN_CHECK_DONE` / `TURN_CHECK_MODE` (the two switches) | off / off | env (`app/config.py`) |
+| `TURN_CHECK_DONE` / `TURN_CHECK_MODE` (the two switches) | on / on | env (`app/config.py`) |
 | `CHECK_MODEL` (pinned decision-model version) | `jev-1.14.0` | env (`app/config.py`) |
 | `CHECK_TIMEOUT_S` (ceiling on the wait; on breach the question is bypassed) | 1s | env (`app/config.py`) |
 | `CHECK_MID_THOUGHT_MIN` (confidence needed to stay silent as mid-thought) | 0.5 | env (`app/config.py`) |
@@ -3269,7 +3269,7 @@ Five decisions shape every FR below, each with the alternative it beat:
 *NFR-4 (session state recovery after connection drop) — moved to §6 Out of Scope along with FR-19; they were the same requirement.*
 
 ### 5.3 Privacy
-- **NFR-5** All voice data and transcripts are processed server-side. The privacy policy must disclose this clearly, naming every outside company that receives voice or transcript content and what each receives: Deepgram (the audio), Anthropic (the conversation and attached documents), Cartesia (the text of the agent's replies), Google Cloud (the server and its database, where transcripts, documents and traces are stored), and TypeSafe (the few turns FR-68 lists) from the moment a §4.15 check is switched on in production (FR-71). No policy page exists yet; publishing one is a precondition of FR-71's privacy step.
+- **NFR-5** All voice data and transcripts are processed server-side. The privacy policy must disclose this clearly, naming every outside company that receives voice or transcript content and what each receives: Deepgram (the audio), Anthropic (the conversation and attached documents), Cartesia (the text of the agent's replies), Google Cloud (the server and its database, where transcripts, documents and traces are stored), and TypeSafe (the few turns FR-68 lists). No policy page exists yet: the live site is a demo with no users but the owner, and the policy is published, naming all of these, before it has any (FR-71 records the trade).
 - **NFR-6** Sensitive session content (transcripts, documents — uploaded and agent-produced, future memory entries) must live in dedicated database columns, separable from session metadata, so that encryption at rest can be added post-MVP without schema rework. The encryption itself is deferred — see §6 Out of Scope. (§4.11 names the deferral's true cost, which is wider than schema: the document tools' atomic DB-side edit modes — `append`'s concatenation, `str_replace`'s counting predicate, `insert`'s offset arithmetic, `ILIKE` search with SQL-side snippets, the diagnostic reads — all require plaintext in the 🔒 column. Adding encryption keeps the schema but forfeits DB-side atomicity, handing FR-46's outlived-write race back to the application layer to re-solve. Deferred knowingly, not cheaply.)
 - **NFR-7** The user must be able to delete all their data.
 - **NFR-8** User isolation: no authenticated user can read or write another

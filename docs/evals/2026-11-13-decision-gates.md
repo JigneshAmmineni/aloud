@@ -8,9 +8,10 @@ record FR-71 points to. It has three parts, in the order they run:
 2. the full bench from the production VM, once §4.15 is built;
 3. the live voice run.
 
-A check is switched on in production only after parts 2 and 3 and the
-privacy-policy update, on the owner's decision. No pass mark is set in
-advance: the numbers below are recorded and read, not gated.
+The checks are on by default once built (FR-71). This file is the
+acceptance record the owner reads before deploying them; either check
+can be switched off afterwards. No pass mark is set in advance: the
+numbers below are recorded and read, not gated.
 
 ## What is being tested
 
@@ -78,11 +79,9 @@ modes:
 
 ## Part 3 — live voice run (owner, local dev server)
 
-This run is a condition of switching on, so it happens where the
-switches may already be on: the owner's development server, with only
-the owner speaking. It is repeated on the live site after switch-on, as
-a check of that deploy. Fresh session, no documents attached, both
-switches on. Topic is free;
+Run on the owner's development server before the deploy, and again on
+the live site after it. Fresh session, no documents attached, both
+switches on (the default). Topic is free;
 the turns below are shapes, not exact words. Every row names the
 outcome the checks should select and the answer mode the reply should
 take. Duration class: modes 1 and 2 finish in seconds; mode 3 takes as
