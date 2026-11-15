@@ -13,8 +13,8 @@ any extra tooling.
 
 Flux caveat: Pipecat's stock observer starts its clock at
 ``VADUserStoppedSpeakingFrame``, but Deepgram Flux does its own turn
-detection and never emits VAD frames — it broadcasts
-``UserStoppedSpeakingFrame`` when it declares end-of-turn. Without the
+detection and never emits VAD frames — it proposes the end of turn and the
+user aggregator pushes ``UserStoppedSpeakingFrame`` for it. Without the
 mapping below, no latency event would ever fire. Consequence: measured
 latency starts at Flux's end-of-turn *declaration*, so it excludes Flux's
 own EOT detection time (~300–500 ms); keep that in mind against the 3s
@@ -40,10 +40,9 @@ class FluxAwareLatencyObserver(UserBotLatencyObserver):
     """Maps Flux's turn frames onto the parent's VAD-based bookkeeping."""
 
     async def on_push_frame(self, data: FramePushed):
-        if (
-            data.direction == FrameDirection.DOWNSTREAM
-            and data.frame.id not in self._processed_frames
-        ):
+        # No dedup of our own: the parent registers as a first-push-only
+        # observer (Pipecat >= 1.12), so each frame arrives here once.
+        if data.direction == FrameDirection.DOWNSTREAM:
             if isinstance(data.frame, UserStartedSpeakingFrame):
                 # mirror the parent's VADUserStartedSpeaking reset
                 self._user_stopped_time = None

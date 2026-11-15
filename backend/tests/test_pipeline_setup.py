@@ -256,3 +256,76 @@ def test_run_registers_provider_and_unregisters_in_finally(
     asyncio.run(run())
     assert seen["registered_during_run"] is True
     assert "s-reg-test" not in registry_mod._providers  # the finally held
+
+
+def test_pipecat_turn_contract_flux_proposals_reach_the_loop_slot(make_settings):
+    """Pins the Pipecat facts the loop's turn handling rests on (from 1.8,
+    re-checked on 1.16): Flux only PROPOSES turn boundaries, and the user
+    aggregator — given our ExternalUserTurnStrategies — is what announces
+    the turn, broadcasts the barge-in interruption, and hands the turn's
+    text to the LLM slot. If an upgrade moves any of that, the agent goes
+    deaf or stops being interruptible; it must break here first."""
+    import asyncio
+    import inspect
+
+    from pipecat.frames.frames import (
+        LLMContextFrame,
+        ProposedUserStartedSpeakingFrame,
+        ProposedUserStoppedSpeakingFrame,
+        TranscriptionFrame,
+        UserStartedSpeakingFrame,
+    )
+    from pipecat.pipeline.pipeline import Pipeline
+    from pipecat.pipeline.runner import PipelineRunner
+    from pipecat.pipeline.task import PipelineTask
+    from pipecat.processors.frame_processor import FrameProcessor
+    from pipecat.services.deepgram.flux import stt_base
+
+    # the real service emits proposals, not turn frames or interruptions
+    flux_src = inspect.getsource(stt_base)
+    assert "broadcast_frame(ProposedUserStartedSpeakingFrame)" in flux_src
+    assert "broadcast_frame(ProposedUserStoppedSpeakingFrame)" in flux_src
+    assert "broadcast_interruption" not in flux_src
+
+    class FluxShaped(FrameProcessor):
+        async def process_frame(self, frame, direction):
+            await super().process_frame(frame, direction)
+            await self.push_frame(frame, direction)
+
+    seen: list = []
+
+    class LoopSlot(FrameProcessor):
+        async def process_frame(self, frame, direction):
+            await super().process_frame(frame, direction)
+            if isinstance(frame, UserStartedSpeakingFrame):
+                seen.append("user_started")
+            elif isinstance(frame, LLMContextFrame):
+                seen.append(("context", frame.context.get_messages()))
+            await self.push_frame(frame, direction)
+
+        async def _start_interruption(self):
+            seen.append("interruption")
+            await super()._start_interruption()
+
+    *_, user_agg = build_pipeline_parts(make_settings())
+    flux = FluxShaped()
+    task = PipelineTask(Pipeline([flux, user_agg, LoopSlot()]))
+
+    async def drive():
+        await asyncio.sleep(0.2)
+        await flux.broadcast_frame(ProposedUserStartedSpeakingFrame)
+        await asyncio.sleep(0.1)
+        await flux.push_frame(TranscriptionFrame("hello there", "u", "t", finalized=True))
+        await flux.broadcast_frame(ProposedUserStoppedSpeakingFrame)
+        await asyncio.sleep(0.3)
+        await task.cancel()
+
+    async def run():
+        await asyncio.gather(PipelineRunner(handle_sigint=False).run(task), drive())
+
+    asyncio.run(run())
+    assert seen == [
+        "user_started",
+        "interruption",
+        ("context", [{"role": "user", "content": "hello there"}]),
+    ]

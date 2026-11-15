@@ -51,7 +51,7 @@ dependencies on the voice path, one identity provider (incoming).
 |---|---|---|
 | Frontend | Next.js + React | Next 15, React 19, TypeScript 5; Pipecat JS client SDK (`@pipecat-ai/client-js`, `small-webrtc-transport`) |
 | Backend | Python + FastAPI | Python 3.12 (`python:3.12-slim` image), uvicorn |
-| Voice orchestration | Pipecat | `pipecat-ai[webrtc,deepgram,google,cartesia]~=1.3.0` — cascade: turn detection → STT → LLM → TTS |
+| Voice orchestration | Pipecat | `pipecat-ai[webrtc,deepgram,cartesia,assemblyai]~=1.16.0` — cascade: turn detection → STT → LLM → TTS. Flux proposes turn boundaries; the user aggregator announces the turn and broadcasts the barge-in interruption |
 | Transport | WebRTC | Pipecat SmallWebRTC; server-side peer on the VM; STUN `stun.l.google.com` |
 | STT + turns | Deepgram Flux | transcription and end-of-turn in one model |
 | LLM | Claude Sonnet 5.5 (agent loop) + Claude Haiku 5.5 (FR-60 gate judge) | `anthropic~=2.8` SDK; thinking off on both; built by `make_loop_llm()` / `make_judge_llm()` — see "LLM models and thinking" below. Gemini 2.5 Flash remains selectable (`LLM_PROVIDER=google`) |
@@ -64,7 +64,7 @@ dependencies on the voice path, one identity provider (incoming).
 
 ### Backend packages (`backend/requirements.txt`)
 
-`pipecat-ai[webrtc,deepgram,google,cartesia]` (pipeline + provider services),
+`pipecat-ai[webrtc,deepgram,cartesia,assemblyai]` (pipeline + provider services),
 `anthropic` (the Claude loop client), `google-genai` (the Gemini loop client,
 kept as the swap-back path),
 `fastapi`, `firebase-admin` (token verification + account admin),
