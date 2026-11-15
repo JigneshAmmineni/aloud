@@ -118,10 +118,6 @@ class CheckSettings:
             both_min=settings.check_both_min,
         )
 
-    @property
-    def any_on(self) -> bool:
-        return self.done_on or self.mode_on
-
 
 def questions_for(cfg: CheckSettings) -> list[CheckQuestion]:
     """A question whose switch is off is not sent (FR-62)."""
@@ -235,7 +231,7 @@ def decide(answers: dict[str, CheckAnswer], cfg: CheckSettings) -> TurnPlan:
         speech = AFFIRM
     elif p.get(AFFIRM, 0.0) >= cfg.affirm_min:
         speech = AFFIRM
-    elif not no_edit and write.p_yes >= cfg.both_min:
+    elif write.p_yes >= cfg.both_min:
         speech = EDIT_AND_SPEAK
     else:
         # an answer is expected: the turn carries mode 2's bound (FR-66).

@@ -659,11 +659,16 @@ FR-7 still governs: the agent acts when the user asks.
   no sign of it arrives within `STEP_SPEECH_START_MAX_S` the wait ends,
   logged as `speech_gap.no_playback`. A missing signal must not strand
   a reply, so the hold has a ceiling, and the ceiling scales with the
-  speech being waited for: that speech's length in characters at a
+  speech being waited for — the most recent step that spoke, not
+  everything the turn has said: that speech's length in characters at a
   deliberately slow speaking rate (`STEP_SPEECH_SLOWEST_CPS`) plus
   `STEP_SPEECH_HOLD_SLACK_S`, and never more than
   `STEP_SPEECH_HOLD_MAX_S`. A long recitation therefore keeps its
-  pause; only a stop signal that never arrives reaches the ceiling, and
+  pause, up to that cap: when the stop signal is what is missing, the
+  wait is silence the user sits through mid-reply, so the cap is kept
+  to half a minute and speech longer than that, followed by another
+  speaking step, loses its pause. Only a stop signal that never arrives
+  reaches the ceiling, and
   then the words are spoken and `speech_gap.signal_missing` is logged
   at WARNING — an event that means a broken signal and nothing else. Nothing
   the model says is dropped or rewritten: narration before a tool call
@@ -686,7 +691,10 @@ FR-7 still governs: the agent acts when the user asks.
   the warning, when the signal never comes, and at the cap however long
   the earlier speech was; earlier text that never becomes audio is not
   waited for past its start window, and logs no warning; the fallback
-  line waits for the gap like any step; a closing confirmation after a
+  line waits for the gap like any step, the one-step case included (a
+  step narrates, calls a tool, and the tool raises); the ceiling is
+  sized from the step waited for, not the whole turn; a closing
+  confirmation after a
   spoken sentence is spoken, not dropped. The no-tool turn — the overwhelming common case — is
   one LLM call with no added synchronous work (NFR-10 applies to the
   loop itself; anything the loop does beyond the call and the
@@ -1178,8 +1186,8 @@ on session end: ONE WRITE_GRACE_S budget, spent once — End-tap/disconnect:
 | `FALLBACK_LINES` (spoken failure/empty-step lines) | small named set | `agent/prompts.py` |
 | `STEP_SPEECH_GAP_S` (pause between two spoken steps of one turn) | 1s | `agent/loop.py` |
 | `STEP_SPEECH_SLOWEST_CPS` (speaking rate assumed when bounding the wait for earlier playback; kept at or below half the voice's real rate — about 12 chars/s at the current `CARTESIA_SPEED` — and revisited whenever that speed changes) | 6 chars/s | `agent/loop.py` |
-| `STEP_SPEECH_HOLD_SLACK_S` (added to that bound) | 5s | `agent/loop.py` |
-| `STEP_SPEECH_HOLD_MAX_S` (the bound's cap, however long the earlier speech) | 60s | `agent/loop.py` |
+| `STEP_SPEECH_HOLD_SLACK_S` (added to that bound) | 2s | `agent/loop.py` |
+| `STEP_SPEECH_HOLD_MAX_S` (the bound's cap, however long the earlier speech) | 30s | `agent/loop.py` |
 | `STEP_SPEECH_START_MAX_S` (how long to wait for earlier text to start playing at all) | 2s | `agent/loop.py` |
 | `WRITE_GRACE_S` (teardown wait for writes) | 5 total | `agent/companion.py` (the code that awaits: session teardown + the SIGTERM drain; the loop only owns the in-flight set) |
 | Model / provider | `LLM_MODEL` / `LLM_PROVIDER` env | `agent/providers.py` |
@@ -2911,7 +2919,8 @@ Five decisions shape every FR below, each with the alternative it beat:
   mid-thought answer wins over the rest); a nothing choice without that
   sureness becomes affirm, not silence; each switch off; the tools
   handed to the model are the same on every outcome, and an edit the
-  checks did not expect still runs.
+  checks did not expect still runs; edit-and-speak depends on
+  `CHECK_BOTH_MIN` alone, whatever `CHECK_NO_WRITE_MIN` is set to.
 - **FR-64** **On either silent outcome the main model is not called and
   nothing is spoken until the user's next turn; the silence has no time
   limit.** Mechanism:
@@ -3034,7 +3043,10 @@ Requirement numbering stays stable; removed numbers are not reused.*
     that much — on the slowest plain turns the bench saw, just past
     NFR-1's three seconds. NFR-1 is a counted target, and this is about
     one request in a hundred; the bench's p95 was 159 ms, so the VM
-    figures may well bring the ceiling down.
+    figures may well bring the ceiling down. The same turn has a second,
+    smaller cost: the ceiling cancels the request mid-response, that
+    connection cannot be reused, and the next turn's check pays a new
+    handshake — worth knowing when reading a p95 from the VM.
   - With the questions in one request (FR-62), a failed or late
     request leaves every asked question unanswered together. One
     question alone is unanswered only when the response omits it or

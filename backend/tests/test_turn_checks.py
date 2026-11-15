@@ -1023,3 +1023,72 @@ def test_a_question_whose_switch_is_off_is_recorded_as_off():
 def test_the_prompt_builder_makes_its_caller_choose_an_assembly():
     with pytest.raises(TypeError):
         build_system_prompt()
+
+
+# ---------------- PR #28 review, round 2 ----------------
+
+
+def test_the_fallback_waits_when_the_narrating_step_s_own_tool_raises(monkeypatch):
+    """FR-42's primary error path, in its common shape: ONE step narrates
+    and calls a tool, and the handler raises. The step's text is cleared
+    before the fallback is spoken, so the narration has to be counted as
+    earlier speech first — or the canned line starts over it."""
+    _pause_setup(monkeypatch)
+    scripts = [
+        [
+            LLMTextDelta("I'll add that to the document. "),
+            LLMToolCall(name="echo", arguments={}, id="c1"),
+            _done(),
+        ],
+    ]
+    h = make_loop(scripts, tools=[read_tool(raises=RuntimeError("boom"))])
+    times = _timed(h)
+    marks = _run_with_playback(h, "add it", [(0.02, "start"), (0.08, "stop")])
+    assert [t for t, _ in times][0] == "I'll add that to the document. "
+    assert times[1][0] in FALLBACK_LINES
+    assert times[1][1] - marks["stopped"] >= 0.19
+
+
+def test_the_wait_is_sized_from_the_step_it_waits_for_not_the_whole_turn(monkeypatch):
+    """Step 1 says a lot, step 2 a little, step 3 speaks: the ceiling on
+    step 3's wait comes from step 2's few characters."""
+    _pause_setup(monkeypatch, gap=0.05, slack=0.1, cps=100.0)
+    long_narration = "x" * 400  # 4s at 100 chars/s, if it were counted
+    scripts = [
+        [LLMTextDelta(long_narration + " "), LLMToolCall(name="echo", arguments={}, id="c1"), _done()],
+        [LLMTextDelta("Next. "), LLMToolCall(name="echo", arguments={}, id="c2"), _done()],
+        [LLMTextDelta("Done."), _done()],
+    ]
+    h = make_loop(scripts, tools=[read_tool()])
+    times = _timed(h)
+
+    async def run():
+        turn = asyncio.create_task(h.loop._run_turn("do both"))
+        await asyncio.sleep(0.01)
+        h.loop.note_bot_spoke()  # playing from the start, and it never stops
+        await turn
+
+    start = time.monotonic()
+    asyncio.run(run())
+    # two waits, each bounded by its own step: 400/100 + 0.1 for step 2,
+    # then 6/100 + 0.1 for step 3 — not 406/100 + 0.1 again
+    assert time.monotonic() - start < 4.1 + 0.16 + 1.0
+    assert times[-1][1] - times[-2][1] < 1.0
+
+
+def test_edit_and_speak_follows_the_spec_when_the_no_edit_line_is_tuned_low():
+    """FR-63: an answer with p_write >= CHECK_BOTH_MIN is edit-and-speak,
+    whatever CHECK_NO_WRITE_MIN is set to."""
+    import dataclasses
+
+    low = dataclasses.replace(ON, no_write_min=0.3)
+    plan = decide(answers(write=0.65, answer=0.97), low)
+    assert plan.speech == "edit_and_speak"
+
+
+def test_a_check_answer_is_read_only():
+    import dataclasses
+
+    answer = CheckAnswer(CHECK_ANSWERED, p_yes=0.5)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        answer.p_yes = 0.9

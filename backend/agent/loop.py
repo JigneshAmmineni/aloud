@@ -99,9 +99,13 @@ STEP_SPEECH_GAP_S = 1.0
 # so a long recitation keeps its pause and only a missing signal gets
 # here.
 STEP_SPEECH_SLOWEST_CPS = 6.0
-STEP_SPEECH_HOLD_SLACK_S = 5.0
-# ...and never beyond this, however long the earlier speech was.
-STEP_SPEECH_HOLD_MAX_S = 60.0
+STEP_SPEECH_HOLD_SLACK_S = 2.0
+# ...and never beyond this, however long the earlier speech was: when the
+# stop signal is the thing that is missing, this is silence the user sits
+# through mid-reply, and the model's stream is parked for all of it. The
+# price is that speech longer than this, followed by another speaking
+# step, loses its pause.
+STEP_SPEECH_HOLD_MAX_S = 30.0
 # An earlier step's text that never becomes audio (the filters reduced it
 # to nothing, synthesis failed) has no playback to wait for: if no sign of
 # it arrives within this long, the wait is over. Its own event, not the
@@ -146,8 +150,8 @@ class _TurnState:
         self.prior_sentences: set[str] = set()
         # §4.15: what the turn checks decided (plain until they answer)
         self.plan = TurnPlan()
-        # FR-43's pause: how much earlier steps of this turn said, and
-        # when the last of them began pushing text
+        # FR-43's pause: how much the most recent step that spoke said,
+        # and when it began pushing text
         self.earlier_speech_chars = 0
         self.earlier_speech_at: float | None = None
 
@@ -395,6 +399,10 @@ class AgentLoopProcessor(FrameProcessor):
                 # result may already be committed AND announced; a context
                 # that records nothing makes the next turn re-create it.
                 self._dispose_tool_round(state, state.step_text, interrupted=False)
+                # the step's narration is playing or about to: the fallback
+                # line must wait for it (FR-43), and it would not know to
+                # once the text is cleared below
+                self._note_step_spoke(state)
                 state.step_text = ""  # recorded; the fallback won't re-append
             await self._speak_fallback(state, reason="error")
         # Any non-cancelled exit is a turn end (FR-47: flush-or-clear).
@@ -433,8 +441,7 @@ class AgentLoopProcessor(FrameProcessor):
             ]
         # FR-43's pause looks back at what EARLIER steps of this turn said:
         # read before the reset below
-        if state.step_text.strip():
-            state.earlier_speech_chars += len(state.step_text)
+        self._note_step_spoke(state)
         held_for_gap = False
         state.purpose = purpose
         state.messages = messages
@@ -736,6 +743,16 @@ class AgentLoopProcessor(FrameProcessor):
             event="turn.silent", turn_id=state.turn_id, outcome=state.plan.silent
         ).info(f"staying silent: {state.plan.silent}")
         await self._emit({"type": "turn.silent", "reason": state.plan.silent})
+
+    @staticmethod
+    def _note_step_spoke(state: _TurnState) -> None:
+        """FR-43: remember how much the step that just ended (or failed)
+        said. The pause waits for THAT speech — the most recent step that
+        spoke — so its ceiling is sized from it, not from everything the
+        turn has said. A silent step leaves the earlier figure in place:
+        that speech is still the last thing to have played."""
+        if state.step_text.strip():
+            state.earlier_speech_chars = len(state.step_text)
 
     async def _hold_for_speech_gap(self, state: _TurnState) -> None:
         """FR-43: an earlier step of this turn spoke, and this one is
@@ -1102,8 +1119,7 @@ class AgentLoopProcessor(FrameProcessor):
         # FR-43: the one line the loop speaks itself must not run into
         # what the turn already said — an earlier step's narration, or
         # this step's own text before it failed.
-        if state.step_text.strip():
-            state.earlier_speech_chars += len(state.step_text)
+        self._note_step_spoke(state)
         if state.earlier_speech_chars:
             await self._hold_for_speech_gap(state)
         try:

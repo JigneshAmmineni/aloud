@@ -667,7 +667,7 @@ class CheckQuestion:
     options: dict | None = None
 
 
-@dataclass
+@dataclass(frozen=True)
 class CheckAnswer:
     """status is CHECK_ANSWERED or CHECK_ERROR here; the loop adds its
     own (timeout, cancelled) for a request that never returned."""
@@ -684,7 +684,10 @@ _JEV_URL = "https://api.typesafe.ai/v1/systemone"
 def _jev_http() -> httpx.AsyncClient:
     # One client for the process: sessions share its warm connections,
     # which is most of what keeps a check near a tenth of a second. The
-    # read timeout is a backstop; the loop enforces CHECK_TIMEOUT_S.
+    # read timeout is a backstop; the loop enforces CHECK_TIMEOUT_S — and
+    # when it does, it cancels the request mid-response, so that
+    # connection cannot be reused and the NEXT check pays a new handshake
+    # (about one turn in a hundred, FR-67).
     return httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0))
 
 
