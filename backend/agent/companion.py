@@ -27,13 +27,20 @@ from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
 
+from agent.checks import CheckSettings
 from agent.context import ContextProvider
 from agent.loop import AgentLoopObserver, AgentLoopProcessor
 from agent.prompts import (
     build_greeting_trigger,
     build_system_prompt,
 )
-from agent.providers import make_judge_llm, make_loop_llm, make_stt, make_tts
+from agent.providers import (
+    make_judge_llm,
+    make_loop_llm,
+    make_stt,
+    make_tts,
+    make_turn_checker,
+)
 from agent.registry import register_provider, unregister_provider
 from agent.sanitizer import make_text_filters
 from agent.tools import build_registry
@@ -160,7 +167,11 @@ def build_pipeline_parts(settings: Settings, documents=None, *, session_id=""):
         text_filters=make_text_filters(settings.tts_sanitize_enabled),
     )
     context_provider = ContextProvider(
-        build_system_prompt(),
+        # FR-73: the listening-sound rule leaves the prompt only while
+        # BOTH turn checks are on
+        build_system_prompt(
+            checks_on=settings.turn_check_done and settings.turn_check_mode
+        ),
         documents,
         session_id=session_id,
     )
@@ -245,6 +256,8 @@ class CompanionAgent:
             model_name=self._settings.llm_model,
             judge_llm=make_judge_llm(self._settings, session_id),
             judge_model_name=self._settings.judge_model,
+            checker=make_turn_checker(self._settings),
+            checks=CheckSettings.from_settings(self._settings),
             recorder=recorder,
             traces=traces,
             emit=emit,

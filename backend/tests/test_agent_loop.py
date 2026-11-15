@@ -23,6 +23,7 @@ from pipecat.observers.base_observer import FramePushed
 from pipecat.processors.frame_processor import FrameDirection
 
 import agent.loop as loop_mod
+from agent.checks import CheckSettings
 from agent.context import INTERRUPTED_SUFFIX, ContextProvider
 from agent.loop import AgentLoopProcessor
 from agent.prompts import (
@@ -36,6 +37,16 @@ from agent.tools import Tool
 from db.models import LLMTrace, TurnMetric, UsageEvent
 from obs.trace import TraceRecorder
 from obs.usage import UsageRecorder
+
+
+@pytest.fixture(autouse=True)
+def _fast_speech_gap(monkeypatch):
+    """FR-43's pause waits on playback signals these stubbed loops never
+    get: shrink its gap and its ceiling so a two-speaking-step turn costs
+    milliseconds. The tests of the pause itself set their own values."""
+    monkeypatch.setattr(loop_mod, "STEP_SPEECH_GAP_S", 0.01)
+    monkeypatch.setattr(loop_mod, "STEP_SPEECH_HOLD_SLACK_S", 0.02)
+    monkeypatch.setattr(loop_mod, "STEP_SPEECH_SLOWEST_CPS", 100000.0)
 
 
 def _done(finish="stop", usage=None):
@@ -122,6 +133,9 @@ def make_loop(scripts, tools=(), current_turn=2, **loop_kwargs):
     # one scripted client serves both roles unless a test splits them
     loop_kwargs.setdefault("judge_llm", llm)
     loop_kwargs.setdefault("judge_model_name", "test-model")
+    # §4.15: no checker and both switches off unless a test asks
+    loop_kwargs.setdefault("checker", None)
+    loop_kwargs.setdefault("checks", CheckSettings())
     loop = AgentLoopProcessor(
         context=provider,
         llm=llm,
@@ -396,233 +410,6 @@ def _narrated_tool_turn(closing):
     ]
 
 
-def test_done_is_not_spoken_after_a_sentence_that_said_what_was_being_done():
-    """2026-11-12 live session: every narrated tool turn ended "...to the
-    document.Done." One acknowledgment per piece of work: the closing
-    bare confirmation is not spoken and not recorded, no fallback line
-    covers the quiet ending, and the trace keeps what the model wrote."""
-    h = make_loop(_narrated_tool_turn([LLMTextDelta("Done.")]), tools=[read_tool()])
-
-    asyncio.run(h.loop._run_turn("note that down"))
-
-    text = _pushed_text(h)
-    assert text == "I'll add that to the document. "
-    assert not any(line in text for line in FALLBACK_LINES)
-    assert not any("Done" in (m.get("content") or "") for m in h.ctx.build())
-    assert [t.output for t in _queued(h.traces, LLMTrace)][-1] == "Done."
-
-
-def test_a_lone_done_is_still_spoken_when_the_turn_said_nothing_else():
-    """The confirmation is the only acknowledgment of silent work: kept."""
-    scripts = [
-        [LLMToolCall(name="echo", arguments={}, id="c1"), _done()],
-        [LLMTextDelta("Done."), _done()],
-    ]
-    h = make_loop(scripts, tools=[read_tool()])
-    asyncio.run(h.loop._run_turn("note that down"))
-    assert _pushed_text(h) == "Done."
-    assert h.ctx.build()[-1]["content"] == "Done."
-
-
-@pytest.mark.parametrize(
-    ("closing", "spoken"),
-    [
-        # a confirmation leading real content: only the confirmation goes
-        ([LLMTextDelta("Done."), LLMTextDelta(" I split it into two lists.")], "I split it into two lists."),
-        ([LLMTextDelta("Done. I split it into two lists.")], "I split it into two lists."),
-        # not a confirmation: a sentence that starts with the same word
-        ([LLMTextDelta("Done"), LLMTextDelta(" with the first list. Want the second?")], "Done with the first list. Want the second?"),
-        # nothing like a confirmation: streams as before
-        ([LLMTextDelta("Added it "), LLMTextDelta("under Timeline.")], "Added it under Timeline."),
-    ],
-)
-def test_only_a_leading_bare_confirmation_is_dropped_from_a_closing_step(closing, spoken):
-    h = make_loop(_narrated_tool_turn(closing), tools=[read_tool()])
-    asyncio.run(h.loop._run_turn("note that down"))
-    assert _pushed_text(h) == "I'll add that to the document. " + spoken
-    assert h.ctx.build()[-1]["content"] == spoken  # the record is what was heard
-
-
-# ---- PR #25 round 2: where the confirmation rule must NOT fire ----
-
-
-def test_whitespace_before_a_tool_call_is_not_speech_so_done_is_spoken():
-    """Round-2 blocker: Claude often emits a bare newline before a
-    tool_use block. Counting that as speech dropped the closing "Done."
-    and the whole turn pushed nothing audible — a silent turn that the
-    metrics showed as healthy."""
-    scripts = [
-        [LLMTextDelta("\n"), LLMToolCall(name="echo", arguments={}, id="c1"), _done()],
-        [LLMTextDelta("Done."), _done()],
-    ]
-    h = make_loop(scripts, tools=[read_tool()])
-    asyncio.run(h.loop._run_turn("note that down"))
-    assert _pushed_text(h).strip() == "Done."
-
-
-@pytest.mark.parametrize("opening", ["I'll add that. ", ""])
-def test_chained_work_says_done_once_after_the_last_step_not_in_the_middle(opening):
-    """Rounds 2 and 3 blocker: edit, then "Done."+another edit, then
-    "Done.". The middle one claims completion while work is still
-    running; it was spoken and the final, true one dropped. The middle
-    one is premature whatever the first step did — narrated (round 2)
-    or silent, the shape the prompt asks for (round 3) — so it is
-    dropped and the one that closes the work is spoken."""
-    order: list[str] = []
-
-    async def handler(args, ctx):
-        order.append(f"tool:{args['n']}")
-        return {"status": "ok"}
-
-    scripts = [
-        [
-            *([LLMTextDelta(opening)] if opening else []),
-            LLMToolCall(name="echo", arguments={"n": 1}, id="c1"),
-            _done(),
-        ],
-        [LLMTextDelta("Done."), LLMToolCall(name="echo", arguments={"n": 2}, id="c2"), _done()],
-        [LLMTextDelta("Done."), _done()],
-    ]
-    h = make_loop(scripts, tools=[read_tool(handler=handler)])
-    real_push = h.loop.push_frame
-
-    async def tracking_push(frame, direction=None):
-        if isinstance(frame, LLMTextFrame):
-            order.append(f"say:{frame.text}")
-        await real_push(frame, direction)
-
-    h.loop.push_frame = tracking_push
-    asyncio.run(h.loop._run_turn("add both"))
-
-    said_first = [f"say:{opening}"] if opening else []
-    assert order == [*said_first, "tool:1", "tool:2", "say:Done."]
-    # the step whose confirmation was dropped recorded no words
-    steps = [m for m in h.ctx.build() if m.get("tool_calls")]
-    assert [m["content"] for m in steps] == [opening, ""]
-
-
-def test_done_after_silent_steps_in_between_is_spoken():
-    """The rule is about a confirmation running into the sentence right
-    before it. With silent work in between it is the acknowledgment."""
-    scripts = [
-        [LLMTextDelta("Let me do that. "), LLMToolCall(name="echo", arguments={}, id="c1"), _done()],
-        [LLMToolCall(name="echo", arguments={}, id="c2"), _done()],
-        [LLMTextDelta("Done."), _done()],
-    ]
-    h = make_loop(scripts, tools=[read_tool()])
-    asyncio.run(h.loop._run_turn("do both"))
-    assert _pushed_text(h) == "Let me do that. Done."
-    # and a tool-only step pushes no frame at all, not an empty one
-    assert all(f.text for f in h.pushed if isinstance(f, LLMTextFrame))
-
-
-@pytest.mark.parametrize("narrate_last_step", [False, True])
-def test_the_forced_wrap_up_line_is_never_trimmed(narrate_last_step):
-    """FR-42 (a): the cap's forced call exists so the turn ends spoken.
-    Its "Done." is kept even directly after a step that spoke."""
-    scripts = [[LLMTextDelta("Let me do that. "), LLMToolCall(name="echo", arguments={}, id="c0"), _done()]]
-    for i in range(1, loop_mod.MAX_STEPS):
-        last = i == loop_mod.MAX_STEPS - 1
-        text = [LLMTextDelta("One more. ")] if (last and narrate_last_step) else []
-        scripts.append([*text, LLMToolCall(name="echo", arguments={}, id=f"c{i}"), _done()])
-    scripts.append([LLMTextDelta("Done."), _done()])  # the forced wrap-up call
-    h = make_loop(scripts, tools=[read_tool()])
-    asyncio.run(h.loop._run_turn("go"))
-    assert len(h.llm.calls) == loop_mod.MAX_STEPS + 1
-    assert _pushed_text(h).endswith("Done.")
-
-
-def test_barge_in_while_a_confirmation_is_held_records_nothing_unheard():
-    """Held text was never sent for synthesis: an interruption at that
-    moment must not put it in the context as something the user heard."""
-    scripts = [
-        [LLMTextDelta("I'll add that. "), LLMToolCall(name="echo", arguments={}, id="c1"), _done()],
-        [LLMTextDelta("Done"), 60],  # held, then the user speaks
-    ]
-    h = make_loop(scripts, tools=[read_tool()])
-
-    async def run():
-        task = asyncio.create_task(h.loop._run_turn("note that down"))
-        h.loop._turn_task = task
-        await asyncio.sleep(0.1)
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-        h.loop._turn_task = None
-        h.loop._finalize_interrupted_turn()
-
-    asyncio.run(run())
-    assert _pushed_text(h) == "I'll add that. "
-    assert not any("Done" in (m.get("content") or "") for m in h.ctx.build())
-
-
-def test_provider_drop_while_a_confirmation_is_held_records_nothing_unheard():
-    scripts = [
-        [LLMTextDelta("I'll add that. "), LLMToolCall(name="echo", arguments={}, id="c1"), _done()],
-        [LLMTextDelta("Done."), RuntimeError("provider drop")],
-    ]
-    h = make_loop(scripts, tools=[read_tool()])
-    asyncio.run(h.loop._run_turn("note that down"))
-    assert any(line in _pushed_text(h) for line in FALLBACK_LINES)  # it failed: say so
-    assert not any("Done" in (m.get("content") or "") for m in h.ctx.build())
-
-
-@pytest.mark.parametrize("confirmation", ["Done.", "All done!", "All  done.", "Done.!", "Done"])
-def test_a_redundant_confirmation_ends_the_turn_cleanly_however_it_is_spelled(confirmation):
-    """Spacing and punctuation variants take the same path: not spoken,
-    and no fallback line over work that succeeded."""
-    h = make_loop(_narrated_tool_turn([LLMTextDelta(confirmation)]), tools=[read_tool()])
-    asyncio.run(h.loop._run_turn("note that down"))
-    assert _pushed_text(h) == "I'll add that to the document. "
-    assert all(f.text for f in h.pushed if isinstance(f, LLMTextFrame))  # no empty frame
-
-
-def test_a_confirmation_that_leads_real_content_is_kept_when_nothing_was_said_before():
-    """Not premature (the step says more and calls nothing) and not
-    redundant (the step before it was silent): the whole sentence is the
-    turn's acknowledgment."""
-    scripts = [
-        [LLMToolCall(name="echo", arguments={}, id="c1"), _done()],
-        [LLMTextDelta("Done."), LLMTextDelta(" I renamed it too."), _done()],
-    ]
-    h = make_loop(scripts, tools=[read_tool()])
-    asyncio.run(h.loop._run_turn("note that down"))
-    assert _pushed_text(h) == "Done. I renamed it too."
-    assert h.ctx.build()[-1]["content"] == "Done. I renamed it too."
-
-
-def test_provider_drop_after_a_dropped_confirmation_records_only_what_was_heard():
-    """Round 3: the hold had already released ("Done." dropped, the rest
-    spoken) when the provider failed. The fallback path then recorded the
-    whole text, "Done." included — an acknowledgment the user never
-    heard, which the next turn's model reads as already given."""
-    scripts = [
-        [LLMTextDelta("I'll add that. "), LLMToolCall(name="echo", arguments={}, id="c1"), _done()],
-        [LLMTextDelta("Done."), LLMTextDelta(" Also updating the title."), RuntimeError("provider drop")],
-    ]
-    h = make_loop(scripts, tools=[read_tool()])
-    asyncio.run(h.loop._run_turn("note that down"))
-    text = _pushed_text(h)
-    assert text.startswith("I'll add that. Also updating the title.")
-    assert any(line in text for line in FALLBACK_LINES)
-    recorded = [m["content"] for m in h.ctx.build() if m["role"] == "assistant"]
-    assert recorded[-1] == "Also updating the title."
-    assert not any("Done" in (c or "") for c in recorded)
-
-
-def test_a_word_cut_short_by_the_stream_is_not_spoken_as_a_syllable():
-    """Round 3 nit: a stream that dies on "Do" must not send that to the
-    voice. The step failed; the fallback line says so."""
-    scripts = [
-        [LLMTextDelta("I'll add that. "), LLMToolCall(name="echo", arguments={}, id="c1"), _done()],
-        [LLMTextDelta("Do"), LLMDone("truncated", None)],
-    ]
-    h = make_loop(scripts, tools=[read_tool()])
-    asyncio.run(h.loop._run_turn("note that down"))
-    frames = [f.text for f in h.pushed if isinstance(f, LLMTextFrame)]
-    assert "Do" not in frames
-    assert any(line in frames for line in FALLBACK_LINES)
-
-
 def test_a_refused_call_is_not_marked_tool_first():
     """Round 3: the marker tells an expected slow turn from a regression.
     A greeting whose forbidden call is refused speaks at once: not that."""
@@ -666,7 +453,7 @@ def test_the_tool_first_marker_raises_no_slow_stage_advisory_of_its_own():
 
 
 def test_done_as_a_plain_answer_is_spoken():
-    """No earlier speech in the turn: nothing is held or dropped."""
+    """A one-word answer is an answer: spoken as it is."""
     h = make_loop([[LLMTextDelta("Done."), _done()]])
     asyncio.run(h.loop._run_turn("are you done?"))
     assert _pushed_text(h) == "Done."

@@ -67,6 +67,19 @@ class Settings:
     rate_llm_per_1m_tokens_in: float
     rate_llm_per_1m_tokens_out: float
     rate_tts_per_1m_chars: float
+    # §4.15 turn checks. The dataclass defaults are OFF so a Settings built
+    # by hand (tests) runs without a checker; load_settings() is where the
+    # product default — both on — lives (FR-71).
+    typesafe_api_key: str = ""  # required exactly when a switch is on
+    turn_check_done: bool = False
+    turn_check_mode: bool = False
+    check_model: str = "jev-1.14.0"  # pinned: the thresholds are tuned to it
+    check_timeout_s: float = 1.0
+    check_mid_thought_min: float = 0.5
+    check_no_write_min: float = 0.8
+    check_nothing_min: float = 0.5
+    check_affirm_min: float = 0.5
+    check_both_min: float = 0.6
 
 
 def load_settings() -> Settings:
@@ -86,6 +99,16 @@ def load_settings() -> Settings:
             f"LLM_EFFORT must be one of {', '.join(_LLM_EFFORTS)} — got {llm_effort!r}."
         )
     llm_model = os.getenv("LLM_MODEL") or _DEFAULT_LLM_MODEL.get(llm_provider, "")
+    turn_check_done = _env_bool("TURN_CHECK_DONE", True)
+    turn_check_mode = _env_bool("TURN_CHECK_MODE", True)
+    if (turn_check_done or turn_check_mode) and not os.getenv("TYPESAFE_API_KEY"):
+        # FR-69: fail fast. A missing key would otherwise show up as a
+        # quiet agent, which looks like the feature working.
+        raise RuntimeError(
+            "TYPESAFE_API_KEY is required while a turn check is on "
+            "(TURN_CHECK_DONE / TURN_CHECK_MODE, both on by default) — add "
+            "it to .env, or set both switches to 0 (see .env.example)."
+        )
     default_judge = _DEFAULT_JUDGE_MODEL.get(llm_provider, llm_model)
     return Settings(
         deepgram_api_key=os.environ["DEEPGRAM_API_KEY"],
@@ -109,4 +132,14 @@ def load_settings() -> Settings:
         rate_llm_per_1m_tokens_in=_env_float("RATE_LLM_PER_1M_TOKENS_IN", 0.0),
         rate_llm_per_1m_tokens_out=_env_float("RATE_LLM_PER_1M_TOKENS_OUT", 0.0),
         rate_tts_per_1m_chars=_env_float("RATE_TTS_PER_1M_CHARS", 0.0),
+        typesafe_api_key=os.getenv("TYPESAFE_API_KEY") or "",
+        turn_check_done=turn_check_done,
+        turn_check_mode=turn_check_mode,
+        check_model=os.getenv("CHECK_MODEL") or "jev-1.14.0",
+        check_timeout_s=_env_float("CHECK_TIMEOUT_S", 1.0),
+        check_mid_thought_min=_env_float("CHECK_MID_THOUGHT_MIN", 0.5),
+        check_no_write_min=_env_float("CHECK_NO_WRITE_MIN", 0.8),
+        check_nothing_min=_env_float("CHECK_NOTHING_MIN", 0.5),
+        check_affirm_min=_env_float("CHECK_AFFIRM_MIN", 0.5),
+        check_both_min=_env_float("CHECK_BOTH_MIN", 0.6),
     )

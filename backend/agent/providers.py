@@ -14,6 +14,7 @@ import uuid
 from dataclasses import dataclass, field
 
 import anthropic
+import httpx
 from google import genai
 from google.genai import types as genai_types
 from loguru import logger
@@ -623,6 +624,133 @@ def make_judge_llm(settings: Settings, session_id: str = ""):
     """The FR-60 gate's client: same seam, the smaller judge model. A
     one-word verdict needs no more than the lowest effort."""
     return _make_llm(settings, settings.judge_model, "low", session_id)
+
+
+# --------------------------------------------------------------------------
+# Turn checker (FR-69): the decision model §4.15's checks ask. The loop
+# sees only the neutral types below — a list of questions and the turn's
+# evidence in, one answer per question out. One call is one provider
+# request. The provider in use is TypeSafe's Jev, over its HTTP API with
+# the HTTP client the image already has (no SDK dependency).
+# --------------------------------------------------------------------------
+
+CHECK_ANSWERED = "answered"
+CHECK_ERROR = "error"
+
+
+@dataclass(frozen=True)
+class CheckQuestion:
+    """`options` None = a yes/no question (answered as a probability of
+    yes); otherwise option label -> what it means (answered as a
+    probability per label)."""
+
+    id: str
+    instructions: str
+    options: dict | None = None
+
+
+@dataclass
+class CheckAnswer:
+    """status is CHECK_ANSWERED or CHECK_ERROR here; the loop adds its
+    own (timeout, cancelled) for a request that never returned."""
+
+    status: str
+    p_yes: float | None = None
+    probabilities: dict | None = None
+
+
+_JEV_URL = "https://api.typesafe.ai/v1/systemone"
+
+
+@functools.lru_cache(maxsize=1)
+def _jev_http() -> httpx.AsyncClient:
+    # One client for the process: sessions share its warm connections,
+    # which is most of what keeps a check near a tenth of a second. The
+    # read timeout is a backstop; the loop enforces CHECK_TIMEOUT_S.
+    return httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0))
+
+
+class JevTurnChecker:
+    """The API is early access and its field names may change: this
+    class is the one place that knows them (request: model, state,
+    questions{id: type/instructions/criteria}; response: answers{id:
+    noul | probabilities}, usage)."""
+
+    def __init__(
+        self, api_key: str, model: str, *, http: httpx.AsyncClient | None = None
+    ):
+        self._api_key = api_key
+        self._model = model
+        self._http = http
+
+    async def ask(
+        self, evidence: str, questions: list[CheckQuestion]
+    ) -> tuple[dict[str, CheckAnswer], LLMUsage | None]:
+        body = {
+            "model": self._model,
+            "state": evidence,
+            "questions": {
+                q.id: (
+                    {"type": "noul", "instructions": q.instructions}
+                    if q.options is None
+                    else {
+                        "type": "choice",
+                        "instructions": q.instructions,
+                        "criteria": q.options,
+                    }
+                )
+                for q in questions
+            },
+        }
+        http = self._http or _jev_http()
+        response = await http.post(
+            _JEV_URL,
+            json=body,
+            headers={"Authorization": f"Bearer {self._api_key}"},
+        )
+        response.raise_for_status()
+        data = response.json()
+        raw = data.get("answers") or {}
+        answers: dict[str, CheckAnswer] = {}
+        for q in questions:
+            item = raw.get(q.id) or {}
+            if q.options is None:
+                value = item.get("noul")
+                ok = isinstance(value, (int, float)) and 0 <= value <= 1
+                answers[q.id] = (
+                    CheckAnswer(CHECK_ANSWERED, p_yes=float(value))
+                    if ok
+                    else CheckAnswer(CHECK_ERROR)
+                )
+            else:
+                probs = item.get("probabilities")
+                ok = isinstance(probs, dict) and all(
+                    isinstance(probs.get(label), (int, float)) for label in q.options
+                )
+                answers[q.id] = (
+                    CheckAnswer(
+                        CHECK_ANSWERED,
+                        probabilities={k: float(probs[k]) for k in q.options},
+                    )
+                    if ok
+                    else CheckAnswer(CHECK_ERROR)
+                )
+        usage = data.get("usage") or {}
+        tokens_in = usage.get("input_tokens")
+        return answers, (
+            LLMUsage(int(tokens_in), int(usage.get("output_tokens") or 0))
+            if isinstance(tokens_in, (int, float))
+            else None
+        )
+
+
+def make_turn_checker(settings: Settings):
+    """FR-69 factory. Built whenever the key is present, whatever the
+    switches say (the bench calls it directly); None without a key.
+    Whether the loop ASKS is the switches' business, not this one's."""
+    if not settings.typesafe_api_key:
+        return None
+    return JevTurnChecker(settings.typesafe_api_key, settings.check_model)
 
 
 def validate_llm_config(settings: Settings) -> None:

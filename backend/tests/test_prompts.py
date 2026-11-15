@@ -48,7 +48,8 @@ def test_prompt_keeps_document_instructions():
         "edit_document",
     ):
         assert tool in prompt
-    assert "never read a document" in prompt
+    # FR-72 mode 3: reading aloud is allowed, on an explicit ask only
+    assert "read a document's content aloud only when the user explicitly asks" in prompt
     assert "work silently" in prompt
     assert "filler" not in prompt
     assert "never narrate" in prompt
@@ -76,7 +77,10 @@ def test_prompt_pins_the_direct_address_rule():
     continue the user's thread; being spoken TO always gets a real answer."""
     prompt = build_system_prompt().lower()
     assert "never a substitute" in prompt
-    assert "answer directly and completely" in prompt
+    # FR-72: "and completely" is gone — it fought the one-or-two-sentence
+    # bound and the model resolved it in favour of long answers
+    assert "answer directly, then stop" in prompt
+    assert "and completely" not in prompt
 
 
 def test_prompt_pins_the_pause_rule():
