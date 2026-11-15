@@ -31,7 +31,9 @@ results), [deployment.md](deployment.md) (step-by-step VM runbook),
    │                      Haiku 5.5 judge, thinking off) (https, outbound)
    ├─▶ TypeSafe ──────── turn checks (Jev: is the user done, was an
    │                      edit asked, how much to say)   (https, outbound)
-   ├─▶ Cartesia ──────── TTS (Sonic-3)                 (https, outbound)
+   ├─▶ Cartesia ──────── TTS (Sonic-3), the default voice;
+   │                      AssemblyAI-TTS-1 instead when
+   │                      TTS_PROVIDER=assemblyai      (wss, outbound)
    └─▶ Firebase Auth ─── identity (project aloud-c74f5): Google + email/
                           password sign-in; backend verifies Bearer ID tokens
                           via firebase-admin (REQUIREMENTS.md §4.8)
@@ -56,7 +58,7 @@ dependencies on the voice path, one identity provider (incoming).
 | STT + turns | Deepgram Flux | transcription and end-of-turn in one model |
 | LLM | Claude Sonnet 5.5 (agent loop) + Claude Haiku 5.5 (FR-60 gate judge) | `anthropic~=2.8` SDK; thinking off on both; built by `make_loop_llm()` / `make_judge_llm()` — see "LLM models and thinking" below. Gemini 2.5 Flash remains selectable (`LLM_PROVIDER=google`) |
 | Turn checks | TypeSafe Jev (`jev-1.14.0`, pinned) | REQUIREMENTS.md §4.15. One HTTP request per user turn, before the LLM is called, through `make_turn_checker()` in `agent/providers.py` (`httpx`, no SDK). About 0.1s; 1s ceiling, then the turn runs unchecked. Both checks on by default (`TURN_CHECK_DONE`, `TURN_CHECK_MODE`) |
-| TTS | Cartesia Sonic-3 | speed 0.85, markdown/identifier sanitizer in front |
+| TTS | Cartesia Sonic-3 (default) or AssemblyAI-TTS-1 | `TTS_PROVIDER` picks one in `make_tts()`. Cartesia: speed 0.85. AssemblyAI: Pipecat's native streaming service, `ASSEMBLYAI_TTS_VOICE` for the voice, no speed control; not yet run against the live API. Both report per-word timings and sit behind the markdown/identifier sanitizer |
 | DB | PostgreSQL 16 | `postgres:16-alpine`; SQLAlchemy async + asyncpg (tests: aiosqlite) |
 | Auth | Firebase Auth | Google + email/password, open signup; Bearer ID tokens verified in `app/auth.py`; admin via `admin: true` custom claim; RLS on user-owned tables through a dedicated `aloud_app` Postgres role |
 | Reverse proxy | Caddy 2 | TLS (Let's Encrypt), path routing; currently also the interim `basic_auth` gate |
@@ -88,6 +90,7 @@ consoles are the source of truth.)
 | Deepgram | STT + turn detection (Flux) | `DEEPGRAM_API_KEY` | pay-per-audio-minute against prepaid credits | [console.deepgram.com](https://console.deepgram.com) → Usage |
 | Anthropic (Claude API) | LLM: Sonnet 5.5 for the agent loop, Haiku 5.5 for the FR-60 judge | `ANTHROPIC_API_KEY` | per input/output token against prepaid credits — Sonnet 5.5 $2 / $10 per 1M, Haiku 5.5 $0.10 / $0.50 per 1M (prompts up to 100K tokens) | [console.anthropic.com](https://console.anthropic.com) → Usage / Billing |
 | TypeSafe (Jev) | the §4.15 turn checks: one small request per user turn | `TYPESAFE_API_KEY` | per input token ($0.042 per 1M listed; output free) — about 500 tokens a turn, a few thousandths of a cent; not in the admin cost estimate (FR-70's recorded trade). Receives the current turn, unanswered turns before it and the agent's last reply — never documents | TypeSafe console |
+| AssemblyAI | TTS (AssemblyAI-TTS-1), only when `TTS_PROVIDER=assemblyai` | `ASSEMBLYAI_API_KEY` | $15 per 1M characters, pay as you go | AssemblyAI dashboard |
 | Cartesia | TTS (Sonic-3) | `CARTESIA_API_KEY` | per-character credits on the subscription tier | [play.cartesia.ai](https://play.cartesia.ai) → Usage/Subscription |
 | Firebase Auth | identity (project `aloud-c74f5`) | service-account JSON | free ≤ 50K MAU (email/password + Google) | [Firebase console → Authentication → Usage](https://console.firebase.google.com/project/aloud-c74f5/authentication/usage) |
 | Google Cloud | the GCE VM, static IP, egress | — | ~$14–15/mo flat | [GCP Billing](https://console.cloud.google.com/billing) · [Compute Engine](https://console.cloud.google.com/compute/instances) |

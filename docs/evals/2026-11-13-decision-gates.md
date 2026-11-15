@@ -481,3 +481,18 @@ three tries per case:
 So a line about edits is audible when it is wrong and unnecessary when
 it is right. What a no-edit verdict now adds is only the answer
 instruction's length bound.
+
+### Before run 2: Pipecat 1.3 → 1.16 is in the same build
+
+Run 2 is on the upgraded framework, so it tests two things at once.
+If something sounds wrong, switch both checks off (`TURN_CHECK_DONE=0`,
+`TURN_CHECK_MODE=0`) and repeat the row: if it still happens, it is the
+framework and not the checks. Listen for, beyond the script's rows:
+
+- barge-in while the agent is speaking (rows 14, 15, 28, 29), and a
+  second burst of speech right after the first;
+- what the agent believes it said after a cut (FR-61), now on 1.16's
+  word-by-word releases;
+- the pause between a narration and its closing word (row 32);
+- `turn.straggler_dropped` warnings in the backend log;
+- with `TTS_PROVIDER=assemblyai`: the first run of that voice at all.

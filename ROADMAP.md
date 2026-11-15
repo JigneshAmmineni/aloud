@@ -763,6 +763,23 @@ features land:
   public launch.
 - **Eager end-of-turn** (speculative LLM calls) trades cost for latency — a
   lever to pull only if measurements demand it.
+- **Pipecat 1.16 (upgraded from 1.3 on 2026-11-14).** Turn handling
+  changed underneath the loop: since 1.8 Flux only proposes turn
+  boundaries and the user aggregator announces the turn and broadcasts
+  the interruption. Two differences seen in simulation, to listen for
+  live: a second burst of speech inside a turn that is still open no
+  longer re-interrupts, and after an end of turn with an empty
+  transcript the next speech start is not announced. Three calls in our
+  code are deprecated and go away in Pipecat 2.0: `MarkdownTextFilter`
+  and `text_filters` (agent/sanitizer.py; replaced by
+  `text_transforms`), and `PipelineTask` / `PipelineRunner`
+  (agent/companion.py; replaced by `PipelineWorker` / `WorkerRunner`).
+- **Slow barge-in** (2026-11-14 live run: 9 to 29 seconds before speech
+  registered while the agent was talking). The upgrade alone is not
+  expected to fix it. Two leads from 1.16: `UserTurnStrategiesParams`
+  with a local start strategy, so the interruption does not wait for
+  Flux, and `SpeakingObserver`, which times detected speech, turn start
+  and interruption separately. Feature 8.
 
 ## Working notes
 

@@ -3098,9 +3098,9 @@ Requirement numbering stays stable; removed numbers are not reused.*
     bypass and never a confident verdict. The default is a pinned
     version, not the provider's moving "latest" alias: FR-63's
     thresholds are tuned to a version.
-  - Pipecat is not upgraded for this: its own Jev integration ships in
-    a release far ahead of the pinned one, and the checker needs
-    nothing from the pipeline.
+  - Pipecat's own Jev classifier is not used: the checker is one
+    request made before the pipeline's LLM slot runs, and needs nothing
+    from the pipeline.
   - The provider's API is early access and its field names may change;
     the factory is the one place that knows them.
   - The key is required exactly when a switch is on — which, with both
