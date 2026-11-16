@@ -54,6 +54,8 @@ export function useWorkspace(enabled: boolean) {
   // The single source of attach truth: id -> char_count. Synchronous, so
   // batched uploads and budget math never race React's render cycle.
   const attachedRef = useRef<Map<number, number>>(new Map());
+  // ids with a DELETE in flight
+  const deletingRef = useRef<Set<number>>(new Set());
   // Mirrors for reads from async code (announce callbacks, uploads).
   const stateRef = useRef(state);
   useEffect(() => {
@@ -232,13 +234,20 @@ export function useWorkspace(enabled: boolean) {
 
   const deleteDoc = useCallback(
     async (doc: WorkspaceDoc): Promise<boolean> => {
+      // a repeat tap while the first delete is in flight: the server would
+      // answer the second request 404, and that would read as a failure
+      // of a delete that worked
+      if (deletingRef.current.has(doc.id)) return false;
+      deletingRef.current.add(doc.id);
       const res = await authedFetch(`/documents/${doc.id}`, {
         method: "DELETE",
       }).catch(() => null);
+      deletingRef.current.delete(doc.id);
       if (!res || !res.ok) {
         setError("couldn't delete that document");
         return false;
       }
+      setError(null);
       setState((s) => markDeleted(s, doc.id));
       // "show older" must not advertise a phantom row after a delete
       setTotal((t) => Math.max(0, t - 1));
