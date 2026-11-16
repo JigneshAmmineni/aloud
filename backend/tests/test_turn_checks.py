@@ -253,21 +253,19 @@ def test_only_the_newest_three_unanswered_turns_ride_along():
     assert all(f"unanswered-{i}" in evidence for i in (2, 3, 4))
 
 
-def test_the_adjacency_rule_is_a_parameter_of_one_accessor():
+def test_the_last_reply_is_read_across_a_run_of_unanswered_turns():
     ctx = _conversation()
     ctx.append_user("hold on")
     ctx.append_user("yeah do that")
-    # FR-60's reading: the offer is no longer adjacent, so it is withheld
-    assert ctx.last_assistant_text() is None
-    # FR-68's reading: it is still what the "yeah" answers
-    assert ctx.last_assistant_text(adjacent=False).endswith("add a budget line?")
-    # and neither reaches past an older turn with nothing spoken after it
+    # FR-68: it is still what the "yeah" answers
+    assert ctx.last_assistant_text().endswith("add a budget line?")
+    # but never past an older turn with nothing spoken after it
     bare = ContextProvider("sys", session_id="s-1")
     bare.append_assistant("An old reply.")
     bare.append_user("first")
     bare.append_step("", [LLMToolCall(name="t", arguments={}, id="c")], [{}])
     bare.append_user("second")
-    assert bare.last_assistant_text(adjacent=False) is None
+    assert bare.last_assistant_text() is None
 
 
 # ---------------- FR-69: the provider seam ----------------
@@ -666,8 +664,6 @@ def test_the_loop_cannot_be_built_without_its_checker_arguments():
             emit=None,
             write_registry=set(),
             greeting_trigger="g",
-            judge_llm=None,
-            judge_model_name="j",
         )
 
 

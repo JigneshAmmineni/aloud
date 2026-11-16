@@ -4,7 +4,7 @@ The unit suite fakes the provider SDK, so it cannot tell whether the live
 API accepts the requests our clients build (key, model ids, thinking and
 fallback fields, and every message shape the translation emits). This
 makes a few real calls through the same factories the agent uses — the
-loop model on each shape below, then the FR-60 judge — and prints what
+loop model on each shape below, then the turn checker — and prints what
 came back.
 
     docker compose run --rm backend python scripts/smoke_llm.py
@@ -20,7 +20,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent.checks import CheckSettings, questions_for  # noqa: E402
-from agent.gate import judge_allows, judge_messages  # noqa: E402
 from agent.prompts import ANSWER_INSTRUCTION  # noqa: E402
 from agent.providers import (  # noqa: E402
     CHECK_ANSWERED,
@@ -28,7 +27,6 @@ from agent.providers import (  # noqa: E402
     LLMDone,
     LLMTextDelta,
     LLMToolCall,
-    make_judge_llm,
     make_loop_llm,
     make_turn_checker,
 )
@@ -94,7 +92,7 @@ _CASES = [
 
 async def main() -> int:
     settings = load_settings()
-    print(f"provider={settings.llm_provider} loop={settings.llm_model} judge={settings.judge_model}")
+    print(f"provider={settings.llm_provider} loop={settings.llm_model}")
 
     loop_llm = make_loop_llm(settings)
     ok = True
@@ -128,16 +126,6 @@ async def main() -> int:
         # the question is whether the API accepted the request, not
         # whether the model chose words over a tool call
         ok = ok and done.finish_reason == FINISH_STOP and (bool(text) or saw_call)
-
-    t0 = time.monotonic()
-    allowed, usage, verdict, finish = await judge_allows(
-        make_judge_llm(settings),
-        judge_messages("create_document", {"title": "Launch plan"}, ["start a new document for the launch plan"]),
-    )
-    judge_ms = round((time.monotonic() - t0) * 1000)
-    print(f"judge: {judge_ms}ms finish={finish} verdict={verdict!r} allowed={allowed} usage={usage}")
-
-    ok = ok and finish == FINISH_STOP and allowed
 
     # FR-69: one request through the factory, the same fields back
     checker = make_turn_checker(settings)

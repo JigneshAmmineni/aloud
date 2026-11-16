@@ -509,3 +509,63 @@ on another. (2) Words the system speaks on the model's behalf become
 part of the conversation record, and every consumer of that record then
 has to know which words were not the model's. (3) When a feature has
 needed three patches and a fourth is due, price the removal.
+
+### The gate that outlived the model it was built for (2026-11-16)
+
+The create gate (section 1 above) put a small judge model in front of
+`create_document`: a new document needed an explicit ask, and anything
+else was refused with a note steering the agent to an existing document
+or to asking the user. It was built in October for Gemini Flash, which
+made new documents out of "note that down".
+
+A month later the agent ran on Claude Sonnet, and this is one turn from
+the trace. The user had talked through a camping trip and said "Can you
+write all this down?". Two unrelated documents existed and neither was
+under discussion. Sonnet called `create_document` with the title
+"Camping Trip Plan" straight away, which was the right call. The Haiku
+judge answered NO in 826 ms: its instructions counted only an ask that
+names a new or separate document. The agent then said, out loud, "The tool
+says to look for an existing document first." It listed the documents,
+found that neither fit, and asked "Do you want a new document for
+this?". The document was created only after the user said "Yes." The
+main model was right at the first step and spent two more steps and a
+question to the user being overruled.
+
+What was considered and not built:
+
+- Loosening the judge so "write this down" counts as a yes when no
+  document is under discussion. It patches this phrasing and leaves the
+  next one.
+- A silent allow-or-deny verdict from the fast turn checker (Jev) on
+  every turn, consulted only when a create arrives, with nothing about
+  it in the prompt. The checker sees a few turns of speech and no
+  documents, so it cannot know whether a fitting document exists.
+- Letting a second create call in the same turn always pass, so a wrong
+  refusal costs one step and never a question.
+- Skipping the gate when nothing is attached or has been touched in the
+  session.
+
+Each of these made the guard smarter. The owner's point ended the list:
+the decision is not "new or existing". It is one of N destinations,
+every document the user has plus a new one, and a yes/no classifier in
+front of one tool cannot make an N-way choice. The model that holds the
+documents in its context can.
+
+The fix was deletion again: the gate, the judge client, its model
+setting, and every line in the prompt and the tool description that
+demanded an explicit ask for a new document. The prompt now says to
+write only when asked and to pick the destination without asking where
+it should go. One gap is accepted for now: a related document from an
+earlier session that is not attached is invisible unless the model
+looks it up, so a duplicate is possible. That is left for the memory
+layer, which can put related documents in front of the model before the
+call starts.
+
+Lessons: (1) a guard tuned to one model's failure outlives the model.
+Nobody re-asked whether the new model still had the habit, and the
+guard kept overruling a model that was getting it right. When the model
+changes, re-test every guard with the guard switched off. (2) A refusal
+message is a prompt. This one said "speak NONE of this reasoning out
+loud" and the agent read it to the user nearly word for word. (3) Check
+the shape of the decision before building a classifier for it. A yes/no
+gate fits a yes/no question, and this was never one.

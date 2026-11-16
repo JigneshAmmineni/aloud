@@ -35,7 +35,6 @@ from agent.prompts import (
     build_system_prompt,
 )
 from agent.providers import (
-    make_judge_llm,
     make_loop_llm,
     make_stt,
     make_tts,
@@ -254,8 +253,6 @@ class CompanionAgent:
             session_id=session_id,
             user_id=self._user_id,
             model_name=self._settings.llm_model,
-            judge_llm=make_judge_llm(self._settings, session_id),
-            judge_model_name=self._settings.judge_model,
             checker=make_turn_checker(self._settings),
             checks=CheckSettings.from_settings(self._settings),
             recorder=recorder,

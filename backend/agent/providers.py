@@ -241,8 +241,7 @@ def to_gemini_contents(
 @functools.lru_cache(maxsize=None)
 def _genai_client(api_key: str) -> genai.Client:
     """One SDK client per key for the life of the process, as on the
-    Claude branch: a session builds two loop clients (loop and judge)
-    and per-session SDK clients were never closed."""
+    Claude branch: per-session SDK clients were never closed."""
     return genai.Client(api_key=api_key)
 
 
@@ -265,20 +264,15 @@ class GeminiLoopClient:
         messages: list[dict],
         tools: list[dict] | None = None,
         tool_choice: str = "auto",
-        max_output_tokens: int | None = None,
     ):
         """Yields LLMTextDelta / LLMToolCall events, then exactly one
         LLMDone. `tool_choice`: "auto" or "none" — "none" keeps the tools
         DECLARED but forbids selection (FR-42's greeting and forced final
-        step; spike-verified against the live API). `max_output_tokens`
-        bounds short classifier calls (the FR-60 judge); None leaves the
-        model default."""
+        step; spike-verified against the live API)."""
         _check_tool_choice(tool_choice)
         config = genai_types.GenerateContentConfig(
             thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
         )
-        if max_output_tokens is not None:
-            config.max_output_tokens = max_output_tokens
         system_instruction, contents = to_gemini_contents(messages)
         if system_instruction:
             config.system_instruction = system_instruction
@@ -431,8 +425,8 @@ def to_anthropic_messages(messages: list[dict]) -> tuple[str | None, list[dict]]
                 else json.dumps(result, ensure_ascii=False, default=str),
             }
             # Failures only — the loop's own failing outcomes, minus one:
-            # a gate refusal (status "refused") is steering to follow,
-            # not an error to retry.
+            # a refusal (status "refused") is steering to follow, not an
+            # error to retry.
             if isinstance(result, dict) and result.get("status") in (
                 "error",
                 "timeout",
@@ -499,9 +493,7 @@ _CLAUDE_CONNECT_TIMEOUT_S = 5.0
 @functools.lru_cache(maxsize=None)
 def _anthropic_client(api_key: str) -> anthropic.AsyncAnthropic:
     """One SDK client, and so one connection pool, per key for the
-    life of the process. Per-session clients were never closed, and
-    the judge's separate pool was cold on the first gated create of
-    every session."""
+    life of the process. Per-session clients were never closed."""
     return anthropic.AsyncAnthropic(
         api_key=api_key,
         timeout=anthropic.Timeout(None, connect=_CLAUDE_CONNECT_TIMEOUT_S),
@@ -509,8 +501,8 @@ def _anthropic_client(api_key: str) -> anthropic.AsyncAnthropic:
     )
 
 
-# The cap when the caller sets none. Sized for a whole document arriving as
-# one create_document input, not for a spoken reply.
+# Sized for a whole document arriving as one create_document input, not
+# for a spoken reply.
 _CLAUDE_MAX_TOKENS = 64000
 
 
@@ -540,7 +532,6 @@ class ClaudeLoopClient:
         messages: list[dict],
         tools: list[dict] | None = None,
         tool_choice: str = "auto",
-        max_output_tokens: int | None = None,
     ):
         """Same contract as GeminiLoopClient.stream: LLMTextDelta /
         LLMToolCall events, then exactly one LLMDone — plus one early
@@ -554,7 +545,7 @@ class ClaudeLoopClient:
             **_CLAUDE_MODELS[self._model],
             # after the row: a row can never override these four
             "model": self._model,
-            "max_tokens": max_output_tokens or _CLAUDE_MAX_TOKENS,
+            "max_tokens": _CLAUDE_MAX_TOKENS,
             "messages": claude_messages,
             "output_config": {"effort": self._effort},
         }
@@ -624,8 +615,7 @@ def _make_llm(settings: Settings, model: str, effort: str, session_id: str):
         )
     if settings.llm_provider == "google":
         if model.startswith("claude"):
-            # the swap-back's leftover line (JUDGE_MODEL is the easy one
-            # to miss): a judge that 404s refuses every create, silently
+            # the swap-back's leftover LLM_MODEL line
             raise ValueError(
                 f"Anthropic model {model!r} configured under LLM_PROVIDER=google"
             )
@@ -636,12 +626,6 @@ def _make_llm(settings: Settings, model: str, effort: str, session_id: str):
 def make_loop_llm(settings: Settings, session_id: str = ""):
     """FR-48 factory: the streaming client the agent loop calls through."""
     return _make_llm(settings, settings.llm_model, settings.llm_effort, session_id)
-
-
-def make_judge_llm(settings: Settings, session_id: str = ""):
-    """The FR-60 gate's client: same seam, the smaller judge model. A
-    one-word verdict needs no more than the lowest effort."""
-    return _make_llm(settings, settings.judge_model, "low", session_id)
 
 
 # --------------------------------------------------------------------------
@@ -787,9 +771,8 @@ def make_turn_checker(settings: Settings):
 
 
 def validate_llm_config(settings: Settings) -> None:
-    """Boot-time check (app/main.py): build both clients once so a
+    """Boot-time check (app/main.py): build the client once so a
     provider/model pair no client can run stops the container from
     starting. Left to session start, the same mistake boots clean,
     passes the deploy health check, and then fails every session."""
     make_loop_llm(settings)
-    make_judge_llm(settings)

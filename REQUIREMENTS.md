@@ -58,7 +58,7 @@ User explicitly asks for the agent's opinion, alternatives, or next steps. The a
 - **FR-7** By default, the agent is reactive: it responds when the user speaks.
 - **FR-9** The agent must ask one question at a time. It must not overwhelm the user with multiple questions or unsolicited lists of suggestions.
 - **FR-11** When asked, the agent must be able to summarize the current session's key ideas, decisions, and open questions.
-- **FR-12** When asked, the agent must be able to produce a written artifact: a structured summary, a list of action items, or a cleaned-up version of the user's idea.
+- **FR-12** When asked, the agent must be able to produce a written artifact: a structured summary, a list of action items, or a cleaned-up version of the user's idea. Where the writing goes is the agent's choice: an existing document it clearly belongs in, or a new document when none fits or the user asks for one. It does not ask the user where to put it, and it never writes unasked.
 
 *FR-8 (proactive flagging) and FR-10 (brainstorm/critique modes) are demo stretch goals — moved to §6 Out of Scope. Requirement numbering stays stable; removed numbers are not reused.*
 
@@ -1057,7 +1057,7 @@ FR-7 still governs: the agent acts when the user asks.
   by that feature's own clause — the loop is *built through* its trace,
   not traced after the fact. Every LLM call the loop makes writes one
   row to an `llm_traces` table: `session_id`, `turn_id`, step number,
-  timestamp, model, purpose (`turn` | `greeting` | `wrap_up` | `gate` |
+  timestamp, model, purpose (`turn` | `greeting` | `wrap_up` |
   `check` — exactly the calls that exist; a `check` row is one per
   checked turn, not one per question, FR-70; the FR-42 fallback is a canned line, not an LLM
   call, so it can have no trace row), finish reason (FR-48's vocabulary,
@@ -2647,65 +2647,11 @@ upsert/tombstone/close-on-delete rules extend to editor tabs
 move on user saves too, via FR-56's `char_count` response. FR-29 —
 deliberately unchanged (FR-56 states local verification and why).
 
-### 4.13 Create gate — the judge in front of document creation
-
-- **FR-60** **`create_document` executes only after a server-side judge
-  confirms the user explicitly asked for a new document; otherwise the
-  call returns a steering refusal and nothing is written.** The
-  description-only boundary did not hold in live use (the 2026-10-10
-  eval's recorded result: "note that down" mid-discussion produced a
-  new document), so the boundary is code, not prompt. Mechanism:
-  - The gate sits in the agent loop's dispatch (`agent/gate.py` +
-    the loop's `_gate_allows`), in front of the handler — a refused
-    call runs no handler and writes nothing.
-  - The judge is ONE bounded yes/no LLM call ("did the user explicitly
-    request a new document in their recent turns?") through the same
-    provider-neutral FR-48 seam the loop uses, on a smaller, faster
-    model of the same provider (`JUDGE_MODEL`) — no second provider,
-    no new SDK surface. Evidence is the last 4 user turns (600 chars
-    each), the assistant's immediately preceding reply — what it
-    last said before the user's latest turn, whether or not that
-    step also called a tool; included
-    only when the user's latest turn directly follows it, and
-    omitted otherwise (it is the referent a bare "yes" answers, and
-    the prompt tells the judge so: an older reply would let an
-    unrelated "yes" confirm an offer the user declined) — and the
-    proposed title; never document content, never
-    tool results, and the prompt marks all quoted text as data. The
-    judge's output is capped (the verdict is one word). A yes of
-    any kind in the user's latest turn, answering a reply that
-    offered a new document, counts as an explicit request.
-  - Anything but a clear YES refuses, and the gate **fails closed**: a
-    judge error or timeout (4s) refuses with the same steering — the
-    worst failure mode is one extra voice turn, never an unwanted
-    document.
-  - The refusal text steers the recovery: add to an existing document
-    via `edit_document`, or ask the user and call again — after a
-    spoken yes, the confirmation is in the recent turns and the judge
-    allows the retry. The deliberate scope limit: the judge does NOT
-    pick which existing document fits; the main agent owns that with
-    the attached documents in its context.
-  - Instrumented like any stage (`step.N.gate.create_document` + a
-    `tool.gated` log line with the verdict), the judge's tokens land on
-    the turn as ordinary LLM usage (FR-45), and the call writes an
-    `llm_traces` row (purpose `gate`, FR-49) carrying the evidence
-    turns sent and the verdict returned — the row the eval's results
-    get reconstructed from.
-  - **Recorded trade (review round 1):** the refusal steers hard onto
-    `edit_document`, which is UNGATED and has no undo yet. Owner
-    decision: write-without-asking to the clear destination IS the
-    product behavior; one-step undo (ROADMAP, documents follow-ups) is
-    the planned complement, and gating edits is the revisit if live
-    use ever shows unwanted mutations of the working document.
-  - The gated set is `agent/gate.py`'s `GATED_TOOLS`;
-    `delete_document` joins it when that tool ships (ROADMAP).
-
-| Knob | Default | Where |
-|---|---|---|
-| `JUDGE_TIMEOUT_S` (judge call ceiling; on breach the gate refuses) | 4s | `agent/gate.py` |
-| `JUDGE_MAX_OUTPUT_TOKENS` (output cap; the verdict is one word) | 8 | `agent/gate.py` |
-| Judge evidence window (user turns / chars per turn) | 4 / 600 | `agent/gate.py` |
-| Judge evidence: assistant-reply cap | 300 | `agent/context.py` (`last_assistant_text`) |
+*§4.13 and FR-60 (a server-side judge in front of `create_document`)
+are removed: `create_document` runs when the model calls it, like any
+other tool, and where a write goes is the model's choice (FR-12).
+Section and requirement numbering stay stable; removed numbers are not
+reused.*
 
 ### 4.14 Playback-aware interruption context
 
@@ -2797,7 +2743,7 @@ your ideas" produced the lists with the ideas written into the document
 instead of spoken. Both are decisions the main model makes implicitly
 today; this section makes them explicit, cheap, and bound to mechanism.
 
-Five decisions shape every FR below, each with the alternative it beat:
+Four decisions shape every FR below, each with the alternative it beat:
 
 1. **Text checks after the end of turn, not a change to turn
    detection.** `FLUX_EOT_THRESHOLD` and the audio layer are untouched.
@@ -2831,13 +2777,10 @@ Five decisions shape every FR below, each with the alternative it beat:
    softer line telling the model not to edit made it voice the
    conflict aloud whenever the user had in fact asked. And on the
    turns the restriction was for, the model was not making unwanted
-   edits to begin with. FR-60's gate on new documents is the one
-   restriction on a write, and it is not part of these checks. Where
+   edits to begin with. No tool is withheld or blocked on a verdict
+   anywhere else either. Where
    the checks do lean, it is toward silence: asking again is cheaper
    than cutting off a wrong reply.
-5. **The create gate is untouched.** FR-60 keeps its judge, its
-   evidence rule and its fail-closed dispatch point. FR-64 records what
-   that costs after a silent turn.
 
 - **FR-62** **At the end of every user turn, before the main model is
   called, the loop asks a decision model three questions about the
@@ -2930,7 +2873,7 @@ Five decisions shape every FR below, each with the alternative it beat:
   - The user's text stays in the context as a user message, and the
     next turn's text is appended as a further user message. Consecutive
     user messages are sent as they are and the provider reads them as
-    one (FR-48; probed live on both Claude models, and
+    one (FR-48; probed live on Claude, and
     `scripts/smoke_llm.py` covers the shape), so when the model is next
     called it sees the whole thought. Transcript logging and turn
     numbering are unchanged: one turn per end of turn.
@@ -2944,8 +2887,7 @@ Five decisions shape every FR below, each with the alternative it beat:
     FR-47).
   - The client is told with one server message, `turn.silent`, so
     FR-6's indicator returns from Thinking to Listening.
-  - **Recorded bounds** (the first two accepted by the owner, the third
-    FR-60's own direction): (i) a wrong silent
+  - **Recorded bounds** (both accepted by the owner): (i) a wrong silent
     verdict on a finished request leaves the user unanswered until they
     speak again — nothing tells them, the lean (decision 4) makes it the
     preferred mistake, and FR-70's records make its rate measurable.
@@ -2954,13 +2896,6 @@ Five decisions shape every FR below, each with the alternative it beat:
     rest of that reply is not resumed. With FR-72's one-or-two-sentence
     replies there is little to lose, and telling such a sound from a
     real interruption is turn-detection work, not this section's.
-    (iii) FR-60's judge is shown the agent's last reply only when the
-    user's latest turn directly follows it, so that an unrelated "yes"
-    cannot confirm an offer made earlier. After a silent turn the
-    next turn no longer directly follows the reply: a "yes" to an
-    offer of a new document made before the silence is refused once,
-    and the agent asks again. One extra voice turn, never an unwanted
-    document.
 
   Mandated tests: a silent outcome makes no main-model call, pushes no
   text frame, appends no assistant entry, and emits `turn.silent`; the
@@ -2999,7 +2934,7 @@ Requirement numbering stays stable; removed numbers are not reused.*
     instruction can land on a spoken request that asked for no edit
     (the bench saw it on 2 of 87 turns), and an unconditional "make the
     change" would turn that into an unwanted edit of the document under
-    discussion (FR-7). FR-60 guards only a create.
+    discussion (FR-7).
   - None is ever appended to the context (FR-42's wrap-up pattern), and
     none says anything about whether editing is allowed: every tool is
     declared on every turn (FR-63).
@@ -3028,9 +2963,8 @@ Requirement numbering stays stable; removed numbers are not reused.*
     retries.
   - Each bypass logs `turn.check_bypassed` at WARNING with the question
     and the reason (the error's type, never its text).
-  - The direction is the opposite of FR-60's fail-closed gate, on
-    purpose: there the worst case of refusing is one extra voice turn;
-    here refusing would mute the agent for every user for as long as
+  - The direction is fail-open, on purpose: holding the turn would
+    mute the agent for every user for as long as
     the provider is down. A broken check costs the improvement, never
     the conversation.
   - The ceiling bounds a gate, not work: cutting it off loses nothing.
@@ -3074,14 +3008,10 @@ Requirement numbering stays stable; removed numbers are not reused.*
     of those turns, as the context holds it (a cut-off reply appears as
     it was heard, FR-46/FR-61), capped to its last 300 characters. It
     is what a bare "yeah" answers, so it is included **whether or not
-    unanswered user turns stand between it and the current turn**.
-    That is the opposite of FR-60's adjacency rule, on purpose (there
-    an older reply must not be confirmable; here it is only context
-    for a judgement that cannot create anything). The context keeps
-    one accessor, `last_assistant_text`, with the adjacency rule as a
-    parameter — required for FR-60, off here — rather than a copy, so
-    the tail cap and the rule that a tool-call step's text counts stay
-    in one place.
+    unanswered user turns stand between it and the current turn**
+    (it is only context for a judgement that cannot create anything).
+    The context's accessor, `last_assistant_text`, owns the tail cap
+    and the rule that a tool-call step's text counts.
   - Never sent: document content, the attached-documents block, tool
     calls or results, document titles, the system prompt, or older
     turns. The request marks all quoted text as data.

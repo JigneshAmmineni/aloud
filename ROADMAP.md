@@ -224,7 +224,8 @@ below, the spec is the state and these notes are the journey:
 - **Two leans:** toward silence when unsure whether the user is done;
   toward allowing the edit when unsure whether one was asked for.
 - **The create gate stays on Haiku** (3.3.1 below is the follow-up),
-  so there is no consolidated decision bundle yet.
+  so there is no consolidated decision bundle yet. (2026-11-16: the
+  gate was removed instead. See 3.3.1.)
 - **Answer modes** are FR-72, as instructions to Claude; the summary
   bound is tightened to one or two sentences, ideally one. Claude, not
   the checks, picks between summary and explanation.
@@ -333,11 +334,45 @@ tool):
   structured, as they're said (the product vision's "gives their words
   structure" line, still unimplemented). Needs care against the FR-60
   boundary (ambient WRITES to the discussed doc are wanted; ambient
-  CREATES are not) and against barge-in (writes mid-speech). Candidate
+  CREATES are not) and against barge-in (writes mid-speech). (Note
+  2026-11-16: FR-60's gate is gone, so nothing in code stops an
+  ambient create any more. This mode needs its own guard if built.)
+  Candidate
   shape: a capture mode the user toggles by voice ("take notes while I
   talk"), scoped to one target document.
 
-### 3.3.1 New-document check on Jev — the PR after the decision gates
+### 3.3.1 New-document check on Jev — closed 2026-11-16, not built
+
+**Closed 2026-11-16 (owner decision): the create gate was removed, so
+there is nothing to move to Jev.** What happened: on "Can you write all
+this down?", with no related document, Sonnet called `create_document`
+at once. The Haiku judge answered NO (its rule wanted the word
+"document"), and the refusal text made the agent say "The tool says to
+look for an existing document first", list the documents, and ask "Do
+you want a new document for this?". The gate was built for Gemini
+Flash's habit of creating stray documents (2026-10-11); whether Sonnet
+has that habit was never tested without the gate. The owner's reasoning: where a write goes is not new versus
+existing but one of N destinations (every document, plus a new one),
+and the main model is the right place for that choice. `create_document`
+now runs when the model calls it, the prompt and the tool description
+no longer ask for an explicit request for a new document, and the
+lookup tools (`list_documents`, `search_documents`, `read_document`)
+remain how the model finds a document from an earlier session.
+
+Considered and not built: loosening the judge's rule; a silent
+allow-or-deny verdict from Jev on every turn, consulted only when a
+create arrives; letting a second create call in the same turn always
+pass; skipping the gate when nothing is attached. All were more
+machinery than the problem needs today.
+
+Known gap, accepted: a related document that is not attached and was
+not touched this session is invisible to the model unless it looks, so
+it can create a duplicate. Revisit with the memory layer (feature 6).
+Watch for in live use: "note that down" during a discussion of an
+attached document creating a stray new one (the original 2026-10-10
+failure). If it comes back, the first step is a prompt fix, not a gate.
+
+The original entry, kept for the record:
 
 Owner decision 2026-11-13 (decision-gates spec grilling): the FR-60
 create gate stays on Haiku, untouched, while the decision gates ship, so
@@ -394,10 +429,13 @@ From single upload-at-start + copy-paste artifacts to a real document workspace.
     considered-and-rejected extras: having it also pick which existing
     document a change fits — too much for a cheap fast classifier, and
     the main agent already holds the docs in context.
+    **Removed 2026-11-16** (FR-60 and §4.13 deleted; see 3.3.1).
   - **`delete_document` tool (planned):** expose deletion to the agent,
     gated by the SAME FR-60 judge (explicit request required, fail
     closed) — deletion is more destructive than creation, so it does
-    not ship before one-step undo exists.
+    not ship before one-step undo exists. (2026-11-16: that judge no
+    longer exists. What guards an agent delete is a spec-time decision
+    again; undo-first still holds.)
   - **Versioning / undo (decided 2026-10-10):** v1 is **one-step undo** —
     a `previous_content` 🔒 column written on every edit (agent or user),
     so "undo that" restores the pre-edit text; a full
@@ -520,6 +558,16 @@ section; the memory-management loop consumes its summaries and evictions.
   covered by RLS; one user's agent can never retrieve another user's data.
 - Retrieval quality is measured by evals (golden query→memory datasets), not
   just unit tests.
+- **Where a write goes, revisited here (noted 2026-11-16).** The create
+  gate was removed (3.3.1) and the model now picks the destination from
+  what it can see: attached documents and anything touched this
+  session. A related document from an earlier session is invisible
+  unless the model looks it up. With this feature, documents whose
+  titles relate to what the user is saying can be found by a plain
+  lookup on the partial transcript while the user is still speaking and
+  put into the context before the model call starts. That closes the
+  duplicate-document gap without a gate, and it is also what lets
+  attach-before-session be retired.
 
 ### 7. LLM tracing
 
@@ -624,7 +672,8 @@ call).
   own budget, not a raised global one: the quick turn keeps its bounds
   and the task gets a step and tool budget of its own, with FR-42
   amended to say so.
-- The 4s judge timeout stays. It bounds a yes/no call, not work.
+- ~~The 4s judge timeout stays. It bounds a yes/no call, not work.~~
+  Gone with the create gate (removed 2026-11-16).
 - No tool today takes long. Research needs tools that do (web search,
   reading long sources), which is where the 10s tool bound starts to
   matter.
@@ -800,6 +849,12 @@ docs/evals/2026-11-12-filler-removal.md (the filler line's removal,
 whose script covers the same turns). The list, so nothing is
 forgotten:
 
+- **Closed 2026-11-16 with the create gate's removal (3.3.1):**
+  docs/evals/2026-10-11-create-gate-judge.md is no longer owed (there
+  is no judge to evaluate), carried item (3), judge latency, is gone,
+  and so is the "the gate refused again" half of item (2). The other
+  eval docs still stand.
+
 - **Sorted 2026-11-13 (decision-gates spec).** Of the carried list
   below, these are now specced and leave this list when §4.15 is
   built: (1) reply length (FR-72), (9) the first-sentence cut (FR-61
@@ -920,7 +975,10 @@ forgotten:
   discussion), writes without asking; only with no fitting document
   does it ask "do you want a new document for this?" (verbal yes passes
   the judge on retry); a spoken-answer request (summary/opinion) gets a
-  spoken answer, never laundered into an edit.
+  spoken answer, never laundered into an edit. **Removed 2026-11-16**
+  with the gate. What replaces it: "write that down" with no fitting
+  document creates one without a question; with a fitting document it
+  edits that one; a spoken-answer request is still answered out loud.
 - **Placement judgment** — "where in the document?" is never asked when
   there's a clear destination.
 - **Rename mode** — a title change is ONE edit_document rename call, no

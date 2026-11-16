@@ -17,7 +17,7 @@ A voice-first work assistant for people who think and work by talking out loud. 
 | Voice orchestration | Pipecat (cascade pipeline: turn detection → STT → LLM → TTS) |
 | Transport | WebRTC via Pipecat SmallWebRTC |
 | STT + turn detection | Deepgram Flux |
-| LLM (default) | Claude Sonnet 5.5 for the agent loop, Claude Haiku 5.5 for the small judge/decision calls; thinking off on both — swappable; the Gemini Flash client is kept as the swap-back |
+| LLM (default) | Claude Sonnet 5.5 for the agent loop; thinking off — swappable; the Gemini Flash client is kept as the swap-back |
 | Turn checks | TypeSafe Jev, asked before the LLM on every user turn (REQUIREMENTS.md §4.15): is the user done, was an edit asked for, how much to say |
 | TTS | Cartesia Sonic-3 (default); AssemblyAI-TTS-1 with `TTS_PROVIDER=assemblyai` |
 | DB | PostgreSQL |

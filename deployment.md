@@ -246,7 +246,6 @@ CARTESIA_VOICE_ID=
 STT_PROVIDER=deepgram_flux
 LLM_PROVIDER=anthropic
 LLM_MODEL=claude-sonnet-5-5
-JUDGE_MODEL=claude-haiku-5-5
 LLM_EFFORT=medium
 TTS_PROVIDER=cartesia
 TTS_SANITIZE_ENABLED=true
@@ -590,8 +589,9 @@ LLM_MODEL=claude-sonnet-5-5
 RATE_LLM_PER_1M_TOKENS_IN=2
 RATE_LLM_PER_1M_TOKENS_OUT=10
 ```
-and no `JUDGE_MODEL` line unless it names a Claude model. `GOOGLE_API_KEY`
-can stay (unused) or go.
+`GOOGLE_API_KEY` can stay (unused) or go. A `JUDGE_MODEL` line left in
+`.env` from before 2026-11-16 is no longer read (the create gate it
+configured was removed) and can go too.
 
 The turn checks (REQUIREMENTS.md §4.15) are the second: both are on by
 default, and with either one on the backend refuses to boot without

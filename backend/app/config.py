@@ -14,9 +14,6 @@ _REQUIRED = (
 # here and fails in the providers.py factory, which names it.
 _LLM_KEY = {"anthropic": "ANTHROPIC_API_KEY", "google": "GOOGLE_API_KEY"}
 _DEFAULT_LLM_MODEL = {"anthropic": "claude-sonnet-5-5", "google": "gemini-2.5-flash"}
-# The FR-60 judge's smaller model. A provider with no entry judges on
-# its loop model.
-_DEFAULT_JUDGE_MODEL = {"anthropic": "claude-haiku-5-5"}
 # The loop runs with thinking off, and the API rejects every call at a
 # higher effort than these when thinking is off.
 _LLM_EFFORTS = ("low", "medium", "high")
@@ -50,7 +47,6 @@ class Settings:
     cartesia_api_key: str
     cartesia_voice_id: str
     llm_model: str
-    judge_model: str  # the FR-60 gate's model; smaller/faster than llm_model
     llm_effort: str  # main-loop effort (Anthropic only; ignored on google)
     stt_provider: str
     llm_provider: str
@@ -119,7 +115,6 @@ def load_settings() -> Settings:
             "(TURN_CHECK_DONE / TURN_CHECK_MODE, both on by default) — add "
             "it to .env, or set both switches to 0 (see .env.example)."
         )
-    default_judge = _DEFAULT_JUDGE_MODEL.get(llm_provider, llm_model)
     return Settings(
         deepgram_api_key=os.environ["DEEPGRAM_API_KEY"],
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY") or "",
@@ -127,7 +122,6 @@ def load_settings() -> Settings:
         cartesia_api_key=os.environ["CARTESIA_API_KEY"],
         cartesia_voice_id=os.getenv("CARTESIA_VOICE_ID") or _DEFAULT_VOICE_ID,
         llm_model=llm_model,
-        judge_model=os.getenv("JUDGE_MODEL") or default_judge,
         llm_effort=llm_effort,
         stt_provider=os.getenv("STT_PROVIDER") or "deepgram_flux",
         llm_provider=llm_provider,

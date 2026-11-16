@@ -58,7 +58,6 @@ def make_settings():
             cartesia_api_key="c_fake",
             cartesia_voice_id="voice",
             llm_model="claude-sonnet-5-5",
-            judge_model="claude-haiku-5-5",
             llm_effort="medium",
             stt_provider="deepgram_flux",
             llm_provider="anthropic",

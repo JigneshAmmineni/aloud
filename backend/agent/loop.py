@@ -53,13 +53,6 @@ from agent.checks import (
     questions_for,
 )
 from agent.context import ContextProvider
-from agent.gate import (
-    GATE_REFUSAL,
-    GATED_TOOLS,
-    JUDGE_RECENT_TURNS,
-    judge_allows,
-    judge_messages,
-)
 from agent.prompts import (
     FALLBACK_GREETING_LINES,
     FALLBACK_LINES,
@@ -173,11 +166,6 @@ class AgentLoopProcessor(FrameProcessor):
         emit,
         write_registry: set,
         greeting_trigger: str,  # required: dropping it must not pass a green suite
-        # required for the same reason: defaulted to the loop's own
-        # client, a dropped kwarg would run every verdict on the loop
-        # model, at its price and latency, under a green suite
-        judge_llm,
-        judge_model_name: str,
         # required too (§4.15): a dropped kwarg would run every turn
         # unchecked under a green suite. `checker` may be None (no key);
         # the switches live in `checks`.
@@ -195,9 +183,6 @@ class AgentLoopProcessor(FrameProcessor):
         self._session_id = session_id
         self._user_id = user_id
         self._model_name = model_name
-        # FR-60: the gate's judge runs on its own (smaller) model
-        self._judge_llm = judge_llm
-        self._judge_model_name = judge_model_name
         self._recorder = recorder
         self._traces = traces
         self._emit = emit
@@ -845,35 +830,17 @@ class AgentLoopProcessor(FrameProcessor):
         tool = self._tools.get(call.name)
         log = self._log.bind(turn_id=state.turn_id, step=state.step, tool=call.name)
         outcome = "ok"
-        # FR-47's anti-overwrite rule, computed ONCE for both stage keys
-        # (gate and tool): two same-named calls in one step would silently
-        # overwrite each other in the stage dict
+        # FR-47's anti-overwrite rule: two same-named calls in one step
+        # would silently overwrite each other in the stage dict
         stage_suffix = (
             f".{index + 1}"
             if sum(1 for c in state.calls if c.name == call.name) > 1
             else ""
         )
-        denied = (
-            tool is not None
-            and tool.name in GATED_TOOLS
-            and not await self._gate_allows(state, call, log, stage_suffix)
-        )
-        # AFTER the gate: each stage owns only its own time — billing the
-        # judge round-trip to step.N.tool.* double-counted it and fired
-        # spurious slow-stage WARNs at the DB write (round-1 review)
         t0 = time.monotonic()
         if tool is None:
             result = {"status": "error", "error": f"unknown tool: {call.name}"}
             outcome = "error"
-        elif denied:
-            # FR-60: the judge said no (or failed — the gate fails
-            # closed). The refusal steers the model to edit_document or
-            # to asking the user; no handler runs, nothing is written.
-            result = dict(GATE_REFUSAL)
-            # the gate working as designed is not a tool ERROR — the
-            # refusal majority must not read as a failing create rate
-            # (round-2 review); tool.gated carries allowed=false already
-            outcome = "gated"
         else:
             # asyncio.create_task, NOT self.create_task: a processor-owned
             # task dies with the pipeline, and a write cancelled mid-commit
@@ -918,87 +885,6 @@ class AgentLoopProcessor(FrameProcessor):
             event="tool.invoked", duration_ms=duration_ms, outcome=outcome
         ).info(f"{call.name}: {outcome} in {duration_ms}ms")
         state.results[index] = result
-
-    async def _gate_allows(
-        self, state: _TurnState, call: LLMToolCall, log, key_suffix: str = ""
-    ) -> bool:
-        """FR-60: one judge call through the FR-48 seam (the judge client),
-        instrumented like any stage and FAILING CLOSED — a judge error
-        degrades to the agent asking the user, never to an unwanted
-        write. Judge tokens land on the turn like any LLM call, and the
-        call writes its FR-49 trace row (purpose "gate") on EVERY exit —
-        including the barge-in cancellation, which is the row FR-49 names
-        the cancellation path for (round-2 review)."""
-        g0 = time.monotonic()
-        messages = judge_messages(
-            call.name,
-            call.arguments,
-            self._context.recent_user_texts(JUDGE_RECENT_TURNS),
-            self._context.last_assistant_text(),
-        )
-        verdict_text = ""
-        usage = None
-        allowed = False
-        finish = FINISH_INTERRUPTED  # overwritten unless a cancel unwinds
-
-        def early_usage(reported: LLMUsage) -> None:
-            # held here so a timed-out or barged-in judge call still
-            # records the input it was billed for
-            nonlocal usage
-            usage = reported
-
-        try:
-            allowed, usage, verdict_text, finish = await judge_allows(
-                self._judge_llm, messages, on_usage=early_usage
-            )
-        except asyncio.CancelledError:
-            raise  # the finally still writes the interrupted trace row
-        except Exception as e:
-            finish = "error"
-            log.bind(event="gate.judge_failed").warning(
-                f"gate judge failed ({type(e).__name__}) — refusing {call.name}"
-            )
-        finally:
-            gate_ms = round((time.monotonic() - g0) * 1000)
-            if usage is not None:  # every exit: FR-45 counts what was spent
-                self._recorder.record_llm_usage(
-                    usage.prompt_tokens,
-                    usage.completion_tokens,
-                    turn_id=state.turn_id,
-                )
-            self._traces.record_trace(
-                turn_id=state.turn_id,
-                step=state.step,
-                model=self._judge_model_name,
-                purpose="gate",
-                finish_reason=finish,
-                prompt_tokens=usage.prompt_tokens if usage else None,
-                completion_tokens=usage.completion_tokens if usage else None,
-                ttfb_ms=None,
-                duration_ms=gate_ms,
-                input_messages=messages,
-                output=verdict_text,
-            )
-            self._recorder.record_step_stage(
-                state.turn_id,
-                f"step.{state.step}.gate.{call.name}{key_suffix}",
-                gate_ms,
-            )
-            if finish != FINISH_INTERRUPTED:
-                # verdict + finish in the bind (round 3): "the judge said
-                # NO" and "the judge said nothing (blocked/truncated)"
-                # must be distinguishable without the trace row
-                log.bind(
-                    event="tool.gated",
-                    allowed=allowed,
-                    duration_ms=gate_ms,
-                    verdict=verdict_text[:40],
-                    finish_reason=finish,
-                ).info(
-                    f"{call.name}: gate "
-                    f"{'allowed' if allowed else 'refused'} in {gate_ms}ms"
-                )
-        return allowed
 
     def _write_done(self, call: LLMToolCall, task: asyncio.Task) -> None:
         """Done-callback for every write task — the FR-46 landing path for

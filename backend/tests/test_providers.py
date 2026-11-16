@@ -5,7 +5,6 @@ import pytest
 from agent.providers import (
     ClaudeLoopClient,
     GeminiLoopClient,
-    make_judge_llm,
     make_loop_llm,
     make_stt,
     make_tts,
@@ -23,7 +22,6 @@ def _settings(**overrides) -> Settings:
         cartesia_api_key="c_fake",
         cartesia_voice_id="voice",
         llm_model="claude-sonnet-5-5",
-        judge_model="claude-haiku-5-5",
         llm_effort="medium",
         stt_provider="deepgram_flux",
         llm_provider="anthropic",
@@ -59,27 +57,18 @@ def test_cartesia_speed_comes_from_settings():
     assert tts._settings.generation_config.speed == 0.7
 
 
-def test_loop_and_judge_clients_use_their_own_models():
-    s = _settings()
-    loop_llm, judge_llm = make_loop_llm(s), make_judge_llm(s)
+def test_loop_client_uses_the_configured_model_and_effort():
+    loop_llm = make_loop_llm(_settings())
     assert (loop_llm._model, loop_llm._effort) == ("claude-sonnet-5-5", "medium")
-    # the judge is the smaller model at the lowest effort, whatever LLM_EFFORT says
-    assert (judge_llm._model, judge_llm._effort) == ("claude-haiku-5-5", "low")
 
 
-def test_google_provider_still_constructs_for_loop_and_judge():
-    s = _settings(
-        llm_provider="google",
-        llm_model="gemini-2.5-flash",
-        judge_model="gemini-2.5-flash-lite",
-    )
-    assert isinstance(make_loop_llm(s), GeminiLoopClient)
-    judge = make_judge_llm(s)
-    assert isinstance(judge, GeminiLoopClient)
-    assert judge._model == "gemini-2.5-flash-lite"
-    # one SDK client per process on the swap-back path too: a session
-    # builds two loop clients and neither is ever closed
-    assert judge._client is make_loop_llm(s)._client
+def test_google_provider_still_constructs():
+    s = _settings(llm_provider="google", llm_model="gemini-2.5-flash")
+    loop_llm = make_loop_llm(s)
+    assert isinstance(loop_llm, GeminiLoopClient)
+    # one SDK client per process on the swap-back path too: per-session
+    # clients are never closed
+    assert loop_llm._client is make_loop_llm(s)._client
 
 
 def test_anthropic_provider_rejects_a_model_it_has_no_request_shape_for():
@@ -90,21 +79,16 @@ def test_anthropic_provider_rejects_a_model_it_has_no_request_shape_for():
 
 
 def test_boot_validation_rejects_every_pair_no_client_can_run():
-    """PR #24 round 1: these mistakes used to boot clean and fail (or,
-    for the judge, silently refuse) per session."""
+    """PR #24 round 1: these mistakes used to boot clean and fail per
+    session."""
     validate_llm_config(_settings())  # the shipped defaults pass
-    validate_llm_config(
-        _settings(llm_provider="google", llm_model="gemini-2.5-flash", judge_model="gemini-2.5-flash")
-    )
+    validate_llm_config(_settings(llm_provider="google", llm_model="gemini-2.5-flash"))
     # swap to Claude with the Gemini model line left behind
     with pytest.raises(ValueError, match="gemini-2.5-flash"):
         validate_llm_config(_settings(llm_model="gemini-2.5-flash"))
-    # a judge model the provider cannot run
-    with pytest.raises(ValueError, match="claude-opus-5-5"):
-        validate_llm_config(_settings(judge_model="claude-opus-5-5"))
-    # swap back to Gemini with the Claude judge line left behind
-    with pytest.raises(ValueError, match="claude-haiku-5-5"):
-        validate_llm_config(_settings(llm_provider="google", llm_model="gemini-2.5-flash"))
+    # swap back to Gemini with the Claude model line left behind
+    with pytest.raises(ValueError, match="claude-sonnet-5-5"):
+        validate_llm_config(_settings(llm_provider="google"))
 
 
 def test_app_refuses_to_boot_on_a_model_the_provider_cannot_run():
@@ -115,7 +99,6 @@ def test_app_refuses_to_boot_on_a_model_the_provider_cannot_run():
     import sys
 
     env = dict(os.environ, LLM_PROVIDER="anthropic", LLM_MODEL="gemini-2.5-flash")
-    env.pop("JUDGE_MODEL", None)
     result = subprocess.run(
         [sys.executable, "-c", "import app.main"],
         env=env,
@@ -132,8 +115,6 @@ def test_unknown_providers_raise():
         make_stt(_settings(stt_provider="nope"))
     with pytest.raises(ValueError):
         make_loop_llm(_settings(llm_provider="nope"))
-    with pytest.raises(ValueError):
-        make_judge_llm(_settings(llm_provider="nope"))
     with pytest.raises(ValueError):
         make_tts(_settings(tts_provider="nope"), text_filters=[])
 

@@ -293,42 +293,26 @@ class ContextProvider:
         self._messages.append({"role": "assistant", "content": text})
         self._approx_chars += len(text)
 
-    def last_assistant_text(
-        self, max_chars: int = 300, *, adjacent: bool = True
-    ) -> str | None:
-        """FR-60 round 2: the judge's evidence must include the assistant's
-        own preceding reply — after the gate's branch (3) asks "do you
-        want a new document?", the user's bare "yes" has no referent
-        without the question it answers. The cap keeps the TAIL: a reply
-        explains first and asks last, so the head of a long one is the
-        part without the offer (PR #24 round 1).
-
-        Returns only the reply the user's LATEST turn directly follows,
-        else None (round 2): the judge is told this text is what that
-        turn responds to, so an offer from before an earlier user turn
-        must never be passed off as adjacent. A turn can leave no spoken
-        reply at all (a barge-in during a tool round, a fallback that
-        spoke nothing), and a later bare "yeah" would then confirm an
-        offer the user had already declined.
-
-        A tool-call step's text counts (round 4): the model speaks
-        before tool calls, and an offer made in the same step as a
-        call is still the offer. The loop speaks no line of its own,
-        so the only text in an entry that is not the model's is
-        FR-46's cut-off mark.
-
-        `adjacent=False` is FR-68's reading, the opposite rule on
-        purpose: the turn checks want the last reply BEFORE the run of
+    def last_assistant_text(self, max_chars: int = 300) -> str | None:
+        """FR-68: the assistant's last spoken reply BEFORE the run of
         unanswered user turns at the end of the conversation (FR-64
-        leaves such runs), because that reply is still what a bare
-        "yeah" answers and their verdict cannot create anything. It
-        still stops at an older turn: a user message found after
-        anything else has been walked past ends the search."""
+        leaves such runs): that reply is still what a bare "yeah"
+        answers. The cap keeps the TAIL: a reply explains first and
+        asks last, so the head of a long one is the part without the
+        question.
+
+        A tool-call step's text counts: the model speaks before tool
+        calls, and an offer made in the same step as a call is still
+        the offer. The loop speaks no line of its own, so the only text
+        in an entry that is not the model's is FR-46's cut-off mark.
+
+        It stops at an older turn: a user message found after anything
+        else has been walked past ends the search."""
         latest_user_seen = False
         past_trailing_users = False
         for m in reversed(self._messages):
             if m.get("role") == "user":
-                if latest_user_seen and (adjacent or past_trailing_users):
+                if past_trailing_users:
                     return None  # nothing spoken between the turns
                 latest_user_seen = True
                 continue
@@ -351,17 +335,6 @@ class ContextProvider:
                 break
             texts.append(m["content"])
         return texts[::-1]
-
-    def recent_user_texts(self, n: int = 4) -> list[str]:
-        """FR-60: the gate's evidence — the last n USER turns, oldest
-        first. Tool results carry role 'tool' in the neutral format, so
-        role 'user' here is genuinely the user's speech."""
-        texts = [
-            m["content"]
-            for m in self._messages
-            if m["role"] == "user" and isinstance(m["content"], str)
-        ]
-        return texts[-n:]
 
     def _approx_tokens(self) -> int:
         # O(1): the running counter is maintained by every append/update

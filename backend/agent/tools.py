@@ -577,10 +577,10 @@ def build_registry() -> list[Tool]:
             description=(
                 "Create a NEW document on the user's screen: a structured "
                 "summary, a list of action items, or a cleaned-up version "
-                "of the user's idea. Use ONLY when the user explicitly "
-                "asks for a document or write-up — 'write that up', "
-                "'create a summary doc', 'put that in a document'. "
-                "'Give me a summary', 'summarize this', or any question "
+                "of the user's idea. Use when the user asks for something "
+                "to be written down or written up and it does not belong "
+                "in an existing document, or when they ask for a new "
+                "document. 'Give me a summary', 'summarize this', or any question "
                 "is answered OUT LOUD, never by creating a document."
             ),
             parameters={
