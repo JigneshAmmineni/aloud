@@ -569,3 +569,55 @@ message is a prompt. This one said "speak NONE of this reasoning out
 loud" and the agent read it to the user nearly word for word. (3) Check
 the shape of the decision before building a classifier for it. A yes/no
 gate fits a yes/no question, and this was never one.
+
+### Frames, and why "five words" held when "one or two sentences" did not (2026-11-19)
+
+Two things from one evening.
+
+**Frames.** Every behaviour change used to cost the owner the same
+scripted voice conversation. The owner's idea: save one turn of a real
+session up to the model call, fix the mis-heard words by hand, label it
+with the behaviour it tests, and replay it as a single model call
+against the current prompt. The traces already stored every call's full
+input, so a live run of four sessions became 37 frames with no new
+recording. A replay of the whole set takes two minutes and costs cents.
+Two things it taught at once: an expectation written before looking is
+often wrong (one frame "failed" because the document was already in the
+context and no lookup was needed), and one call per frame is noise, so
+every frame runs three to five times and the count is the result.
+
+**The bound that held and the one that did not.** The affirm reply
+("Done.") was reliable. The answer reply ran to three and four
+sentences. Both had a rule in the system prompt and a one-turn
+instruction restating it. The difference was in the wording. Affirm
+said "five words or fewer", gave three whole example replies, and had
+no exception. Answer said "one or two sentences, ideally one", allowed
+a five-point list, had an exception for detail, and sat next to a
+system-prompt line saying "You may end by offering to go deeper" while
+the turn instruction said to add no offer. Every long answer ended in
+exactly that offer.
+
+What was tried, measured on the frames:
+- An example summary sentence. It fixed the sentence count at two and
+  made replies longer than the plain rule did. The model copied the
+  example's shape, not its length.
+- A rule for what a summary contains ("the point, not the inventory").
+  Shorter on small documents, not on a large one.
+- A word budget ("under about thirty words"). The shortest replies on
+  every size.
+- Removing the contradiction and the list exception, and saying "one
+  sentence, a second only if". Summaries went from 50 to 80 words down
+  to 30 to 45, and "walk me through" and "explain in detail" stayed
+  long.
+
+What did not move: speech before tool calls ("I'll look for them.").
+Three wordings, including telling the model that every word it writes
+is spoken aloud. It is the model's reasoning about where something goes
+with nowhere else to be written, and a prompt did not relocate it.
+
+Lessons: (1) a countable bound with no exits holds, a soft one with
+exits is read as the upper end. (2) Two prompts that disagree are
+resolved in favour of the longer reply. (3) Test an example before
+adding it. (4) A summary's length did not grow with the document: 57
+words for 1,000 characters, 68 for 39,000. The model has a spoken-reply
+size in mind, and the prompt has to name a smaller one.

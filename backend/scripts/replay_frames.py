@@ -12,7 +12,7 @@ ones. So a change to any of those can be checked in a minute, before
 anyone has the same conversation with the agent again.
 
     docker compose run --rm -v "${PWD}/local-evals/frames:/set" backend \
-        python scripts/replay_frames.py /set [--runs 3] [--only TEXT]
+        python scripts/replay_frames.py /set [--runs 3] [--only 1.07,summary] [--show]
 
 It checks the first decision of a turn (which tool, which document, what
 is said). It cannot check multi-step work, speech recognition, the turn
@@ -30,8 +30,11 @@ agent/prompts.py at replay time. `expect` may hold:
     calls_any        tool names of which at least one must be called
     calls_none       tool names that must not be called
     target_document  every edit_document call must carry this document_id
+    quiet_work       true: a call that uses a tool says nothing with it
     max_sentences    bound on the spoken text
     max_words        bound on the spoken text
+    min_words        the spoken text is at least this long (explain, recite)
+    must_say         phrases the spoken text must contain
     must_not_say     phrases the spoken text must not contain
 
 Frames hold transcript text, so the folder is git-ignored and is never
@@ -96,12 +99,19 @@ def failures(expect: dict, text: str, calls: list[LLMToolCall]) -> list[str]:
                 out.append(
                     f"edited document {c.arguments.get('document_id')}, expected {target}"
                 )
+    if expect.get("quiet_work") and names and text:
+        out.append("spoke while calling a tool")
     sentences = [s for s in re.split(r"(?<=[.!?])\s+", text) if s]
     if len(sentences) > expect.get("max_sentences", len(sentences)):
         out.append(f"{len(sentences)} sentences, at most {expect['max_sentences']}")
     words = len(text.split())
     if words > expect.get("max_words", words):
         out.append(f"{words} words, at most {expect['max_words']}")
+    if words < expect.get("min_words", 0):
+        out.append(f"{words} words, at least {expect['min_words']}")
+    for phrase in expect.get("must_say", []):
+        if phrase.lower() not in text.lower():
+            out.append(f"did not say {phrase!r}")
     for phrase in expect.get("must_not_say", []):
         if phrase.lower() in text.lower():
             out.append(f"said {phrase!r}")
@@ -122,14 +132,18 @@ async def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("folder")
     parser.add_argument("--runs", type=int, default=3)
-    parser.add_argument("--only", default="", help="replay frames whose id or label contains this")
+    parser.add_argument(
+        "--only", default="", help="replay frames whose id or label contains one of these (comma-separated)"
+    )
+    parser.add_argument("--show", action="store_true", help="print every reply, not only the misses")
     args = parser.parse_args()
 
     frames = [
         json.loads(p.read_text(encoding="utf-8"))
         for p in sorted(Path(args.folder).glob("*.json"))
     ]
-    frames = [f for f in frames if args.only in f["id"] + " " + f["label"]]
+    wanted = [t for t in args.only.split(",") if t] or [""]
+    frames = [f for f in frames if any(t in f["id"] + " " + f["label"] for t in wanted)]
     if not frames:
         print(f"no frames in {args.folder}")
         return 1
@@ -148,9 +162,10 @@ async def main() -> int:
         status = f"{passed}/{args.runs}" if gated else "recorded"
         if gated and passed < args.runs:
             failed_frames += 1
-        print(f"{status:>8}  {frame['id']:<6} {frame['label']}")
+        words = [len(text.split()) for text, _ in replies]
+        print(f"{status:>8}  {frame['id']:<6} {frame['label']:<42} words spoken {words}")
         for (text, calls), verdict in zip(replies, verdicts):
-            if verdict or not gated:
+            if verdict or not gated or args.show:
                 called = ", ".join(c.name for c in calls) or "no tool"
                 print(f"            [{called}] {text[:300]!r}")
                 for reason in verdict:

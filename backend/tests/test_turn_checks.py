@@ -163,8 +163,9 @@ def test_no_verdict_is_today_s_behaviour():
 
 def test_the_answer_instruction_leaves_explaining_and_reading_out_reachable():
     text = ANSWER_INSTRUCTION.lower()
-    assert "one or two sentences, ideally one" in text
+    assert "answer in one sentence" in text and "add a second only if" in text
     assert "explain in detail" in text and "read something out" in text
+    assert "word for word" in text
 
 
 def test_each_switch_off_skips_its_decisions():
@@ -409,7 +410,10 @@ def test_with_a_check_off_the_prompt_keeps_today_s_rule_and_only_that_rule():
 def test_the_three_answer_modes_are_in_every_assembly(checks_on):
     prompt = build_system_prompt(checks_on=checks_on)
     assert "five words or fewer" in prompt
-    assert "One or two sentences, ideally one" in prompt
+    assert "One sentence. Add a second only when" in prompt
+    # the two prompts must not disagree: the turn's instruction forbids an
+    # unasked offer, so the system prompt may not invite one
+    assert "offering to go deeper" not in prompt
     assert "only when the user explicitly asks" in prompt
     assert "word for word" in prompt
     assert "and completely" not in prompt and "Keep replies brief" not in prompt

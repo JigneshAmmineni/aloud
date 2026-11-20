@@ -2909,7 +2909,8 @@ Requirement numbering stays stable; removed numbers are not reused.*
 
 - **FR-66** **The affirm, answer and edit-and-speak outcomes are each
   bound by one instruction, added to that turn's calls only.**
-  - *Affirm:* close the exchange with any short phrase, five words or
+  - *Affirm:* do the work with nothing said before or during it, then
+    close the exchange with any short phrase, five words or
     fewer ("Okay.", "Done.", "Sounds good.") — after a task or tool
     call the user gave has finished, or when there is nothing more to
     say — and always with at least a word (a step with no text is
@@ -2917,12 +2918,14 @@ Requirement numbering stays stable; removed numbers are not reused.*
     closing, not a report: it does not by itself mean that work was
     done. The bound is on the turn's closing reply; what an earlier
     step said before a tool call (FR-43) is not counted.
-  - *Answer:* one or two sentences, ideally one; when the user needs
-    several items, at most five short points and nothing after them; no
-    extra observation, caveat, follow-up question or offer that was not
-    asked for. One exception, in the instruction's own words: a message
+  - *Answer:* one sentence; a second only if it carries something the
+    user needs that the first could not hold; about thirty words in
+    all; no extra observation, caveat, follow-up question or offer that
+    was not asked for; a lookup the answer needs is made without a word
+    said first. One exception, in the instruction's own words: a message
     that explicitly asks for an explanation in detail, a walk-through
-    or something read out takes the length it needs, so mode 3 stays
+    or something read out takes the length it needs (read out word for
+    word), so mode 3 stays
     the model's to choose (FR-72). This restates the system prompt's
     mode 2 on the turn itself, because in the first live run the prompt
     alone did not hold: answers ran to three sentences and an unasked
@@ -3164,13 +3167,14 @@ Requirement numbering stays stable; removed numbers are not reused.*
      both checks are on (FR-73): with either off, today's
      listening-sound rule covers the case, and the two are never both
      present.
-  2. **Summary — the default for anything that needs an answer.** One
-     or two sentences, ideally one. A short spoken list only when the
-     user needs several items: at most five points, each one clause,
-     two at most; the sentence bound does not apply to the list, the
-     per-point bound does. It may close with an offer to go deeper.
+  2. **Summary — the default for anything that needs an answer,
+     a request to summarize a document, a plan or the conversation
+     included.** One sentence; a second only when it carries something
+     the user needs that the first could not hold; about thirty words
+     in all. It gives the point, not the inventory, and never ends with
+     an offer, a caveat or a question that was not asked for.
   3. **Explain or recite — only on an explicit ask** ("explain", "go
-     into detail", "read me that section"). As long as the content
+     into detail", "walk me through", "read me that section"). As long as the content
      needs, still conversational, and it may read the requested part of
      a document word for word (FR-53's verbal contract is amended to
      match).
