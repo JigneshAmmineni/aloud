@@ -234,15 +234,17 @@ errors corrected, 2 written by hand for rows not said live: 2.4 and
 3.4). `backend/scripts/replay_frames.py` replays them, one model call
 per run.
 
-First replay, 3 runs each, on the same commit: 30 of 35 frames passed
-every run. All 24 frames about where a write goes, or whether anything
-is written, passed 3 of 3, including the two October shapes (2.4 "note
-that down" mid-discussion, 1.7 and 2.1 summaries) and the two shapes
-from 2026-11-16 (1.4, 3.5). The five that failed are all finding 1: the
-summaries 1.7 (0 of 3), 2.1 (2 of 3) and 3.3 (0 of 3), and the answers
-4.5 (1 of 3) and 4.9 (0 of 3), every miss a third or fourth sentence.
-Frame 2.3 is recorded, not gated: it edited in 3 of 3. Frame 4.14 did
-not repeat the spoken "They want…" in 3 runs.
+First replay, 3 runs each, on the same commit: 29 of the 34 gated
+frames passed every run. No gated frame missed on a tool decision in
+any run: nothing was created, edited or looked up against its
+expectation, including the October shapes (2.4 "note that down"
+mid-discussion edits the plan; the summaries 1.7, 2.1 and 3.3 write
+nothing) and the two shapes from 2026-11-16 (1.4 and 3.5 create at
+once). The five that failed are all finding 1, every miss a third or
+fourth sentence: the summaries 1.7 (0 of 3), 2.1 (2 of 3) and 3.3 (0 of
+3), and the answers 4.5 (1 of 3) and 4.9 (0 of 3). Frame 2.3 is
+recorded, not gated: it edited in 3 of 3. Frame 4.14 did not repeat the
+spoken "They want…" in 3 runs.
 
 A separate replay of frame 2.1 against larger documents (4 runs per
 cell) showed the summary's length does not grow with the document: a
