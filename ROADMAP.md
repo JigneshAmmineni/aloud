@@ -774,6 +774,53 @@ the run before it.
 **Depends on:** §4.15 (the outcomes it asserts on), feature 7 (traces
 it reads), and ideally feature 5 (a context it can set up per row).
 
+**First step, in use since 2026-11-19 (owner's idea):** frames. One
+turn of a real session is saved up to the model call, with recognition
+errors corrected by hand, a label, and what the first call must do
+(which tool, which document, how much is said).
+`backend/scripts/replay_frames.py` replays each as a single model call
+against the current prompt. It checks one decision per turn and nothing
+after it, so it is the cheap check before a live run, not this suite.
+The first 35 frames came from the create-gate run
+(`docs/evals/2026-11-16-create-gate-removal.md`).
+
+### 12. Transcript cleanup pass — fixing mis-heard words before the agent acts
+
+**Vision (owner, 2026-11-19).** A pass over the recognised text that
+repairs obvious mis-hearings before the agent reads it, the way
+dictation tools such as Wispr Flow clean up what was said. Today the
+agent gets the recogniser's text as it is and either guesses, asks, or
+acts on the wrong words.
+
+**Evidence (live run, 2026-11-19).** "Add that to the plan" arrived as
+"Yeah. Back to the plan. That sounds good." and nothing was written for
+two turns. "Lake Weekend Plan" arrived as "late weekend plan", "camping
+plan" as "accounting plan", "first aid kit" as "For state kit", and a
+request to reorganise a document arrived as five fragments including
+"Gare and Food". The model repaired some of these itself ("two tanks"
+to "two tents") and said so out loud, which is its own cost.
+
+**Rough scope.** A correction step between the recogniser and the turn
+checks, with what makes a repair possible in front of it: the titles
+and headings of the user's documents, the last few turns, and words the
+user has used before. It has to fit inside the response-time budget,
+and a wrong repair is worse than none, so an uncertain word is left
+alone.
+
+**Open questions (spec-time).**
+- Which model, and whether it runs on every turn or only on turns that
+  look wrong (a low recogniser confidence, a word that fits nothing).
+- Whether the recogniser can be given the vocabulary up front instead
+  (keyterm prompting with document titles and names, if Flux supports
+  it; unverified), which costs no extra call.
+- Whether the user sees the corrected text or the raw text in the
+  transcript.
+- How it is measured: the corrected frames of feature 11 already pair
+  what was heard with what was said.
+
+**Depends on:** feature 5 (the document titles and recent turns it
+reads) and feature 8 (noise is the other source of wrong words).
+
 ## Process infrastructure
 
 Per-PR CI (ruff + pytest, frontend build) and the tailored Claude review are
