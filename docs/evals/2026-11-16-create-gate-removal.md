@@ -49,7 +49,9 @@ does a live run only when they pass.
 
 A frame checks the first call of a turn: which tool it picks, which
 document, and what it says. It does not check multi-step work, speech
-recognition, the turn checks (those are a separate model) or audio.
+recognition or audio. Whether the agent stays silent is decided by the
+turn checker, a separate model, so those rows replay as one checker call
+instead (session 4 marks which is which).
 Frames hold transcript text and live in `local-evals/`, never committed.
 
 The bar is "right when it is obvious". When the destination is not
@@ -59,7 +61,7 @@ not gated.
 ## Scripted turns (owner, live voice session, local dev server)
 
 Say each line as written. Small slips do not matter; the frame text is
-corrected afterwards. Three separate sessions, in this order. The
+corrected afterwards. Four separate sessions, in this order. The
 workspace should already hold at least two unrelated documents from
 earlier sessions.
 
@@ -107,10 +109,43 @@ earlier sessions.
 | 3.5 | "Start a list for my apartment move: boxes, packing tape, and a truck rental." | create-with-many-unrelated-documents | `create_document` at once; no listing step first; no question. This is the shape of the turn that failed in session `5dc89ade…`. |
 | 3.6 | "Thanks, that's all." | closing-no-tool | a few words; no tool call |
 
+### Session 4: pauses and interruptions (attach "Lake Weekend Plan" first)
+
+The standing turn-taking set. Words in square brackets are directions,
+not speech. The last column says what can be replayed later without a
+voice: "checker" is one call to the turn checker on the recorded
+evidence (`scripts/bench_turn_checks.py` already does this), "model" is
+one call to the main model on the conversation as the interruption left
+it, and "live only" needs the audio path.
+
+| # | Say | Label | The turn passes when | Replay |
+|---|---|---|---|---|
+| 4.1 | "I think we should probably" [stop, count to five silently] "go with the cheaper campsite." | pause-mid-sentence | silence through the whole pause; then one reply to the whole thought | checker |
+| 4.2 | "Can you put the" [stop, count to three] "first aid kit under gear instead of the packing list." | pause-mid-request | silence through the pause; then one edit that uses the whole sentence; a few words | checker, model |
+| 4.3 | "So maybe we could, um" [stop and say nothing for ten seconds] | trailing-off | silence for all ten seconds; the indicator returns to Listening | checker |
+| 4.4 | "Never mind." | nothing-asked | silence or one short line; no tool | checker |
+| 4.5 | "What time should we leave on Friday to get there before dark?" | answer-after-silences | a one or two sentence answer that ignores 4.3 and 4.4 | model |
+| 4.6 | [after its answer] "Okay." [wait for it] "Right, right." [wait] "Hmm." | acknowledgements | nothing spoken, all three times | checker |
+| 4.7 | "Walk me through the whole plan in detail." [let it speak for about five seconds] "Hold on." | hold-on-mid-reply | it stops within a second and stays silent | live only |
+| 4.8 | "Okay. Continue." | resume-from-what-was-heard | it picks up after the last thing actually heard, not from the start | model |
+| 4.9 | "What should we cook on the first night?" [the moment it starts answering] "Actually, how cold does it get at the lake in December?" | barge-in-first-second | it answers only the second question and does not refer to the first answer as given | model |
+| 4.10 | "Reorganize the whole plan into three sections: travel, gear, and food." [at once, before it says anything] "Wait, make it four sections, and add a budget section." | interrupt-while-working | the plan ends with four sections including budget; one confirmation; the document is not left half-edited | model |
+| 4.11 | "Add a paragraph about what to do if it rains." [at once] "Stop." | stop-while-working | nothing further is spoken. Whether the paragraph landed is recorded: a write already in flight finishes by design. | live only |
+| 4.12 | "How long is the drive?" [at once, before the reply] "And also, do we need a permit for the lake?" | two-questions-before-the-reply | both are answered in one reply; the session keeps working | model |
+| 4.13 | "Explain the gear section in detail." [in the middle of its reply, say "mm-hmm"] | backchannel-mid-reply | recorded, not gated: it stops and does not resume (accepted limit); note how it feels | live only |
+| 4.14 | "Read me the whole plan." [after two sentences] "Stop." | stop-mid-reply | it stops and stays stopped | live only |
+| 4.15 | [mumble a few unclear words on purpose] | unclear-speech | "say that again?" in some form; never "Hmm."; no tool | model |
+| 4.16 | "That's all for now." | closing | silence or one short line | checker |
+
 ## Acceptance bar
 
 - Every row passes as its last column says, except 2.9, where asking is
   recorded and only a write into the camping plan fails.
+- Session 4: no reply into a pause (4.1 to 4.3), no reply to an
+  acknowledgement (4.6), and no request left unanswered (4.5, 4.12).
+  Each wrongly silent and each wrongly replying turn is counted.
+  After 4.8, 4.9 and 4.10 the conversation in `llm_traces` shows the cut
+  reply ending at what was heard, with the cut-off mark.
 - No turn's transcript contains "the tool says", "existing document
   first", or "do you want a new document".
 - The original October failure does not come back: rows 1.7, 2.1 and 3.3
