@@ -165,8 +165,93 @@ it, and "live only" needs the audio path.
 
 ## Results
 
-Not run yet. The run needs the owner's voice on the local dev server.
-Resume point: start the dev containers on the commit that removes the
-gate, then session 1 row 1.1. After the run: results appended here, and
-the frames and the replay script are built from the three sessions'
-traces.
+### Run 1: owner, local dev server, 2026-11-19
+
+Four sessions on commit `f6ea238` (`80b99310…`, `6202733f…`,
+`733570ac…`, `0b7acaa8…`), 55 turns with a model call. Rows 2.4, 3.4,
+4.15 and the "Hmm." of 4.6 were not said.
+
+**Where writes went: every gated row passed.**
+
+- 1.4 and 3.5 created the document at once, with no question and no
+  listing step. First audio 3.1 s and 2.9 s. The same kind of turn on
+  2026-11-16 took 4.5 s to reach a question and a second turn of 5.0 s
+  to reach the document.
+- 1.5, 1.6, 1.12 and the edits of session 2 landed in the plan. No stray
+  document was created anywhere in the run.
+- 1.7, 2.1 and 3.3 (summaries) wrote nothing. The October failure did
+  not come back.
+- 1.11, 2.9 and 2.10 each made the separate document that was asked for.
+- No transcript contains "the tool says", "existing document first" or
+  "do you want a new document".
+
+**Findings, none of them about the removed gate:**
+
+1. **Summaries and answers run past "one or two sentences".** 1.7 was 3
+   sentences (57 words), 2.1 was 2 (67 words), 3.3 was 4. The factual
+   answers in 4.5 and 4.9 were 3 and 4 sentences, each ending in an
+   unasked offer.
+2. **3.1 edited the wrong one of two near-identical documents.** "Add a
+   headlamp to my camping plan" found both "Lake Weekend Plan" and the
+   "Camping Plan Summary" that 2.10 had created, and edited the summary
+   because its title says "camping plan". It took four steps and 17 s.
+3. **2.3 edited without being asked.** After 2.2 the agent offered "Want
+   me to update the doc?", and it read the next statement about the
+   forecast as a yes. It then said "The doc already said the
+   nineteenth", which was its own edit.
+4. **Narration before tool calls is back in places.** "I'll find the
+   camping plan first.", "Let me look for them.", and in 4.14, spoken
+   aloud, "They want the whole document read word for word, so I'll pull
+   the current version first."
+5. **1.13:** no write and no tool names, but three sentences ending in a
+   question where the prompt asks for one short sentence.
+6. **Speech recognition cost three rows a detour.** 1.9 was heard as
+   "Yeah. Back to the plan. That sounds good." and nothing was written
+   until two turns later. 1.10 ("late weekend plan") and 3.3
+   ("accounting plan") each cost one clarifying turn.
+
+**Session 4 (pauses and interruptions):**
+
+- 4.1, 4.2, 4.3: silent through every pause, then one reply to the whole
+  thought. 4.6: silent on "Okay." and "Right. Right.".
+- 4.4 was heard as "No, ma'am." and got "Okay, I'm here.".
+- 4.7 and 4.8: it stopped on "Hold on." and "Continue" picked up from
+  what had been heard.
+- 4.9: it answered only the second question.
+- 4.10: the request arrived as five fragments ("Gare and Food" among
+  them), four calls were cut, and the result had four sections with an
+  invented fourth. One more turn fixed it. The document was never left
+  half-edited.
+- 4.11: the paragraph landed and nothing more was spoken after "Stop.".
+- 4.12: the first question was heard as "How long is the trial?" and
+  answered on its own before the second arrived.
+- 4.13, 4.14, 4.16: it stopped and stayed stopped each time.
+
+### Frames built from run 1
+
+35 frames in `local-evals/frames/` (33 recorded turns with recognition
+errors corrected, 2 written by hand for rows not said live: 2.4 and
+3.4). `backend/scripts/replay_frames.py` replays them, one model call
+per run.
+
+First replay, 3 runs each, on the same commit: 30 of 35 frames passed
+every run. All 24 frames about where a write goes, or whether anything
+is written, passed 3 of 3, including the two October shapes (2.4 "note
+that down" mid-discussion, 1.7 and 2.1 summaries) and the two shapes
+from 2026-11-16 (1.4, 3.5). The five that failed are all finding 1: the
+summaries 1.7 (0 of 3), 2.1 (2 of 3) and 3.3 (0 of 3), and the answers
+4.5 (1 of 3) and 4.9 (0 of 3), every miss a third or fourth sentence.
+Frame 2.3 is recorded, not gated: it edited in 3 of 3. Frame 4.14 did
+not repeat the spoken "They want…" in 3 runs.
+
+A separate replay of frame 2.1 against larger documents (4 runs per
+cell) showed the summary's length does not grow with the document: a
+median of 57 words for 1,000 characters, 60 for 4,000 and 68 for
+39,000. Adding a rule to the prompt (say what it is and its one or two
+main points) held it to 2 sentences and 35 to 60 words; adding "under
+about thirty words" to that gave 33, 36 and 50 words. An example
+sentence did not shorten it further. No wording change is applied yet:
+the owner's decision.
+
+Still open: rows 4.15 and the "Hmm." of 4.6, and how fast it stops on
+an interruption (4.7, 4.14), which only a live run can show.

@@ -372,7 +372,11 @@ backend/
               show_trace.py (FR-49 developer trace pretty-printer; superuser
               bypass via DATABASE_URL, guarded), smoke_llm.py (one live
               call per LLM client through the factories — run after a key
-              or model change), spike_gemini_stream.py (the FR-48 spike,
+              or model change), replay_frames.py (replays recorded turns
+              from the git-ignored local-evals/frames as single model
+              calls against the current prompt — the cheap check before
+              a live voice run), bench_turn_checks.py (the same idea for
+              the turn checker), spike_gemini_stream.py (the FR-48 spike,
               kept as reference)
   tests/      SQLite-backed suite + Postgres-only lane (test_rls.py,
               test_migration.py, test_documents_pg.py)
