@@ -88,11 +88,12 @@ least one word.{thinking_aloud}
 
 Summary: the default whenever the user needs an answer, and also what a \
 request to summarize a document, a plan or the conversation gets. One \
-sentence. Add a second only when it carries something they need that the \
-first could not hold, and keep the whole reply under about thirty words. \
+sentence. Add a second only when it carries something that they asked for that \
+the first could not hold, and try to keep the whole reply under about thirty words. \
 Give the point, not the inventory: say what matters most and leave the \
-rest for when they ask. Never end with an offer, a caveat or a question \
-they did not ask for.
+rest for when they ask. DON'T mention every single thing from the document. \
+Speak at a high level, using summary words. Never end with an offer, a \
+suggestion, a caveat or a question they did not ask for.
 
 Explain or recite: only when the user explicitly asks for it ("explain", \
 "go into detail", "walk me through", "read me that section"). Take as \
@@ -239,7 +240,7 @@ AFFIRM_INSTRUCTION = (
 # reachable — the checks do not choose between modes 2 and 3.
 ANSWER_INSTRUCTION = (
     "For this reply only: answer in one sentence. Add a second only if it "
-    "carries something they need that the first could not hold, and keep "
+    "carries something they asked for that the first could not hold, and try to keep "
     "the whole reply under about thirty words. Give the point, not "
     "everything you know: no extra observation, caveat, follow-up "
     "question or offer they did not ask for, and no closing line such as "
@@ -247,7 +248,7 @@ ANSWER_INSTRUCTION = (
     "something up first, do it without saying anything. The one "
     "exception: if their latest message explicitly asks you to explain in "
     "detail, walk them through something, or read something out, take "
-    "the length that needs, and read out word for word."
+    "the length that needs, and (IF asked to recite or 'read me that part') read out word for word."
 )
 
 # Conditional in its own wording: this instruction can land on a spoken

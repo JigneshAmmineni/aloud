@@ -118,6 +118,28 @@ every miss is length or narration.
 tool frames do not pass 2 of 3 on quiet work (3.02, 4.02, 4.10), and
 1.08, 2.01, 4.05 and 4.09 do not pass every run on length.
 
+### Owner's wording, 2026-11-20
+
+The owner edited the wording by hand before it was committed: the
+second sentence is for "something they asked for", the thirty words are
+something to "try to keep", a summary does not "mention every single
+thing from the document" and speaks "at a high level, using summary
+words", a closing suggestion is ruled out with the offer, and reading
+out word for word applies when asked to recite. That is the wording
+that ships.
+
+Full set on it, 3 runs each: 26 of 37 frames passed every run, with no
+miss on a tool decision. "Give me a summary of the document." (1.07)
+came back as one 35-word sentence in all three runs, naming the
+document's sections instead of listing their contents. The other answer
+frames are where they were (36 to 51 words), the long forms kept their
+length (93 to 172 words), and narration before tool calls is unchanged.
+Frame 4.14 spoke before reading the plan in 2 of 3 runs; it had not in
+the 3 runs before.
+
+**Decision (owner, 2026-11-20):** nothing more for now. Reply length is
+acceptable as it is, and narration stays accepted as in FR-43.
+
 **Open for the owner.**
 - Whether 30 to 45 words in two sentences is short enough. A lower
   stated budget is one more replay away.
