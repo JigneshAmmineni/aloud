@@ -158,11 +158,8 @@ async def main() -> int:
         json.loads(p.read_text(encoding="utf-8"))
         for p in sorted(Path(args.folder).glob("*.json"))
     ]
-    wanted = [t for t in args.only.split(",") if t] or [""]
-    frames = [f for f in frames if any(t in f["id"] + " " + f["label"] for t in wanted)]
-    if not frames:
-        print(f"no frames in {args.folder}")
-        return 1
+    # Checked over the WHOLE folder, before --only narrows it: a typo in a
+    # frame this run skips is still a typo, and --only is the usual mode.
     mistyped = {
         f["id"]: sorted(set(f.get("expect") or {}) - EXPECT_KEYS)
         for f in frames
@@ -172,6 +169,11 @@ async def main() -> int:
         for frame_id, keys in mistyped.items():
             print(f"{frame_id}: unknown expect key(s) {keys}")
         return 2
+    wanted = [t for t in args.only.split(",") if t] or [""]
+    frames = [f for f in frames if any(t in f["id"] + " " + f["label"] for t in wanted)]
+    if not frames:
+        print(f"no frames in {args.folder}")
+        return 1
 
     llm = make_loop_llm(load_settings())
     schemas = registry_schemas(build_registry())
@@ -195,7 +197,11 @@ async def main() -> int:
                 print(f"            [{called}] {text[:300]!r}")
                 for reason in verdict:
                     print(f"              - {reason}")
-    print(f"\n{len(frames) - failed_frames} of {len(frames)} frames passed every run")
+    gated_frames = sum(1 for f in frames if f.get("expect"))
+    print(
+        f"\n{gated_frames - failed_frames} of {gated_frames} gated frames passed "
+        f"every run ({len(frames) - gated_frames} recorded only, not counted)"
+    )
     return 1 if failed_frames else 0
 
 

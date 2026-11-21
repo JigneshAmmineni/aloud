@@ -496,3 +496,29 @@ framework and not the checks. Listen for, beyond the script's rows:
 - the pause between a narration and its closing word (row 32);
 - `turn.straggler_dropped` warnings in the backend log;
 - with `TTS_PROVIDER=assemblyai`: the first run of that voice at all.
+
+### The AssemblyAI voice, first live sessions — owner, local dev server, 2026-11-15
+
+Recorded here because the watch list above names "the first run of that
+voice at all" and no result had been written down.
+
+- **What was heard.** The voice was choppy: it stopped for half a second
+  to a second in the middle of sentences and words, then went on.
+- **Where it came from.** The development laptop, not the voice and not
+  the build. The laptop was out of memory and its processor was
+  saturated (95 to 100%, 0.3 to 0.4 GB free), and the backend's one
+  event-loop thread took 27 to 31 seconds to send 17 seconds of speech.
+  After a restart the same test sent 17 seconds in 16 to 17.5.
+- **What rules the voice out.** The service returned 17 seconds of
+  audio in about 1.5 seconds with no gaps between chunks, and the audio
+  saved straight from it (16.5 s at 24 kHz) has no silent stretches.
+- **Not ruled out.** Whether Pipecat 1.16 costs more processor time per
+  reply than 1.3 did. No 1.3 image was at hand to compare.
+- **Since then.** The four sessions of 2026-11-19
+  (`2026-11-16-create-gate-removal.md`) ran on Pipecat 1.16 with no
+  audio complaint from the owner. Which voice they used was not
+  recorded: the usage rows do not name the provider.
+
+Still deferred from this file's run 2: the full 36-row script, and the
+response time of the checks from the VM. Resume point: part 3, row 1,
+on the commit that merges.

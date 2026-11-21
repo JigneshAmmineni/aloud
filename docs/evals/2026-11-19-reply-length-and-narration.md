@@ -112,7 +112,7 @@ none held.
 called or which document is edited, before or after. Frame 2.3 is
 outside the gated set and edits in every replay, under either wording
 (`2026-11-16-create-gate-removal.md`, "Against the bar"). Full set on the final
-wording, 3 runs each: 27 of 37 frames passed every run (25 before), and
+wording, 3 runs each: 26 of the 36 gated frames passed every run (24 before), and
 every miss is length or narration.
 
 **Against the bar.** Met: no tool-decision regression; 4.07, 4.13 and
@@ -130,7 +130,7 @@ words", a closing suggestion is ruled out with the offer, and reading
 out word for word applies when asked to recite. That is the wording
 that ships.
 
-Full set on it, 3 runs each: 26 of 37 frames passed every run, with no
+Full set on it, 3 runs each: 25 of the 36 gated frames passed every run, with no
 miss on a tool decision. "Give me a summary of the document." (1.07)
 came back as one 35-word sentence in all three runs, naming the
 document's sections instead of listing their contents. The other answer

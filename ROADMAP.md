@@ -871,7 +871,12 @@ features land:
   the interruption. Two differences seen in simulation, to listen for
   live: a second burst of speech inside a turn that is still open no
   longer re-interrupts, and after an end of turn with an empty
-  transcript the next speech start is not announced. Three calls in our
+  transcript the next speech start is not announced. The second was
+  followed to its consequence in PR #28's round 4 review and does not
+  bite: the loop waits for a speech start only after it has consumed a
+  turn, and an empty turn is never consumed, so the missing
+  announcement lands while the loop is not waiting for one. The first
+  is still unheard. Three calls in our
   code are deprecated and go away in Pipecat 2.0: `MarkdownTextFilter`
   and `text_filters` (agent/sanitizer.py; replaced by
   `text_transforms`), and `PipelineTask` / `PipelineRunner`

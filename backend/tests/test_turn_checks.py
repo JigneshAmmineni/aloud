@@ -627,6 +627,22 @@ def test_a_checker_that_never_answers_lets_the_turn_start_at_the_ceiling():
     assert output["outcome"] == "plain+bypass"
 
 
+def test_the_bypass_warning_names_only_the_questions_that_were_sent():
+    """PR #28 round 4: with a check switched off, a timeout listed the
+    off question as unanswered too, so the line that makes the bypass
+    rate readable overstated every failure by a question."""
+    seen, sink = _events("turn.check_bypassed")
+    try:
+        cfg = CheckSettings(done_on=False, mode_on=True, model="jev-test", timeout_s=0.05)
+        h = checked_loop([[LLMTextDelta("Sure."), _done()]], cfg=cfg, delay=5.0)
+        asyncio.run(h.loop._run_turn("add it"))
+    finally:
+        logger.remove(sink)
+    assert len(seen) == 1
+    assert sorted(seen[0]["extra"]["questions"]) == ["speak", "write"]
+    assert "done" not in seen[0]["message"]
+
+
 def test_a_response_missing_one_answer_bypasses_only_what_needs_it():
     partial = answers(write=0.0, nothing=1.0, answer=0.0)
     del partial[DONE]

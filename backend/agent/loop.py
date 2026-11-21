@@ -707,10 +707,12 @@ class AgentLoopProcessor(FrameProcessor):
                 bypass_reason=reason,
             ).info(f"turn check: {detail} in {ms}ms")
             if plan.bypass and not interrupted:
+                # only what was SENT: a question whose switch is off was
+                # never asked, so it cannot have gone unanswered
                 unanswered = [
                     qid
                     for qid, a in per_question.items()
-                    if a["status"] != CHECK_ANSWERED
+                    if qid in asked and a["status"] != CHECK_ANSWERED
                 ]
                 log.bind(
                     event="turn.check_bypassed",
@@ -797,6 +799,11 @@ class AgentLoopProcessor(FrameProcessor):
                     event="speech_gap.no_playback",
                     turn_id=state.turn_id,
                     step=state.step,
+                    # a long text here is more likely synthesis slower
+                    # than the start window than text the filters reduced
+                    # to nothing
+                    earlier_chars=state.earlier_speech_chars,
+                    waited_s=STEP_SPEECH_START_MAX_S,
                 ).info("the earlier step's text produced no audio; not waiting")
         except asyncio.TimeoutError:
             # means a broken signal and nothing else: the ceiling is far

@@ -181,7 +181,12 @@ def build_pipeline_parts(settings: Settings, documents=None, *, session_id=""):
     user_agg, _ = LLMContextAggregatorPair(
         scratch,
         user_params=LLMUserAggregatorParams(
-            user_turn_strategies=ExternalUserTurnStrategies()
+            user_turn_strategies=ExternalUserTurnStrategies(),
+            # A turn that ends with no transcript gets no reply: FR-64
+            # owns that case. Pipecat 1.16's default answers such a turn
+            # when it interrupted the bot, by adding a message of its own
+            # to the scratch context.
+            empty_user_turn=None,
         ),
     )
     return stt, tts, context_provider, scratch, user_agg

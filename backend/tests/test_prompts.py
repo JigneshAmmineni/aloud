@@ -20,6 +20,28 @@ def test_system_prompt_contains_no_banned_words(checks_on):
         assert word not in prompt
 
 
+def test_no_prompt_text_in_the_module_carries_a_banned_word():
+    """C-3 over EVERY block the model is sent or the agent speaks, not
+    only the assembled system prompt: §4.15's one-turn instructions, the
+    wrap-up, the fallback lines and the greeting trigger are prompt text
+    too, and a block added later is covered without a new test."""
+    import agent.prompts as prompts_mod
+
+    texts = [
+        v
+        for name, v in vars(prompts_mod).items()
+        if not name.startswith("__")
+        and name != "BANNED_WORDS"
+        and isinstance(v, (str, tuple))
+    ]
+    blob = " ".join(
+        t.lower() if isinstance(t, str) else " ".join(map(str, t)).lower()
+        for t in texts
+    )
+    for word in BANNED_WORDS:
+        assert word not in blob
+
+
 @BOTH
 def test_system_prompt_is_nonempty(checks_on):
     assert build_system_prompt(checks_on=checks_on).strip()
