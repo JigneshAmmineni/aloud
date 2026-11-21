@@ -1,9 +1,15 @@
-pipecat-ai[webrtc,deepgram,google,cartesia]~=1.3.0
+# assemblyai: the voice behind TTS_PROVIDER=assemblyai. No `google` extra:
+# nothing here uses Pipecat's Google services, and from 1.16 that extra
+# wants google-genai 3.x, which conflicts with the pin below.
+pipecat-ai[webrtc,deepgram,cartesia,assemblyai]~=1.16.0
 # Direct dependency of the Gemini loop client (agent/providers.py) — do not
 # rely on pipecat's google extra pulling it in transitively.
 google-genai~=1.75
 # Direct dependency of the Claude loop client (agent/providers.py).
 anthropic~=2.8
+# Direct dependency of the turn checker (agent/providers.py): Jev is one
+# HTTP request. Also the transport the tests fake it with.
+httpx~=0.28
 fastapi
 python-multipart
 firebase-admin
@@ -14,6 +20,5 @@ pypdf
 python-dotenv
 pytest
 aiosqlite
-httpx
 ruff
 watchfiles  # DEV-ONLY (scripts/dev_watch.py; prod runs uvicorn directly) — explicit, not a uvicorn extra

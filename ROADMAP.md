@@ -173,6 +173,23 @@ The rules:
 
 ### 3.3 Thinking-partner mode — proactive reasoning & ambient capture
 
+**Built 2026-11-14 on `feature/turn-checks`** (the checks are on by
+default for every user, by the owner's decision: no gate on a privacy
+policy while the live site is a demo). Three things turned out
+different from the spec during the build and the spec was amended to
+match: the integration is one HTTP request with the client already in
+the image, not an SDK; the pause between two spoken steps keys off the
+transport's started/stopped-speaking signals, because the text frames
+it releases are per word, not per sentence; and the talk-only
+instruction had to be scoped to the user's latest message after a live
+probe showed the model retracting an earlier, real edit. After the
+owner's first live run that whole restriction was removed: the checks
+now steer how much is said and never take a tool away, because a wrong
+no-edit verdict had blocked a real edit ("Yes." to a proposed change)
+and the model was not making unwanted edits on such turns anyway. Still owed:
+the live voice run and the response time from the VM
+(docs/evals/2026-11-13-decision-gates.md).
+
 **Specced 2026-11-13 as REQUIREMENTS.md §4.15 (FR-62–FR-73), from a
 design session with the owner.** Where the spec departs from the notes
 below, the spec is the state and these notes are the journey:
@@ -207,7 +224,8 @@ below, the spec is the state and these notes are the journey:
 - **Two leans:** toward silence when unsure whether the user is done;
   toward allowing the edit when unsure whether one was asked for.
 - **The create gate stays on Haiku** (3.3.1 below is the follow-up),
-  so there is no consolidated decision bundle yet.
+  so there is no consolidated decision bundle yet. (2026-11-16: the
+  gate was removed instead. See 3.3.1.)
 - **Answer modes** are FR-72, as instructions to Claude; the summary
   bound is tightened to one or two sentences, ideally one. Claude, not
   the checks, picks between summary and explanation.
@@ -316,11 +334,51 @@ tool):
   structured, as they're said (the product vision's "gives their words
   structure" line, still unimplemented). Needs care against the FR-60
   boundary (ambient WRITES to the discussed doc are wanted; ambient
-  CREATES are not) and against barge-in (writes mid-speech). Candidate
+  CREATES are not) and against barge-in (writes mid-speech). (Note
+  2026-11-16: FR-60's gate is gone, so nothing in code stops an
+  ambient create any more. This mode needs its own guard if built.)
+  Candidate
   shape: a capture mode the user toggles by voice ("take notes while I
   talk"), scoped to one target document.
 
-### 3.3.1 New-document check on Jev — the PR after the decision gates
+### 3.3.1 New-document check on Jev — closed 2026-11-16, not built
+
+**Closed 2026-11-16 (owner decision): the create gate was removed, so
+there is nothing to move to Jev.** What happened: on "Can you write all
+this down?", with no related document, Sonnet called `create_document`
+at once. The Haiku judge answered NO (its rule wanted the word
+"document"), and the refusal text made the agent say "The tool says to
+look for an existing document first", list the documents, and ask "Do
+you want a new document for this?". The gate was built for Gemini
+Flash's habit of creating stray documents (2026-10-11); whether Sonnet
+has that habit was never tested without the gate. The owner's reasoning: where a write goes is not new versus
+existing but one of N destinations (every document, plus a new one),
+and the main model is the right place for that choice. `create_document`
+now runs when the model calls it, the prompt and the tool description
+no longer ask for an explicit request for a new document, and the
+lookup tools (`list_documents`, `search_documents`, `read_document`)
+remain how the model finds a document from an earlier session.
+
+Considered and not built: loosening the judge's rule; a silent
+allow-or-deny verdict from Jev on every turn, consulted only when a
+create arrives; letting a second create call in the same turn always
+pass; skipping the gate when nothing is attached. All were more
+machinery than the problem needs today.
+
+Known gap, accepted: a related document that is not attached and was
+not touched this session is invisible to the model unless it looks, so
+it can create a duplicate. Revisit with the memory layer (feature 6).
+Watch for in live use: "note that down" during a discussion of an
+attached document creating a stray new one (the original 2026-10-10
+failure). If it comes back, the first step is a prompt fix, not a gate.
+Also watch for an edit nobody asked for after the agent's own offer:
+in the 2026-11-19 run it offered to update a document, read the user's
+next statement as a yes, and edited (row 2.3 of the create-gate eval,
+3 of 3 on replay). The owner accepted that case on 2026-11-20. Edits
+run with no check and one-step undo (documents follow-ups, feature 4)
+is not built, so undo is what closes this if it starts to hurt.
+
+The original entry, kept for the record:
 
 Owner decision 2026-11-13 (decision-gates spec grilling): the FR-60
 create gate stays on Haiku, untouched, while the decision gates ship, so
@@ -377,10 +435,13 @@ From single upload-at-start + copy-paste artifacts to a real document workspace.
     considered-and-rejected extras: having it also pick which existing
     document a change fits — too much for a cheap fast classifier, and
     the main agent already holds the docs in context.
+    **Removed 2026-11-16** (FR-60 and §4.13 deleted; see 3.3.1).
   - **`delete_document` tool (planned):** expose deletion to the agent,
     gated by the SAME FR-60 judge (explicit request required, fail
     closed) — deletion is more destructive than creation, so it does
-    not ship before one-step undo exists.
+    not ship before one-step undo exists. (2026-11-16: that judge no
+    longer exists. What guards an agent delete is a spec-time decision
+    again; undo-first still holds.)
   - **Versioning / undo (decided 2026-10-10):** v1 is **one-step undo** —
     a `previous_content` 🔒 column written on every edit (agent or user),
     so "undo that" restores the pre-edit text; a full
@@ -503,6 +564,16 @@ section; the memory-management loop consumes its summaries and evictions.
   covered by RLS; one user's agent can never retrieve another user's data.
 - Retrieval quality is measured by evals (golden query→memory datasets), not
   just unit tests.
+- **Where a write goes, revisited here (noted 2026-11-16).** The create
+  gate was removed (3.3.1) and the model now picks the destination from
+  what it can see: attached documents and anything touched this
+  session. A related document from an earlier session is invisible
+  unless the model looks it up. With this feature, documents whose
+  titles relate to what the user is saying can be found by a plain
+  lookup on the partial transcript while the user is still speaking and
+  put into the context before the model call starts. That closes the
+  duplicate-document gap without a gate, and it is also what lets
+  attach-before-session be retired.
 
 ### 7. LLM tracing
 
@@ -607,7 +678,8 @@ call).
   own budget, not a raised global one: the quick turn keeps its bounds
   and the task gets a step and tool budget of its own, with FR-42
   amended to say so.
-- The 4s judge timeout stays. It bounds a yes/no call, not work.
+- ~~The 4s judge timeout stays. It bounds a yes/no call, not work.~~
+  Gone with the create gate (removed 2026-11-16).
 - No tool today takes long. Research needs tools that do (web search,
   reading long sources), which is where the 10s tool bound starts to
   matter.
@@ -708,6 +780,53 @@ the run before it.
 **Depends on:** §4.15 (the outcomes it asserts on), feature 7 (traces
 it reads), and ideally feature 5 (a context it can set up per row).
 
+**First step, in use since 2026-11-19 (owner's idea):** frames. One
+turn of a real session is saved up to the model call, with recognition
+errors corrected by hand, a label, and what the first call must do
+(which tool, which document, how much is said).
+`backend/scripts/replay_frames.py` replays each as a single model call
+against the current prompt. It checks one decision per turn and nothing
+after it, so it is the cheap check before a live run, not this suite.
+The first 35 frames came from the create-gate run
+(`docs/evals/2026-11-16-create-gate-removal.md`).
+
+### 12. Transcript cleanup pass — fixing mis-heard words before the agent acts
+
+**Vision (owner, 2026-11-19).** A pass over the recognised text that
+repairs obvious mis-hearings before the agent reads it, the way
+dictation tools such as Wispr Flow clean up what was said. Today the
+agent gets the recogniser's text as it is and either guesses, asks, or
+acts on the wrong words.
+
+**Evidence (live run, 2026-11-19).** "Add that to the plan" arrived as
+"Yeah. Back to the plan. That sounds good." and nothing was written for
+two turns. "Lake Weekend Plan" arrived as "late weekend plan", "camping
+plan" as "accounting plan", "first aid kit" as "For state kit", and a
+request to reorganise a document arrived as five fragments including
+"Gare and Food". The model repaired some of these itself ("two tanks"
+to "two tents") and said so out loud, which is its own cost.
+
+**Rough scope.** A correction step between the recogniser and the turn
+checks, with what makes a repair possible in front of it: the titles
+and headings of the user's documents, the last few turns, and words the
+user has used before. It has to fit inside the response-time budget,
+and a wrong repair is worse than none, so an uncertain word is left
+alone.
+
+**Open questions (spec-time).**
+- Which model, and whether it runs on every turn or only on turns that
+  look wrong (a low recogniser confidence, a word that fits nothing).
+- Whether the recogniser can be given the vocabulary up front instead
+  (keyterm prompting with document titles and names, if Flux supports
+  it; unverified), which costs no extra call.
+- Whether the user sees the corrected text or the raw text in the
+  transcript.
+- How it is measured: the corrected frames of feature 11 already pair
+  what was heard with what was said.
+
+**Depends on:** feature 5 (the document titles and recent turns it
+reads) and feature 8 (noise is the other source of wrong words).
+
 ## Process infrastructure
 
 Per-PR CI (ruff + pytest, frontend build) and the tailored Claude review are
@@ -746,6 +865,28 @@ features land:
   public launch.
 - **Eager end-of-turn** (speculative LLM calls) trades cost for latency — a
   lever to pull only if measurements demand it.
+- **Pipecat 1.16 (upgraded from 1.3 on 2026-11-14).** Turn handling
+  changed underneath the loop: since 1.8 Flux only proposes turn
+  boundaries and the user aggregator announces the turn and broadcasts
+  the interruption. Two differences seen in simulation, to listen for
+  live: a second burst of speech inside a turn that is still open no
+  longer re-interrupts, and after an end of turn with an empty
+  transcript the next speech start is not announced. The second was
+  followed to its consequence in PR #28's round 4 review and does not
+  bite: the loop waits for a speech start only after it has consumed a
+  turn, and an empty turn is never consumed, so the missing
+  announcement lands while the loop is not waiting for one. The first
+  is still unheard. Three calls in our
+  code are deprecated and go away in Pipecat 2.0: `MarkdownTextFilter`
+  and `text_filters` (agent/sanitizer.py; replaced by
+  `text_transforms`), and `PipelineTask` / `PipelineRunner`
+  (agent/companion.py; replaced by `PipelineWorker` / `WorkerRunner`).
+- **Slow barge-in** (2026-11-14 live run: 9 to 29 seconds before speech
+  registered while the agent was talking). The upgrade alone is not
+  expected to fix it. Two leads from 1.16: `UserTurnStrategiesParams`
+  with a local start strategy, so the interruption does not wait for
+  Flux, and `SpeakingObserver`, which times detected speech, turn start
+  and interruption separately. Feature 8.
 
 ## Working notes
 
@@ -765,6 +906,12 @@ one live session can close all three, along with
 docs/evals/2026-11-12-filler-removal.md (the filler line's removal,
 whose script covers the same turns). The list, so nothing is
 forgotten:
+
+- **Closed 2026-11-16 with the create gate's removal (3.3.1):**
+  docs/evals/2026-10-11-create-gate-judge.md is no longer owed (there
+  is no judge to evaluate), carried item (3), judge latency, is gone,
+  and so is the "the gate refused again" half of item (2). The other
+  eval docs still stand.
 
 - **Sorted 2026-11-13 (decision-gates spec).** Of the carried list
   below, these are now specced and leave this list when §4.15 is
@@ -886,7 +1033,10 @@ forgotten:
   discussion), writes without asking; only with no fitting document
   does it ask "do you want a new document for this?" (verbal yes passes
   the judge on retry); a spoken-answer request (summary/opinion) gets a
-  spoken answer, never laundered into an edit.
+  spoken answer, never laundered into an edit. **Removed 2026-11-16**
+  with the gate. What replaces it: "write that down" with no fitting
+  document creates one without a question; with a fitting document it
+  edits that one; a spoken-answer request is still answered out loud.
 - **Placement judgment** — "where in the document?" is never asked when
   there's a clear destination.
 - **Rename mode** — a title change is ONE edit_document rename call, no

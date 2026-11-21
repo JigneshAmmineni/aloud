@@ -4,7 +4,7 @@ The unit suite fakes the provider SDK, so it cannot tell whether the live
 API accepts the requests our clients build (key, model ids, thinking and
 fallback fields, and every message shape the translation emits). This
 makes a few real calls through the same factories the agent uses — the
-loop model on each shape below, then the FR-60 judge — and prints what
+loop model on each shape below, then the turn checker — and prints what
 came back.
 
     docker compose run --rm backend python scripts/smoke_llm.py
@@ -19,14 +19,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agent.gate import judge_allows, judge_messages  # noqa: E402
+from agent.checks import CheckSettings, questions_for  # noqa: E402
+from agent.prompts import ANSWER_INSTRUCTION  # noqa: E402
 from agent.providers import (  # noqa: E402
+    CHECK_ANSWERED,
     FINISH_STOP,
     LLMDone,
     LLMTextDelta,
     LLMToolCall,
-    make_judge_llm,
     make_loop_llm,
+    make_turn_checker,
 )
 from app.config import load_settings  # noqa: E402
 
@@ -53,6 +55,19 @@ _TOOL_ROUND = [
     {"role": "tool", "tool_call_id": "toolu_smoke1", "name": "read_document", "content": {"status": "cancelled"}},
 ]
 _ASK = {"role": "user", "content": "Say hello, then tell me what two plus two is."}
+# A history that holds a call to a tool the request does not declare: the
+# provider accepts it (first proven for a design since removed; kept
+# because a tool leaving the registry produces the same shape)
+_EDIT_ROUND = [
+    {"role": "user", "content": "Add milk to the list."},
+    {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{"id": "toolu_smoke2", "name": "edit_document", "arguments": {"document_id": 1, "append": "milk"}}],
+    },
+    {"role": "tool", "tool_call_id": "toolu_smoke2", "name": "edit_document", "content": {"status": "ok"}},
+    {"role": "assistant", "content": "Done."},
+]
 
 # (label, messages, tool_choice): the shapes the context really produces
 _CASES = [
@@ -65,12 +80,19 @@ _CASES = [
     ("conversation opening with the assistant", [_SYSTEM, {"role": "assistant", "content": "Hi there."}, _ASK], "auto"),
     # the greeting and the forced wrap-up: tools declared, selection forbidden
     ("tool_choice none", [_SYSTEM, _ASK], "none"),
+    # FR-66: a turn's one instruction rides as a trailing system message
+    # (and the history calls a tool this request does not declare)
+    (
+        "one-turn instruction after an edit (undeclared tool in history)",
+        [_SYSTEM, *_EDIT_ROUND, _ASK, {"role": "system", "content": ANSWER_INSTRUCTION}],
+        "auto",
+    ),
 ]
 
 
 async def main() -> int:
     settings = load_settings()
-    print(f"provider={settings.llm_provider} loop={settings.llm_model} judge={settings.judge_model}")
+    print(f"provider={settings.llm_provider} loop={settings.llm_model}")
 
     loop_llm = make_loop_llm(settings)
     ok = True
@@ -105,15 +127,24 @@ async def main() -> int:
         # whether the model chose words over a tool call
         ok = ok and done.finish_reason == FINISH_STOP and (bool(text) or saw_call)
 
-    t0 = time.monotonic()
-    allowed, usage, verdict, finish = await judge_allows(
-        make_judge_llm(settings),
-        judge_messages("create_document", {"title": "Launch plan"}, ["start a new document for the launch plan"]),
-    )
-    judge_ms = round((time.monotonic() - t0) * 1000)
-    print(f"judge: {judge_ms}ms finish={finish} verdict={verdict!r} allowed={allowed} usage={usage}")
-
-    ok = ok and finish == FINISH_STOP and allowed
+    # FR-69: one request through the factory, the same fields back
+    checker = make_turn_checker(settings)
+    if checker is None:
+        print("check: skipped, no TYPESAFE_API_KEY")
+    else:
+        questions = questions_for(CheckSettings(done_on=True, mode_on=True))
+        t0 = time.monotonic()
+        answers, usage = await checker.ask(
+            "A voice conversation between a user and a work assistant. "
+            "The user's latest turn: 'Add milk to the shopping list.'",
+            questions,
+        )
+        check_ms = round((time.monotonic() - t0) * 1000)
+        print(f"check: {check_ms}ms model={settings.check_model} usage={usage}")
+        for q in questions:
+            a = answers[q.id]
+            print(f"       {q.id}: {a.status} p_yes={a.p_yes} probabilities={a.probabilities}")
+        ok = ok and all(answers[q.id].status == CHECK_ANSWERED for q in questions)
     print("OK" if ok else "FAILED")
     return 0 if ok else 1
 

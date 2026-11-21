@@ -79,7 +79,7 @@ class UsageEvent(Base):
     turn_id: Mapped[int | None] = mapped_column(Integer)  # null: session-level
     # indexed: FR-37's overview filters 24h/7d/30d windows on ts
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
-    stage: Mapped[str] = mapped_column(String(16))  # stt|llm|tts|artifact
+    stage: Mapped[str] = mapped_column(String(16))  # stt|llm|tts|artifact|check
     unit: Mapped[str] = mapped_column(String(24))  # seconds|tokens_in|tokens_out|characters|count
     quantity: Mapped[float] = mapped_column(Float)
     detail: Mapped[str | None] = mapped_column(String(64))  # e.g. artifact kind
@@ -120,7 +120,7 @@ class LLMTrace(Base):
     step: Mapped[int] = mapped_column(Integer)
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     model: Mapped[str] = mapped_column(String(64))
-    purpose: Mapped[str] = mapped_column(String(16))  # turn|greeting|wrap_up|gate
+    purpose: Mapped[str] = mapped_column(String(16))  # turn|greeting|wrap_up|check
     finish_reason: Mapped[str] = mapped_column(String(16))  # FR-48 vocabulary
     prompt_tokens: Mapped[int | None] = mapped_column(Integer)
     completion_tokens: Mapped[int | None] = mapped_column(Integer)

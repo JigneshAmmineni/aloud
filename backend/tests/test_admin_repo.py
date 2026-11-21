@@ -170,6 +170,36 @@ def test_session_detail_union_of_latency_and_usage(tmp_path):
     asyncio.run(run())
 
 
+def test_session_detail_lists_a_silent_turn_with_its_outcome(tmp_path):
+    """FR-36/FR-70: a turn the agent chose not to answer has no latency
+    row and no LLM spend — its one `check` event is what lists it, and
+    that event's detail is the outcome the drill-down shows."""
+
+    async def run():
+        await _seed(tmp_path)
+        ts = NOW - timedelta(days=3)
+        async with user_scoped_session("uid-a") as db:
+            for turn, outcome in ((1, "answer"), (4, "silent_mid_thought")):
+                db.add(
+                    UsageEvent(
+                        user_id="uid-a", session_id="sa1", turn_id=turn, ts=ts,
+                        stage="check", unit="count", quantity=3.0, detail=outcome,
+                    )
+                )
+            await db.commit()
+        detail = await admin_repo.session_detail(ADMIN, "sa1")
+        turns = {t["turn_id"]: t for t in detail["turns"]}
+        assert sorted(turns) == [1, 2, 3, 4]
+        assert turns[4]["outcome"] == "silent_mid_thought"
+        assert turns[4]["eot_to_first_audio_ms"] is None
+        assert turns[4]["usage"] == {"check.count": 3.0}
+        assert turns[1]["outcome"] == "answer"
+        assert turns[1]["eot_to_first_audio_ms"] == 1200
+        assert turns[2]["outcome"] is None  # never checked: before §4.15
+
+    asyncio.run(run())
+
+
 def test_admin_responses_never_serialize_content(tmp_path):
     """FR-38 (d) serialization half / NFR-9: no admin payload carries
     transcript text, artifact content, or keys that could."""

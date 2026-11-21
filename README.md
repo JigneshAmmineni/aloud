@@ -38,7 +38,7 @@ browser mic ── WebRTC ──▶ Deepgram Flux ──▶ Claude Sonnet 5.5 �
 | Voice orchestration | [Pipecat](https://github.com/pipecat-ai/pipecat) (Python) |
 | Transport | WebRTC (Pipecat SmallWebRTC) |
 | STT + turn detection | Deepgram Flux |
-| LLM | Claude Sonnet 5.5, with Claude Haiku 5.5 as a small judge in front of document creation (swappable) |
+| LLM | Claude Sonnet 5.5 (swappable) |
 | TTS | Cartesia Sonic-3 |
 | Backend | FastAPI + SQLAlchemy + Postgres |
 | Frontend | Next.js + Pipecat JS SDK |

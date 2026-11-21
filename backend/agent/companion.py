@@ -27,13 +27,19 @@ from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
 
+from agent.checks import CheckSettings
 from agent.context import ContextProvider
 from agent.loop import AgentLoopObserver, AgentLoopProcessor
 from agent.prompts import (
     build_greeting_trigger,
     build_system_prompt,
 )
-from agent.providers import make_judge_llm, make_loop_llm, make_stt, make_tts
+from agent.providers import (
+    make_loop_llm,
+    make_stt,
+    make_tts,
+    make_turn_checker,
+)
 from agent.registry import register_provider, unregister_provider
 from agent.sanitizer import make_text_filters
 from agent.tools import build_registry
@@ -160,7 +166,11 @@ def build_pipeline_parts(settings: Settings, documents=None, *, session_id=""):
         text_filters=make_text_filters(settings.tts_sanitize_enabled),
     )
     context_provider = ContextProvider(
-        build_system_prompt(),
+        # FR-73: the listening-sound rule leaves the prompt only while
+        # BOTH turn checks are on
+        build_system_prompt(
+            checks_on=settings.turn_check_done and settings.turn_check_mode
+        ),
         documents,
         session_id=session_id,
     )
@@ -171,7 +181,12 @@ def build_pipeline_parts(settings: Settings, documents=None, *, session_id=""):
     user_agg, _ = LLMContextAggregatorPair(
         scratch,
         user_params=LLMUserAggregatorParams(
-            user_turn_strategies=ExternalUserTurnStrategies()
+            user_turn_strategies=ExternalUserTurnStrategies(),
+            # A turn that ends with no transcript gets no reply: FR-64
+            # owns that case. Pipecat 1.16's default answers such a turn
+            # when it interrupted the bot, by adding a message of its own
+            # to the scratch context.
+            empty_user_turn=None,
         ),
     )
     return stt, tts, context_provider, scratch, user_agg
@@ -243,8 +258,8 @@ class CompanionAgent:
             session_id=session_id,
             user_id=self._user_id,
             model_name=self._settings.llm_model,
-            judge_llm=make_judge_llm(self._settings, session_id),
-            judge_model_name=self._settings.judge_model,
+            checker=make_turn_checker(self._settings),
+            checks=CheckSettings.from_settings(self._settings),
             recorder=recorder,
             traces=traces,
             emit=emit,

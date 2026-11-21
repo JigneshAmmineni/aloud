@@ -24,7 +24,6 @@ into the recorder, one llm_traces row per call (FR-49).
 import asyncio
 import itertools
 import json
-import re
 import time
 from collections import deque
 from contextlib import aclosing
@@ -33,6 +32,7 @@ from loguru import logger
 from pipecat.frames.frames import (
     AggregatedTextFrame,
     BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
     LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
@@ -44,20 +44,23 @@ from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.transports.base_output import BaseOutputTransport
 
-from agent.context import ContextProvider
-from agent.gate import (
-    GATE_REFUSAL,
-    GATED_TOOLS,
-    JUDGE_RECENT_TURNS,
-    judge_allows,
-    judge_messages,
+from agent.checks import (
+    QUESTION_IDS,
+    CheckSettings,
+    TurnPlan,
+    build_evidence,
+    decide,
+    questions_for,
 )
+from agent.context import ContextProvider
 from agent.prompts import (
     FALLBACK_GREETING_LINES,
     FALLBACK_LINES,
     WRAP_UP_INSTRUCTION,
 )
 from agent.providers import (
+    CHECK_ANSWERED,
+    CHECK_ERROR,
     FINISH_BLOCKED,
     FINISH_INTERRUPTED,
     FINISH_TRUNCATED,
@@ -73,45 +76,36 @@ from agent.tools import Tool, ToolContext, registry_schemas
 MAX_STEPS = 5
 TOOL_TIMEOUT_S = 10.0
 
-# FR-43, one acknowledgment per piece of work. The model closes a tool
-# turn with a bare "Done." even after a sentence that already said what
-# it was doing, and the two run together in speech ("I'll add that to
-# the document.Done." — 2026-11-12 live session; a prompt rule did not
-# stop it, 3 of 3 in a live probe). A LEADING bare confirmation is wrong
-# for exactly two reasons, and is not spoken in exactly those cases:
-#   PREMATURE — nothing else was said and the same step goes on to call
-#     a tool: nothing is done yet, and the step that finishes will say so.
-#   REDUNDANT — the step directly before it spoke: it would run into
-#     that sentence.
-# Anywhere else it is the turn's acknowledgment and is spoken: after
-# silent work, after silent steps in between, and always in the forced
-# wrap-up call, which exists to speak. Whether it is premature cannot be
-# known when it arrives, so every step holds back text that could still
-# be only a confirmation (a few characters) and decides at the next
-# event. Punctuation is required mid-stream ("Done with the first list"
-# is a sentence); at the end of a stream a bare "Done" counts too.
-_CONFIRMATION_WORDS = ("done", "all done")
-_BARE_CONFIRMATIONS = tuple(w + p for w in _CONFIRMATION_WORDS for p in ".!")
-_LEADING_CONFIRMATION = re.compile(
-    r"\s*(?:%s)[.!]+\s*"
-    % "|".join(re.escape(w).replace(r"\ ", r"\s+") for w in _CONFIRMATION_WORDS),
-    re.IGNORECASE,
-)
-
-
-def _may_be_only_a_confirmation(text: str) -> bool:
-    """True while streamed `text` could still turn out to be nothing but
-    a bare confirmation — the loop holds it back that long (a few
-    characters) instead of speaking it. Blank text qualifies."""
-    so_far = " ".join(text.lower().split())
-    return any(c.startswith(so_far) for c in _BARE_CONFIRMATIONS)
-
-
-def _is_bare_confirmation(text: str) -> bool:
-    """The whole of `text` is a confirmation and nothing else ("Done.",
-    "All done!", and at the end of a stream an unpunctuated "Done")."""
-    return " ".join(text.lower().split()).rstrip(".!") in _CONFIRMATION_WORDS
-
+# FR-43: when two steps of one turn both speak, the later one waits for
+# the earlier speech to finish playing and then for this much silence, so
+# a closing "Done." never runs into "I'll add that to the document."
+# Nothing the model says is dropped. The loop knows playback only through
+# the output transport's bot-started / bot-stopped signals (the text
+# frames it releases are per WORD on this pipeline, so there is nothing
+# to count per sentence); a stop between two sentences is followed by a
+# start, which re-arms the wait.
+STEP_SPEECH_GAP_S = 1.0
+# The wait must not strand a reply if a signal never comes. Its ceiling
+# scales with the speech being waited for — that speech's length at a
+# rate well under the voice's real one (about 12 chars/s at
+# CARTESIA_SPEED 0.85; revisit this if that speed changes) plus slack —
+# so a long recitation keeps its pause and only a missing signal gets
+# here.
+STEP_SPEECH_SLOWEST_CPS = 6.0
+STEP_SPEECH_HOLD_SLACK_S = 2.0
+# ...and never beyond this, however long the earlier speech was: when the
+# stop signal is the thing that is missing, this is silence the user sits
+# through mid-reply, and the model's stream is parked for all of it. The
+# price is that speech longer than this, followed by another speaking
+# step, loses its pause.
+STEP_SPEECH_HOLD_MAX_S = 30.0
+# An earlier step's text that never becomes audio (the filters reduced it
+# to nothing, synthesis failed) has no playback to wait for: if no sign of
+# it arrives within this long, the wait is over. Its own event, not the
+# missing-signal warning. Must stay below the smallest ceiling above
+# (STEP_SPEECH_HOLD_SLACK_S + 1 / STEP_SPEECH_SLOWEST_CPS, 2.17s today),
+# or a step with nothing to play warns as a broken signal instead.
+STEP_SPEECH_START_MAX_S = 2.0
 
 class _TurnState:
     """Live state for one turn — what the interruption handler finalizes
@@ -149,6 +143,12 @@ class _TurnState:
         # Sentences actually captured for earlier steps (exact strings) —
         # the precise half of the filter above.
         self.prior_sentences: set[str] = set()
+        # §4.15: what the turn checks decided (plain until they answer)
+        self.plan = TurnPlan()
+        # FR-43's pause: how much the most recent step that spoke said,
+        # and when it began pushing text
+        self.earlier_speech_chars = 0
+        self.earlier_speech_at: float | None = None
 
 
 class AgentLoopProcessor(FrameProcessor):
@@ -168,11 +168,11 @@ class AgentLoopProcessor(FrameProcessor):
         emit,
         write_registry: set,
         greeting_trigger: str,  # required: dropping it must not pass a green suite
-        # required for the same reason: defaulted to the loop's own
-        # client, a dropped kwarg would run every verdict on the loop
-        # model, at its price and latency, under a green suite
-        judge_llm,
-        judge_model_name: str,
+        # required too (§4.15): a dropped kwarg would run every turn
+        # unchecked under a green suite. `checker` may be None (no key);
+        # the switches live in `checks`.
+        checker,
+        checks: CheckSettings,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -180,12 +180,11 @@ class AgentLoopProcessor(FrameProcessor):
         self._llm = llm
         self._tools = {t.name: t for t in registry}
         self._schemas = registry_schemas(registry)
+        self._checker = checker
+        self._checks = checks
         self._session_id = session_id
         self._user_id = user_id
         self._model_name = model_name
-        # FR-60: the gate's judge runs on its own (smaller) model
-        self._judge_llm = judge_llm
-        self._judge_model_name = judge_model_name
         self._recorder = recorder
         self._traces = traces
         self._emit = emit
@@ -227,6 +226,15 @@ class AgentLoopProcessor(FrameProcessor):
         # sentence — heard, by §4.14's over-approximation): never amend.
         self._bot_spoke_this_turn = False
         self._fr61_signal_warned = False
+        # FR-61: has the transport EVER released played text this session?
+        # If so the signal works, and a reply cut before any of it was
+        # released was cut inside its first sentence.
+        self._release_seen = False
+        # FR-43's pause: the transport's speaking state, as observed
+        self._bot_speaking = False
+        self._bot_started_at: float | None = None
+        self._bot_stopped_at: float | None = None
+        self._speech_changed = asyncio.Event()
         self._fallback_cycle = itertools.cycle(FALLBACK_LINES)
         self._greeting_fallback_cycle = itertools.cycle(FALLBACK_GREETING_LINES)
 
@@ -305,6 +313,14 @@ class AgentLoopProcessor(FrameProcessor):
 
     def note_bot_spoke(self) -> None:
         self._bot_spoke_this_turn = True  # FR-61's valve: audio began
+        self._bot_speaking = True
+        self._bot_started_at = time.monotonic()
+        self._speech_changed.set()
+
+    def note_bot_stopped(self) -> None:
+        self._bot_speaking = False
+        self._bot_stopped_at = time.monotonic()
+        self._speech_changed.set()
 
     def note_spoken_sentence(self, text: str) -> None:
         """FR-46: the sentence-level synthesis stream (the same one FR-20
@@ -316,6 +332,7 @@ class AgentLoopProcessor(FrameProcessor):
         """FR-61: a sentence whose audio actually reached the speaker —
         the transport releases its text frame only after the preceding
         audio was sent, and an interruption discards unplayed ones."""
+        self._release_seen = True
         self._uttered.append(text)
 
     # ---- the loop --------------------------------------------------------
@@ -329,17 +346,26 @@ class AgentLoopProcessor(FrameProcessor):
         log = self._log.bind(turn_id=state.turn_id)
         try:
             if user_text is not None:
+                # appended BEFORE the checks, whatever they decide (FR-62):
+                # a turn the agent stays silent on is still in the context
                 self._context.append_user(user_text)
-            ended = False
-            for step in range(1, MAX_STEPS + 1):
-                state.step = step
-                # Greeting: tool selection forbidden, tools still declared
-                # (FR-42/FR-7 — a session must not open with list_documents
-                # volunteering last week's titles unprompted).
-                tool_choice = "none" if purpose == "greeting" else "auto"
-                ended = await self._run_step(state, tool_choice, purpose)
-                if ended:
-                    break
+                state.plan = await self._check_turn(state)
+            if state.plan.silent is not None:
+                # FR-64: a silent outcome runs no step at all
+                await self._stay_silent(state)
+                ended = True
+            else:
+                ended = False
+                for step in range(1, MAX_STEPS + 1):
+                    state.step = step
+                    # Greeting: tool selection forbidden, tools still
+                    # declared (FR-42/FR-7 — a session must not open with
+                    # list_documents volunteering last week's titles
+                    # unprompted).
+                    tool_choice = "none" if purpose == "greeting" else "auto"
+                    ended = await self._run_step(state, tool_choice, purpose)
+                    if ended:
+                        break
             if not ended:
                 # Cap hit: ONE forced final call, tools declared but
                 # selection forbidden, wrap-up instruction injected into
@@ -360,6 +386,10 @@ class AgentLoopProcessor(FrameProcessor):
                 # result may already be committed AND announced; a context
                 # that records nothing makes the next turn re-create it.
                 self._dispose_tool_round(state, state.step_text, interrupted=False)
+                # the step's narration is playing or about to: the fallback
+                # line must wait for it (FR-43), and it would not know to
+                # once the text is cleared below
+                self._note_step_spoke(state)
                 state.step_text = ""  # recorded; the fallback won't re-append
             await self._speak_fallback(state, reason="error")
         # Any non-cancelled exit is a turn end (FR-47: flush-or-clear).
@@ -381,6 +411,14 @@ class AgentLoopProcessor(FrameProcessor):
         # endswith match ignores.
         self._uttered_mark = len(self._uttered)
         messages = self._context.build(turn_id=state.turn_id, step=state.step)
+        # §4.15: the turn's one instruction rides every call of the turn
+        # and is never appended to the context (FR-66) — except the forced
+        # final call, which has its own closing contract (FR-42: say where
+        # things stand). FR-66's five-word bound would gag it.
+        if state.plan.instruction and not wrap_up:
+            messages = messages + [
+                {"role": "system", "content": state.plan.instruction}
+            ]
         if wrap_up:
             messages = messages + [{"role": "system", "content": WRAP_UP_INSTRUCTION}]
         elif purpose == "greeting":
@@ -390,9 +428,10 @@ class AgentLoopProcessor(FrameProcessor):
             messages = messages + [
                 {"role": "user", "content": self._greeting_trigger}
             ]
-        # read before the reset below: what the PREVIOUS step of this turn
-        # spoke (after any drop), empty on a turn's first step
-        follows_speech = bool(state.step_text.strip())
+        # FR-43's pause looks back at what EARLIER steps of this turn said:
+        # read before the reset below
+        self._note_step_spoke(state)
+        held_for_gap = False
         state.purpose = purpose
         state.messages = messages
         state.step_text = ""
@@ -417,10 +456,6 @@ class AgentLoopProcessor(FrameProcessor):
             msgs=lambda: json.dumps(messages, ensure_ascii=False, default=str),
         )
 
-        # One acknowledgment per piece of work (rule above). While
-        # `holding`, nothing of this step has been spoken yet.
-        holding = not wrap_up
-        dropped = 0  # leading characters of step_text not spoken
         await self.push_frame(LLMFullResponseStartFrame())
         try:
             # aclosing: barge-in cancellation closes the provider stream —
@@ -436,31 +471,27 @@ class AgentLoopProcessor(FrameProcessor):
                         state.ttfb_ms = elapsed_ms
                     if isinstance(event, LLMTextDelta):
                         state.step_text += event.text
-                        if holding and _may_be_only_a_confirmation(state.step_text):
-                            pass  # held: it may be all this step says
-                        elif holding:
-                            # more than a confirmation: release it, minus a
-                            # leading confirmation that would be redundant
-                            holding = False
-                            if follows_speech:
-                                match = _LEADING_CONFIRMATION.match(state.step_text)
-                                dropped = match.end() if match else 0
-                            if state.step_text[dropped:]:
-                                await self.push_frame(
-                                    LLMTextFrame(state.step_text[dropped:])
-                                )
-                        else:
-                            await self.push_frame(LLMTextFrame(event.text))
+                        if not held_for_gap and state.step_text.strip():
+                            held_for_gap = True
+                            if state.earlier_speech_chars:
+                                await self._hold_for_speech_gap(state)
+                            state.earlier_speech_at = time.monotonic()
+                            # FR-61 entry scope, re-stamped as this step
+                            # begins to SPEAK: the transport releases
+                            # played text word by word, so an earlier
+                            # step's words land after this step STARTED
+                            # (during its LLM call and the pause above).
+                            # Left at the step-start mark they would be
+                            # counted as this entry's own, and a reply
+                            # the user never heard would stay whole
+                            # behind the mismatch valve.
+                            self._uttered_mark = len(self._uttered)
+                        await self.push_frame(LLMTextFrame(event.text))
                     elif isinstance(event, LLMToolCall):
-                        if holding:
-                            # work follows and nothing else was said:
-                            # whatever is held is premature (or blank)
-                            holding = False
-                            dropped = len(state.step_text)
                         if (
                             not state.calls
                             and tool_choice != "none"
-                            and not state.step_text[dropped:].strip()
+                            and not state.step_text.strip()
                         ):
                             # NFR-1's known exception, made findable: this
                             # step spoke nothing before its first tool
@@ -500,10 +531,6 @@ class AgentLoopProcessor(FrameProcessor):
                 round((time.monotonic() - state.t0) * 1000),
                 purpose,
             )
-            # only what was spoken counts as heard: nothing while still
-            # holding, and never a dropped leading confirmation
-            state.step_text = "" if holding else state.step_text[dropped:]
-            dropped = 0
             # close the frame pair before degrading — a dangling
             # LLMFullResponseStartFrame stalls downstream aggregation.
             # (CancelledError skips this: every cancel path broadcasts an
@@ -511,25 +538,6 @@ class AgentLoopProcessor(FrameProcessor):
             # fires for silent cancels — which resets downstream itself.)
             await self.push_frame(LLMFullResponseEndFrame())
             raise
-        if holding:
-            # the stream ended, no tool call came, and the held text is
-            # all this step said
-            if _is_bare_confirmation(state.step_text) and not follows_speech:
-                # the turn's acknowledgment: speak it
-                await self.push_frame(LLMTextFrame(state.step_text))
-            else:
-                # redundant after speech — or not a confirmation at all:
-                # blank, or a word the stream cut short ("Do"), which
-                # is better left unspoken than voiced as a syllable
-                dropped = len(state.step_text)
-        # The step said only a confirmation the step before it had made
-        # redundant: a clean ending, not an empty (failed) step.
-        redundant_ending = (
-            follows_speech
-            and not state.calls
-            and dropped == len(state.step_text)
-            and _is_bare_confirmation(state.step_text)
-        )
         await self.push_frame(LLMFullResponseEndFrame())
 
         duration_ms = round((time.monotonic() - state.t0) * 1000)
@@ -546,18 +554,6 @@ class AgentLoopProcessor(FrameProcessor):
             out=lambda: f"{state.step_text!r} calls="
             f"{[(c.name, c.arguments) for c in state.calls]}",
         )
-
-        if dropped:
-            # after the trace row above, which keeps what the model wrote:
-            # the context records only what was spoken
-            if state.step_text[:dropped].strip():
-                log.bind(event="agent.confirmation_dropped", chars=dropped).info(
-                    "premature or redundant leading confirmation not spoken"
-                )
-            state.step_text = state.step_text[dropped:]
-            if redundant_ending:
-                # the step before it already said what was being done
-                return True
 
         if not state.step_text.strip() and not state.calls:
             # FR-42: an empty step is a failure, not an ending — blocked or
@@ -623,6 +619,202 @@ class AgentLoopProcessor(FrameProcessor):
         self._context.append_assistant(state.step_text)
         return True
 
+    # ---- §4.15: the turn checks ------------------------------------------
+
+    async def _check_turn(self, state: _TurnState) -> TurnPlan:
+        """FR-62: ask the decision model about the turn BEFORE the main
+        model is called, in one request, and turn the answers into the
+        turn's plan (FR-63). A request that fails or outlasts the ceiling
+        never holds the turn: whatever is unanswered is skipped and the
+        turn runs as it always did (FR-67). Every checked turn leaves a
+        log line, a usage event and a trace row (FR-70) on EVERY exit —
+        the barge-in cancellation included, from the finally."""
+        cfg = self._checks
+        questions = questions_for(cfg)
+        if self._checker is None or not questions:
+            return TurnPlan()
+        log = self._log.bind(turn_id=state.turn_id)
+        evidence = build_evidence(self._context)
+        answers: dict = {}
+        usage = None
+        reason = None  # why nothing came back: timeout | the error's type
+        status = "cancelled"  # overwritten unless a barge-in unwinds
+        plan: TurnPlan | None = None
+        t0 = time.monotonic()
+        try:
+            answers, usage = await asyncio.wait_for(
+                self._checker.ask(evidence, questions), cfg.timeout_s
+            )
+            status = CHECK_ANSWERED
+            # inside the try on purpose: anything this raises is one more
+            # way of having no verdict, and must end as a plain turn with
+            # its records (FR-67) — not as an exception out of the finally
+            plan = decide(answers, cfg)
+        except asyncio.TimeoutError:
+            status = reason = "timeout"
+        except asyncio.CancelledError:
+            raise  # the finally still writes the interrupted records
+        except Exception as e:
+            status, reason = "error", type(e).__name__
+        finally:
+            ms = round((time.monotonic() - t0) * 1000)
+            interrupted = status == "cancelled"
+            if plan is None:
+                # no verdict: today's behaviour, marked as a bypass
+                plan = TurnPlan(bypass=not interrupted)
+            # a request that came back without one of its answers: that
+            # question is an error, not "answered" (FR-67)
+            missing = CHECK_ERROR if status == CHECK_ANSWERED else status
+            asked = {q.id for q in questions}
+            per_question = {
+                qid: {
+                    "status": (
+                        "off"
+                        if qid not in asked
+                        else answers[qid].status if qid in answers else missing
+                    ),
+                    "p_yes": answers[qid].p_yes if qid in answers else None,
+                    "probabilities": (
+                        answers[qid].probabilities if qid in answers else None
+                    ),
+                }
+                for qid in QUESTION_IDS
+            }
+            detail = "interrupted" if interrupted else plan.detail
+            # C-1's advisory rides the stage record, whatever the ceiling
+            self._recorder.record_step_stage(state.turn_id, "check", ms)
+            self._recorder.record_check(
+                len(questions), detail, turn_id=state.turn_id
+            )
+            self._traces.record_trace(
+                turn_id=state.turn_id,
+                step=0,
+                model=cfg.model,
+                purpose="check",
+                finish_reason=FINISH_INTERRUPTED if interrupted else "stop",
+                prompt_tokens=usage.prompt_tokens if usage else None,
+                completion_tokens=usage.completion_tokens if usage else None,
+                ttfb_ms=None,
+                duration_ms=ms,
+                input_messages=[{"role": "user", "content": evidence}],
+                output=json.dumps({"questions": per_question, "outcome": detail}),
+            )
+            log.bind(
+                event="turn.check",
+                duration_ms=ms,
+                outcome=detail,
+                questions=per_question,
+                bypass_reason=reason,
+            ).info(f"turn check: {detail} in {ms}ms")
+            if plan.bypass and not interrupted:
+                # only what was SENT: a question whose switch is off was
+                # never asked, so it cannot have gone unanswered
+                unanswered = [
+                    qid
+                    for qid, a in per_question.items()
+                    if qid in asked and a["status"] != CHECK_ANSWERED
+                ]
+                log.bind(
+                    event="turn.check_bypassed",
+                    questions=unanswered,
+                    reason=reason or "unreadable_answer",
+                ).warning(
+                    f"turn check unanswered ({reason or 'unreadable answer'}): "
+                    f"{', '.join(unanswered)} — running the turn without it"
+                )
+        return plan
+
+    async def _stay_silent(self, state: _TurnState) -> None:
+        """FR-64: the main model is not called and nothing is spoken — no
+        step, no assistant entry, no fallback line. The user's text is
+        already in the context; the next turn's text lands after it as a
+        further user message and the model reads them as one. The client
+        is told, so its indicator leaves Thinking (FR-6)."""
+        self._log.bind(
+            event="turn.silent", turn_id=state.turn_id, outcome=state.plan.silent
+        ).info(f"staying silent: {state.plan.silent}")
+        await self._emit({"type": "turn.silent", "reason": state.plan.silent})
+
+    @staticmethod
+    def _note_step_spoke(state: _TurnState) -> None:
+        """FR-43: remember how much the step that just ended (or failed)
+        said. The pause waits for THAT speech — the most recent step that
+        spoke — so its ceiling is sized from it, not from everything the
+        turn has said. A silent step leaves the earlier figure in place:
+        that speech is still the last thing to have played."""
+        if state.step_text.strip():
+            state.earlier_speech_chars = len(state.step_text)
+
+    async def _hold_for_speech_gap(self, state: _TurnState) -> None:
+        """FR-43: an earlier step of this turn spoke, and this one is
+        about to. Wait until that speech has started playing, then for
+        STEP_SPEECH_GAP_S of silence after it — re-armed whenever speech
+        resumes, so a stop between two sentences does not end the wait.
+        Bounded by a ceiling that scales with the speech waited for."""
+        ceiling = min(
+            state.earlier_speech_chars / STEP_SPEECH_SLOWEST_CPS
+            + STEP_SPEECH_HOLD_SLACK_S,
+            STEP_SPEECH_HOLD_MAX_S,
+        )
+        pushed_at = state.earlier_speech_at or 0.0
+        start_by = time.monotonic() + STEP_SPEECH_START_MAX_S
+
+        def earlier_speech_seen() -> bool:
+            # it is playing now, or a start or a stop came after it was
+            # pushed (a stop alone: it continued a run already playing)
+            return self._bot_speaking or any(
+                at is not None and at >= pushed_at
+                for at in (self._bot_started_at, self._bot_stopped_at)
+            )
+
+        async def wait() -> bool:
+            """False: the earlier speech never started playing."""
+            while True:
+                self._speech_changed.clear()
+                if not earlier_speech_seen():
+                    left = start_by - time.monotonic()
+                    if left <= 0:
+                        return False
+                    try:
+                        await asyncio.wait_for(self._speech_changed.wait(), left)
+                    except asyncio.TimeoutError:
+                        return False
+                    continue
+                if self._bot_speaking:
+                    await self._speech_changed.wait()
+                    continue
+                remaining = STEP_SPEECH_GAP_S - (
+                    time.monotonic() - (self._bot_stopped_at or 0.0)
+                )
+                if remaining <= 0:
+                    return True
+                try:
+                    await asyncio.wait_for(self._speech_changed.wait(), remaining)
+                except asyncio.TimeoutError:
+                    return True  # the silence held for the whole gap
+
+        try:
+            if not await asyncio.wait_for(wait(), ceiling):
+                self._log.bind(
+                    event="speech_gap.no_playback",
+                    turn_id=state.turn_id,
+                    step=state.step,
+                    # a long text here is more likely synthesis slower
+                    # than the start window than text the filters reduced
+                    # to nothing
+                    earlier_chars=state.earlier_speech_chars,
+                    waited_s=STEP_SPEECH_START_MAX_S,
+                ).info("the earlier step's text produced no audio; not waiting")
+        except asyncio.TimeoutError:
+            # means a broken signal and nothing else: the ceiling is far
+            # above how long that speech can take to play
+            self._log.bind(
+                event="speech_gap.signal_missing",
+                turn_id=state.turn_id,
+                step=state.step,
+                waited_s=round(ceiling, 1),
+            ).warning("no playback signal for the earlier step's speech")
+
     # ---- tools -----------------------------------------------------------
 
     async def _run_tools(self, state: _TurnState) -> None:
@@ -649,35 +841,17 @@ class AgentLoopProcessor(FrameProcessor):
         tool = self._tools.get(call.name)
         log = self._log.bind(turn_id=state.turn_id, step=state.step, tool=call.name)
         outcome = "ok"
-        # FR-47's anti-overwrite rule, computed ONCE for both stage keys
-        # (gate and tool): two same-named calls in one step would silently
-        # overwrite each other in the stage dict
+        # FR-47's anti-overwrite rule: two same-named calls in one step
+        # would silently overwrite each other in the stage dict
         stage_suffix = (
             f".{index + 1}"
             if sum(1 for c in state.calls if c.name == call.name) > 1
             else ""
         )
-        denied = (
-            tool is not None
-            and tool.name in GATED_TOOLS
-            and not await self._gate_allows(state, call, log, stage_suffix)
-        )
-        # AFTER the gate: each stage owns only its own time — billing the
-        # judge round-trip to step.N.tool.* double-counted it and fired
-        # spurious slow-stage WARNs at the DB write (round-1 review)
         t0 = time.monotonic()
         if tool is None:
             result = {"status": "error", "error": f"unknown tool: {call.name}"}
             outcome = "error"
-        elif denied:
-            # FR-60: the judge said no (or failed — the gate fails
-            # closed). The refusal steers the model to edit_document or
-            # to asking the user; no handler runs, nothing is written.
-            result = dict(GATE_REFUSAL)
-            # the gate working as designed is not a tool ERROR — the
-            # refusal majority must not read as a failing create rate
-            # (round-2 review); tool.gated carries allowed=false already
-            outcome = "gated"
         else:
             # asyncio.create_task, NOT self.create_task: a processor-owned
             # task dies with the pipeline, and a write cancelled mid-commit
@@ -722,87 +896,6 @@ class AgentLoopProcessor(FrameProcessor):
             event="tool.invoked", duration_ms=duration_ms, outcome=outcome
         ).info(f"{call.name}: {outcome} in {duration_ms}ms")
         state.results[index] = result
-
-    async def _gate_allows(
-        self, state: _TurnState, call: LLMToolCall, log, key_suffix: str = ""
-    ) -> bool:
-        """FR-60: one judge call through the FR-48 seam (the judge client),
-        instrumented like any stage and FAILING CLOSED — a judge error
-        degrades to the agent asking the user, never to an unwanted
-        write. Judge tokens land on the turn like any LLM call, and the
-        call writes its FR-49 trace row (purpose "gate") on EVERY exit —
-        including the barge-in cancellation, which is the row FR-49 names
-        the cancellation path for (round-2 review)."""
-        g0 = time.monotonic()
-        messages = judge_messages(
-            call.name,
-            call.arguments,
-            self._context.recent_user_texts(JUDGE_RECENT_TURNS),
-            self._context.last_assistant_text(),
-        )
-        verdict_text = ""
-        usage = None
-        allowed = False
-        finish = FINISH_INTERRUPTED  # overwritten unless a cancel unwinds
-
-        def early_usage(reported: LLMUsage) -> None:
-            # held here so a timed-out or barged-in judge call still
-            # records the input it was billed for
-            nonlocal usage
-            usage = reported
-
-        try:
-            allowed, usage, verdict_text, finish = await judge_allows(
-                self._judge_llm, messages, on_usage=early_usage
-            )
-        except asyncio.CancelledError:
-            raise  # the finally still writes the interrupted trace row
-        except Exception as e:
-            finish = "error"
-            log.bind(event="gate.judge_failed").warning(
-                f"gate judge failed ({type(e).__name__}) — refusing {call.name}"
-            )
-        finally:
-            gate_ms = round((time.monotonic() - g0) * 1000)
-            if usage is not None:  # every exit: FR-45 counts what was spent
-                self._recorder.record_llm_usage(
-                    usage.prompt_tokens,
-                    usage.completion_tokens,
-                    turn_id=state.turn_id,
-                )
-            self._traces.record_trace(
-                turn_id=state.turn_id,
-                step=state.step,
-                model=self._judge_model_name,
-                purpose="gate",
-                finish_reason=finish,
-                prompt_tokens=usage.prompt_tokens if usage else None,
-                completion_tokens=usage.completion_tokens if usage else None,
-                ttfb_ms=None,
-                duration_ms=gate_ms,
-                input_messages=messages,
-                output=verdict_text,
-            )
-            self._recorder.record_step_stage(
-                state.turn_id,
-                f"step.{state.step}.gate.{call.name}{key_suffix}",
-                gate_ms,
-            )
-            if finish != FINISH_INTERRUPTED:
-                # verdict + finish in the bind (round 3): "the judge said
-                # NO" and "the judge said nothing (blocked/truncated)"
-                # must be distinguishable without the trace row
-                log.bind(
-                    event="tool.gated",
-                    allowed=allowed,
-                    duration_ms=gate_ms,
-                    verdict=verdict_text[:40],
-                    finish_reason=finish,
-                ).info(
-                    f"{call.name}: gate "
-                    f"{'allowed' if allowed else 'refused'} in {gate_ms}ms"
-                )
-        return allowed
 
     def _write_done(self, call: LLMToolCall, task: asyncio.Task) -> None:
         """Done-callback for every write task — the FR-46 landing path for
@@ -920,6 +1013,12 @@ class AgentLoopProcessor(FrameProcessor):
         self._log.bind(
             event="agent.fallback", turn_id=state.turn_id, reason=reason
         ).warning(f"spoken fallback (reason: {reason})")
+        # FR-43: the one line the loop speaks itself must not run into
+        # what the turn already said — an earlier step's narration, or
+        # this step's own text before it failed.
+        self._note_step_spoke(state)
+        if state.earlier_speech_chars:
+            await self._hold_for_speech_gap(state)
         try:
             await self.push_frame(LLMFullResponseStartFrame())
             await self.push_frame(LLMTextFrame(line))
@@ -986,17 +1085,25 @@ class AgentLoopProcessor(FrameProcessor):
             # cut left context text the user never heard, mark it now,
             # before the new user turn appends.
             tail = self._uttered[self._uttered_mark :]
-            if not self._uttered and self._bot_spoke_this_turn:
-                # audio played but NO sentence was released: either the
-                # cut landed inside the first sentence (heard, by the
-                # over-approximation) or the transport signal is broken —
-                # both no-op, and a broken signal warns once per session
-                # instead of corrupting every turn (round-2 review)
-                if not self._fr61_signal_warned:
+            if not tail and self._bot_spoke_this_turn:
+                # audio played this turn but nothing of the LAST entry was
+                # released. If the transport has ever released played text
+                # this session the signal works, so the cut landed before
+                # the entry's first words finished: keep its first
+                # sentence, marked as cut (2026-11-12: a four-sentence
+                # answer heard for a second stayed in the context whole).
+                # If it never has, the signal itself is unproven — a
+                # session's first spoken reply — so nothing is amended,
+                # and a broken signal warns once per session instead of
+                # corrupting every turn (round-2 review).
+                if self._release_seen:
+                    self._context.cut_to_first_sentence()
+                elif not self._fr61_signal_warned:
                     self._fr61_signal_warned = True
                     self._log.bind(event="fr61.signal_suspect").warning(
-                        "bot audio played this turn but the uttered buffer "
-                        "is empty — playback-cut amendment skipped"
+                        "bot audio played this turn but the transport has "
+                        "released no text this session — playback-cut "
+                        "amendment skipped"
                     )
             else:
                 # only THIS entry's own releases vouch for it: an earlier
@@ -1153,6 +1260,10 @@ class AgentLoopObserver(BaseObserver):
             if self._already_seen(frame.id):
                 return
             self._loop.note_bot_spoke()
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            if self._already_seen(frame.id):
+                return
+            self._loop.note_bot_stopped()
         elif isinstance(frame, TTSTextFrame):
             # FR-61: only the OUTPUT TRANSPORT's release counts — it holds
             # text frames behind their preceding audio and discards them

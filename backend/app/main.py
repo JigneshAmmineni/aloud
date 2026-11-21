@@ -50,7 +50,7 @@ from pipecat.transports.smallwebrtc.request_handler import (
 )
 
 from agent.companion import CompanionAgent, drain_live_sessions
-from agent.providers import validate_llm_config
+from agent.providers import close_turn_checker_http, validate_llm_config
 from agent.registry import notify_document_deleted, notify_document_updated
 from app import admin, auth
 from app.auth import AuthedUser, get_current_user_checked, get_current_user_id
@@ -141,6 +141,7 @@ async def lifespan(app: FastAPI):
     await retire_bootstrap_engine()
     _install_sigterm_goodbye()
     yield
+    await close_turn_checker_http()
 
 
 app = FastAPI(lifespan=lifespan)

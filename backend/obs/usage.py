@@ -97,6 +97,19 @@ class UsageRecorder:
                 self._event("llm", "tokens_out", completion_tokens, now, turn)
             )
 
+    def record_check(
+        self, questions: int, outcome: str, *, turn_id: int | None
+    ) -> None:
+        """FR-70: one event per checked turn — silent turns included, which
+        is what lists them in the drill-down (FR-36 drives its turn table
+        from the union of usage and latency). `detail` is the outcome,
+        never text. No rate prices it (FR-34): a recorded trade."""
+        event = self._event(
+            "check", "count", questions, datetime.now(timezone.utc), turn_id
+        )
+        event.detail = outcome
+        self._writer.enqueue(event)
+
     def record_tts_characters(self, characters: int) -> None:
         if characters:
             self._writer.enqueue(

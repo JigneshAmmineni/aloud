@@ -27,9 +27,13 @@ results), [deployment.md](deployment.md) (step-by-step VM runbook),
  Aloud (single GCE VM, four Docker containers)
    │
    ├─▶ Deepgram Flux ─── STT + end-of-turn detection   (wss, outbound)
-   ├─▶ Anthropic ─────── LLM (Claude Sonnet 5.5 loop +
-   │                      Haiku 5.5 judge, thinking off) (https, outbound)
-   ├─▶ Cartesia ──────── TTS (Sonic-3)                 (https, outbound)
+   ├─▶ Anthropic ─────── LLM (Claude Sonnet 5.5 loop,
+   │                      thinking off)                  (https, outbound)
+   ├─▶ TypeSafe ──────── turn checks (Jev: is the user done, was an
+   │                      edit asked, how much to say)   (https, outbound)
+   ├─▶ Cartesia ──────── TTS (Sonic-3), the default voice;
+   │                      AssemblyAI-TTS-1 instead when
+   │                      TTS_PROVIDER=assemblyai      (wss, outbound)
    └─▶ Firebase Auth ─── identity (project aloud-c74f5): Google + email/
                           password sign-in; backend verifies Bearer ID tokens
                           via firebase-admin (REQUIREMENTS.md §4.8)
@@ -40,7 +44,7 @@ results), [deployment.md](deployment.md) (step-by-step VM runbook),
  email alerts).
 ```
 
-One human-facing product surface (the web app), three paid AI provider
+One human-facing product surface (the web app), four paid AI provider
 dependencies on the voice path, one identity provider (incoming).
 
 ## 2. Tech stack
@@ -49,11 +53,12 @@ dependencies on the voice path, one identity provider (incoming).
 |---|---|---|
 | Frontend | Next.js + React | Next 15, React 19, TypeScript 5; Pipecat JS client SDK (`@pipecat-ai/client-js`, `small-webrtc-transport`) |
 | Backend | Python + FastAPI | Python 3.12 (`python:3.12-slim` image), uvicorn |
-| Voice orchestration | Pipecat | `pipecat-ai[webrtc,deepgram,google,cartesia]~=1.3.0` — cascade: turn detection → STT → LLM → TTS |
+| Voice orchestration | Pipecat | `pipecat-ai[webrtc,deepgram,cartesia,assemblyai]~=1.16.0` — cascade: turn detection → STT → LLM → TTS. Flux proposes turn boundaries; the user aggregator announces the turn and broadcasts the barge-in interruption |
 | Transport | WebRTC | Pipecat SmallWebRTC; server-side peer on the VM; STUN `stun.l.google.com` |
 | STT + turns | Deepgram Flux | transcription and end-of-turn in one model |
-| LLM | Claude Sonnet 5.5 (agent loop) + Claude Haiku 5.5 (FR-60 gate judge) | `anthropic~=2.8` SDK; thinking off on both; built by `make_loop_llm()` / `make_judge_llm()` — see "LLM models and thinking" below. Gemini 2.5 Flash remains selectable (`LLM_PROVIDER=google`) |
-| TTS | Cartesia Sonic-3 | speed 0.85, markdown/identifier sanitizer in front |
+| LLM | Claude Sonnet 5.5 (agent loop) | `anthropic~=2.8` SDK; thinking off; built by `make_loop_llm()` — see "LLM models and thinking" below. Gemini 2.5 Flash remains selectable (`LLM_PROVIDER=google`) |
+| Turn checks | TypeSafe Jev (`jev-1.14.0`, pinned) | REQUIREMENTS.md §4.15. One HTTP request per user turn, before the LLM is called, through `make_turn_checker()` in `agent/providers.py` (`httpx`, no SDK). About 0.1s; 1s ceiling, then the turn runs unchecked. Both checks on by default (`TURN_CHECK_DONE`, `TURN_CHECK_MODE`) |
+| TTS | Cartesia Sonic-3 (default) or AssemblyAI-TTS-1 | `TTS_PROVIDER` picks one in `make_tts()`. Cartesia: speed 0.85. AssemblyAI: Pipecat's native streaming service, `ASSEMBLYAI_TTS_VOICE` for the voice, no speed control; used in the owner's live sessions since 2026-11-15, with construct-level tests only. Both report per-word timings and sit behind the markdown/identifier sanitizer |
 | DB | PostgreSQL 16 | `postgres:16-alpine`; SQLAlchemy async + asyncpg (tests: aiosqlite) |
 | Auth | Firebase Auth | Google + email/password, open signup; Bearer ID tokens verified in `app/auth.py`; admin via `admin: true` custom claim; RLS on user-owned tables through a dedicated `aloud_app` Postgres role |
 | Reverse proxy | Caddy 2 | TLS (Let's Encrypt), path routing; currently also the interim `basic_auth` gate |
@@ -61,7 +66,7 @@ dependencies on the voice path, one identity provider (incoming).
 
 ### Backend packages (`backend/requirements.txt`)
 
-`pipecat-ai[webrtc,deepgram,google,cartesia]` (pipeline + provider services),
+`pipecat-ai[webrtc,deepgram,cartesia,assemblyai]` (pipeline + provider services),
 `anthropic` (the Claude loop client), `google-genai` (the Gemini loop client,
 kept as the swap-back path),
 `fastapi`, `firebase-admin` (token verification + account admin),
@@ -83,7 +88,9 @@ consoles are the source of truth.)
 | Provider | Used for | Env key | Pricing model | Check usage at |
 |---|---|---|---|---|
 | Deepgram | STT + turn detection (Flux) | `DEEPGRAM_API_KEY` | pay-per-audio-minute against prepaid credits | [console.deepgram.com](https://console.deepgram.com) → Usage |
-| Anthropic (Claude API) | LLM: Sonnet 5.5 for the agent loop, Haiku 5.5 for the FR-60 judge | `ANTHROPIC_API_KEY` | per input/output token against prepaid credits — Sonnet 5.5 $2 / $10 per 1M, Haiku 5.5 $0.10 / $0.50 per 1M (prompts up to 100K tokens) | [console.anthropic.com](https://console.anthropic.com) → Usage / Billing |
+| Anthropic (Claude API) | LLM: Sonnet 5.5 for the agent loop | `ANTHROPIC_API_KEY` | per input/output token against prepaid credits — Sonnet 5.5 $2 / $10 per 1M (prompts up to 100K tokens) | [console.anthropic.com](https://console.anthropic.com) → Usage / Billing |
+| TypeSafe (Jev) | the §4.15 turn checks: one small request per user turn | `TYPESAFE_API_KEY` | per input token ($0.042 per 1M listed; output free) — about 500 tokens a turn, a few thousandths of a cent; not in the admin cost estimate (FR-70's recorded trade). Receives the current turn, unanswered turns before it and the agent's last reply — never documents | TypeSafe console |
+| AssemblyAI | TTS (AssemblyAI-TTS-1), only when `TTS_PROVIDER=assemblyai` | `ASSEMBLYAI_API_KEY` | $15 per 1M characters, pay as you go | AssemblyAI dashboard |
 | Cartesia | TTS (Sonic-3) | `CARTESIA_API_KEY` | per-character credits on the subscription tier | [play.cartesia.ai](https://play.cartesia.ai) → Usage/Subscription |
 | Firebase Auth | identity (project `aloud-c74f5`) | service-account JSON | free ≤ 50K MAU (email/password + Google) | [Firebase console → Authentication → Usage](https://console.firebase.google.com/project/aloud-c74f5/authentication/usage) |
 | Google Cloud | the GCE VM, static IP, egress | — | ~$14–15/mo flat | [GCP Billing](https://console.cloud.google.com/billing) · [Compute Engine](https://console.cloud.google.com/compute/instances) |
@@ -97,35 +104,34 @@ repo) are $0 at this scale; Claude reviews bill per PR push. The domain is
 
 ### LLM models and thinking
 
-Two models sit behind the one FR-48 seam (`agent/providers.py`,
+One model sits behind the FR-48 seam (`agent/providers.py`,
 `ClaudeLoopClient`):
 
 | Role | Model (env) | Factory | Effort | Thinking |
 |---|---|---|---|---|
 | Agent loop: every step of a turn, the greeting, the forced wrap-up | `claude-sonnet-5-5` (`LLM_MODEL`) | `make_loop_llm` | `LLM_EFFORT`, default `medium` | off — sent as `{"type": "between_tools"}` |
-| FR-60 create-gate judge: one yes/no call | `claude-haiku-5-5` (`JUDGE_MODEL`) | `make_judge_llm` | `low`, fixed | off — sent as `{"type": "disabled"}` |
 
-- **Why two models.** The loop model decides what to do and what to say, so
-  it gets the stronger model (the phase stance is quality first, cost
-  later). The judge returns one word in front of a write, so it gets the
-  fastest and cheapest one. Both use the same key, client class, and
-  provider — no second vendor.
-- **Per-model request fields** live in one table, `_CLAUDE_MODELS`. The two
-  models spell "thinking off" differently and each answers 400 to the
-  other's spelling, so a model missing from that table is rejected
+- **One model, no second caller.** The loop model decides what to do,
+  what to say and where a write goes, a new document included. There
+  is no judge or classifier call on Claude: `create_document` runs
+  when the model calls it, like any other tool (the create gate and
+  its Haiku judge were removed on 2026-11-16, §8 decision 4).
+- **Per-model request fields** live in one table, `_CLAUDE_MODELS`.
+  Claude models spell "thinking off" differently and each answers 400
+  to another's spelling, so a model missing from that table is rejected
   outright. Adding a model means adding its row.
 - **Checked at boot.** `app/main.py` calls `validate_llm_config` right
-  after loading settings: it builds both clients once, so a
+  after loading settings: it builds the loop client once, so a
   provider/model pair no client can run (a Gemini `LLM_MODEL` left
-  under `LLM_PROVIDER=anthropic`, or a Claude `JUDGE_MODEL` left under
+  under `LLM_PROVIDER=anthropic`, or a Claude one left under
   `google`) stops the container from starting, where the deploy health
   check sees it. `LLM_EFFORT` outside `low | medium | high` fails the
   same way in `load_settings` (higher levels are rejected by the API
   while thinking is off).
-- **One SDK client per process.** Every `ClaudeLoopClient` (one for the
-  loop and one for the judge, per session) wraps the same
-  `AsyncAnthropic`, so there is one connection pool and the judge's
-  first call rides a connection the loop already opened (the Gemini
+- **One SDK client per process.** Every `ClaudeLoopClient` (one per
+  session) wraps the same
+  `AsyncAnthropic`, so there is one connection pool and a new
+  session's first call rides a connection already open (the Gemini
   client shares one `genai.Client` the same way). No retries
   (the SDK default is 2), and one time bound: 10s for a response to
   START, enforced in `ClaudeLoopClient.stream`, so a stalled call
@@ -142,8 +148,7 @@ Two models sit behind the one FR-48 seam (`agent/providers.py`,
 - **Usage arrives early.** Claude reports input tokens when a response
   starts; the client hands that over at once (an early `LLMUsage`
   event), so an interrupted or dropped call still records the input
-  it was billed for — the loop's own calls and the judge's alike (a
-  judge call cut by its 4s timeout included). Gemini reports usage
+  it was billed for. Gemini reports usage
   only at the end.
 - **Silence before a tool call is accepted.** A step that goes straight
   to a tool call is silent until the whole call has been written and
@@ -172,8 +177,7 @@ Two models sit behind the one FR-48 seam (`agent/providers.py`,
 - **Server-side fallback (Sonnet only).** Sonnet requests carry the
   `server-side-fallback-2026-07-01` beta with `fallbacks: "default"`: a
   request Sonnet 5.5 declines in the `cyber` or `frontier_llm` category is
-  re-run on Claude Sonnet 5 by the API. Haiku has no fallback and rejects
-  the field. Any other decline arrives as finish reason `blocked` and takes
+  re-run on Claude Sonnet 5 by the API. Any other decline arrives as finish reason `blocked` and takes
   the loop's spoken-fallback path. Known gap: nothing records that a
   fallback happened. The trace row names the configured model even when
   Sonnet 5 answered, the declined attempt's tokens are not counted, and
@@ -182,14 +186,14 @@ Two models sit behind the one FR-48 seam (`agent/providers.py`,
   with a 400; only `auto` and `none` exist. The loop uses exactly those two.
   Anything that must restrict what the model can do (the planned
   discuss-only mode) has to filter the declared tool list, not force a tool.
-- **Cost estimates.** Judge tokens are recorded on the turn like any LLM
-  usage and priced at the single `RATE_LLM_*` pair, i.e. at Sonnet's rate.
-  The admin estimate therefore slightly overstates gated turns (the judge
-  call is a few hundred tokens).
+- **Cost estimates.** LLM tokens are priced at the single `RATE_LLM_*`
+  pair, i.e. at Sonnet's rate. Turns recorded before 2026-11-16 can
+  include a few hundred judge tokens (Haiku, cheaper), so the admin
+  estimate slightly overstates those.
 - **Not used yet:** prompt caching (ROADMAP feature 5). Every call pays
   full input price for the whole context.
 
-**Thinking is off on both models, by decision, for two reasons.**
+**Thinking is off, by decision, for two reasons.**
 
 1. *Latency.* Thinking happens before the first spoken token, and
    time-to-first-token is the largest stage of the ~3s end-of-speech →
@@ -217,8 +221,7 @@ that would have to change, in order):
    `{"type": "adaptive"}` and pick an effort level: at `low` the model
    skips thinking on most simple requests; from `medium` up it thinks
    before nearly every reply, greetings included. `max_tokens` then covers
-   thinking as well as the reply, which is why the judge (capped at 8
-   output tokens) stays off regardless.
+   thinking as well as the reply.
 2. *Client.* `ClaudeLoopClient.stream` must stop discarding thinking
    blocks and hand each one (text plus its signature, treated as opaque) to
    the loop. That is a new event or field in the neutral FR-48 contract;
@@ -289,7 +292,7 @@ copies the local one to the VM on request, keeping the VM's database
 password, domain, email and log level, and leaves each replaced
 version on the VM as `.env.<commit it ran with>`)**
 - [ ] The provider selector / model env (`STT_PROVIDER`, `LLM_PROVIDER`,
-  `LLM_MODEL`, `JUDGE_MODEL`, `LLM_EFFORT`, `TTS_PROVIDER`) and the new
+  `LLM_MODEL`, `LLM_EFFORT`, `TTS_PROVIDER`) and the new
   provider's API key. A model line left over from the old provider
   stops the backend from booting, with an error naming the model
   (`validate_llm_config`).
@@ -321,7 +324,9 @@ backend/
               detection, caps; runs via threadpool + semaphore)
   agent/      companion.py (CompanionAgent: builds/runs one session's pipeline)
               loop.py (§4.10 AgentLoopProcessor: the agent loop IN the
-              pipeline's LLM slot — steps, tools, the FR-60 gate,
+              pipeline's LLM slot — the §4.15 turn checks before the
+              first step, steps, tools, the pause
+              between two spoken steps,
               barge-in disposal, FR-61 playback-cut amendment,
               self-instrumentation; + AgentLoopObserver, its eyes
               downstream: bot-speaking, the synthesis stream,
@@ -330,16 +335,17 @@ backend/
               only message source — feature 5 re-implements behind it),
               providers.py (THE provider seam: SDK construction for
               STT/TTS + the FR-48 loop LLM streaming clients — Claude in
-              use, Gemini kept — and the loop/judge factories),
+              use, Gemini kept — the loop factory, and the
+              FR-69 turn checker: Jev over HTTP),
               prompts.py (system prompt, FALLBACK lines, wrap-up,
               the per-document attach-block renderer),
               tools.py (FR-53 registry: create/list/read/search/
               edit_document — paged reads, two-scope search, str_replace/
               insert/append/replace/rename, announce payload cap),
-              gate.py (FR-60 create gate: a bounded yes/no judge call
-              through the FR-48 seam, on the smaller judge model, in
-              front of gated writes —
-              explicit-request check, fails closed),
+              checks.py (§4.15: the three questions, the evidence
+              builder, and the rules that turn answers into a turn's
+              plan — silent, affirm, answer, edit-and-speak, plain;
+              pure functions, the provider is behind providers.py),
               registry.py (FR-52/53 session-provider registry: HTTP-side
               deletes and cross-session edits reach live attach blocks;
               same-process by stated assumption — one uvicorn worker),
@@ -366,7 +372,11 @@ backend/
               show_trace.py (FR-49 developer trace pretty-printer; superuser
               bypass via DATABASE_URL, guarded), smoke_llm.py (one live
               call per LLM client through the factories — run after a key
-              or model change), spike_gemini_stream.py (the FR-48 spike,
+              or model change), replay_frames.py (replays recorded turns
+              from the git-ignored local-evals/frames as single model
+              calls against the current prompt — the cheap check before
+              a live voice run), bench_turn_checks.py (the same idea for
+              the turn checker), spike_gemini_stream.py (the FR-48 spike,
               kept as reference)
   tests/      SQLite-backed suite + Postgres-only lane (test_rls.py,
               test_migration.py, test_documents_pg.py)
@@ -438,15 +448,30 @@ Two architectural seams everything hangs on:
    backend; session-owned — the sessionless variant was removed), then WebRTC
    audio flows browser ↔ backend directly over UDP (bypasses Caddy).
 3. Turn loop (FR-42): Flux detects end-of-turn → the aggregator emits the
-   assembled user message → the loop appends it to the context and steps:
+   assembled user message → the loop appends it to the context, then
+   runs the §4.15 turn checks: one request to Jev with the turn, any
+   unanswered turns before it and the agent's last reply (never
+   documents), asking whether the user is done, whether an edit was
+   asked for, and how much they expect said back. Mid-thought or
+   nothing asked → the LLM is not called, nothing is spoken, the client
+   gets `turn.silent` (its indicator returns to Listening) and the text
+   waits in the context for the next turn. Otherwise the verdict adds
+   one instruction to that turn's calls only — "affirm" (a few words),
+   "answer" (one or two sentences) or "edit and speak". The checks
+   steer what is said; they never take a tool away. No answer within 1s, or an
+   error → the turn runs unchecked, as before the checks existed. Every
+   checked turn leaves a `turn.check` log line, a `check` usage event
+   (its `detail` is the outcome the admin drill-down shows) and one
+   `llm_traces` row. Then the loop steps:
    one streaming Claude Sonnet call per step (thinking off), text deltas
    forwarded to TTS as they arrive; tool calls execute concurrently
    (10s timeout = a tool result; reads abandoned on barge-in, writes run
    in tasks outside pipeline cancellation and always finish); tool steps
    append atomically and loop (MAX 5 steps + one forced tool-free wrap-up
    call); a silent tool round stays silent — the loop speaks no line of
-   its own, and drops a bare "Done." that is premature or redundant
-   (FR-43); any loop error degrades to a spoken canned fallback. The
+   its own and drops nothing the model says; when two steps of a turn
+   both speak, the later one waits for the earlier speech to finish
+   playing plus one second of silence (FR-43); any loop error degrades to a spoken canned fallback. The
    greeting is one tool-forbidden step with no user turn, carrying the
    FR-24 preferred name on its ephemeral trigger — one bounded (1s)
    `users` read at session setup, degrading to a nameless greeting on
@@ -654,14 +679,15 @@ Full original rationale: `git show a84df1b:SDD.md` (§0).
 | 1 | Cascade pipeline, not speech-to-speech | Conversation state as text on our server → memory layer, provider swap, resume. Gemini Live prototype (old `main`, preserved as `prototype-gemini-live`) hit 32K audio-token context and no control |
 | 2 | Pipecat for orchestration | Python like the backend; barge-in/turn-taking solved; swappable services; built-in metrics. Rejected: LiveKit Agents, fully custom (custom design preserved as SDD-v2 in history) |
 | 3 | WebRTC transport (SmallWebRTC) | Target user is on a phone walking: graceful under packet loss + browser echo cancellation (barge-in depends on it). Rejected: raw WebSocket (TCP head-of-line blocking) |
-| 4 | Deepgram Flux / Claude Sonnet 5.5 loop + Haiku 5.5 judge (thinking off) / Cartesia Sonic-3 | STT and TTS are fastest-in-class for their stage. LLM: Gemini 2.5 Flash until 2026-11-12, replaced because its decisions in live sessions were the product's biggest problem (new documents created by default, edits made silently while the spoken half of a request was dropped) and prompt fixes did not hold; the phase stance is quality first, with the ~3s budget a soft target. Thinking stays off for latency and because the context is edited in place ("LLM models and thinking", §2). The Gemini client is kept: swapping back is `LLM_PROVIDER=google` |
+| 4 | Deepgram Flux / Claude Sonnet 5.5 loop (thinking off) / Cartesia Sonic-3 | STT and TTS are fastest-in-class for their stage. LLM: Gemini 2.5 Flash until 2026-11-12, replaced because its decisions in live sessions were the product's biggest problem (new documents created by default, edits made silently while the spoken half of a request was dropped) and prompt fixes did not hold; the phase stance is quality first, with the ~3s budget a soft target. Thinking stays off for latency and because the context is edited in place ("LLM models and thinking", §2). The Gemini client is kept: swapping back is `LLM_PROVIDER=google`. The create gate (a Haiku judge in front of `create_document`, FR-60) was removed on 2026-11-16: it was built for Gemini's stray new documents, and on Sonnet it blocked a correct create for "Can you write all this down?" and made the agent ask "Do you want a new document for this?". Where a write goes is one choice among every document plus a new one, so the loop model makes it; a decider on Jev was considered and not built, and the question is revisited with the memory layer (ROADMAP 3.3.1) |
 | 5 | Firebase Auth (Google + email/password, open signup) | Third-party IDP support wanted; standard JWT verification fits a separate FastAPI backend; free at this scale. Rejected: Supabase Auth, Auth.js, hand-rolled sessions (REQUIREMENTS §4.8) |
 | 6 | Admin = Firebase custom claims | uid-bound (no email-matching trap), zero admin config in repo/env/DB, granted only via service-account script |
 | 7 | Postgres + pgvector-later, single DB | user_id-scoped tables + RLS for isolation; sensitive content in dedicated columns for post-MVP encryption. No separate vector DB planned at this scale |
 | 8 | Single VM, host networking, Caddy | Cheapest thing that runs real WebRTC (bridge networking can't forward ephemeral UDP); Caddy for zero-config TLS |
 | 9 | Git: `main` = workbench, `prod` = deploy pointer; PR + CI + Claude review gate on `main` | Two-branch model matching a solo dev with a live demo |
 | 10 | Everything in Docker; commit-at-checkpoints, push/PR only on confirmation | CLAUDE.md workflow rules |
-| 11 | Hand-rolled agent loop in the pipeline's LLM slot (§4.10) | One hot-path LLM call per turn (a "decider" call is serial latency for nothing — Flash selects tools and speaks in the same call); Pipecat stays the audio chassis, the loop is plain Python behind our seams (context provider, tool registry, provider client) so features 4–6 extend seams, not control flow, and a Pipecat retirement would strand nothing. Both mandated spikes ran first: stage swap + barge-in (the interruption hook is `_start_interruption`, not a frame), and live Gemini streaming (function calls arrive ATOMICALLY; raw API defaults thinking ON — pinned off per call) |
+| 11 | Hand-rolled agent loop in the pipeline's LLM slot (§4.10) | One hot-path LLM call per turn (the one thing asked first is §4.15's turn check: a small decision model, about 0.1s, 1s ceiling); Pipecat stays the audio chassis, the loop is plain Python behind our seams (context provider, tool registry, provider client) so features 4–6 extend seams, not control flow, and a Pipecat retirement would strand nothing. Both mandated spikes ran first: stage swap + barge-in (the interruption hook is `_start_interruption`, not a frame), and live Gemini streaming (function calls arrive ATOMICALLY; raw API defaults thinking ON — pinned off per call) |
+| 12 | Turn checks before the LLM (§4.15): TypeSafe Jev, one request per user turn | Deepgram says the user stopped talking, not that they are finished or what they want. Asking first means a turn the agent should not take costs no LLM call, and an answer turn carries its length bound. The checks steer and never restrict: withholding the edit tools on a no-edit verdict was built, run live and removed, because a wrong verdict blocked a real edit. Wait-then-call was chosen over starting the LLM at once and applying the verdict to its output (wasted tokens, a refusal round). A missing answer falls back to the old behaviour, so the provider being down never mutes the agent. Rejected: tuning Flux's threshold alone, an audio-level turn model (non-commercial weights, needs a GPU), Haiku as the checker (about 1s per turn) |
 
 ## 9. Scaling notes (when the time comes)
 

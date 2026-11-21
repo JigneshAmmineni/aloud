@@ -14,6 +14,7 @@ import { SmallWebRTCTransport } from "@pipecat-ai/small-webrtc-transport";
 
 import { authedFetch, getToken } from "@/lib/auth";
 import type { AnnouncedDoc } from "@/lib/workspace";
+import { modeForServerMessage } from "./turnOutcome";
 
 export type SessionState = "idle" | "connecting" | "active" | "ending";
 export type VoiceMode = "listening" | "thinking" | "speaking";
@@ -185,6 +186,11 @@ export function useAloudSession({
           },
           // FR-55: document announces go to the workspace reducer.
           onServerMessage: (data: any) => {
+            // §4.15 (FR-64): a turn the agent chose not to answer never
+            // reaches "speaking" — the server says so, and the indicator
+            // leaves "thinking" instead of looking hung.
+            const mode = modeForServerMessage(data?.type);
+            if (mode) setMode(mode);
             if (
               (data?.type === "document.created" ||
                 data?.type === "document.updated") &&

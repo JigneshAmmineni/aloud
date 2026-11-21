@@ -246,7 +246,6 @@ CARTESIA_VOICE_ID=
 STT_PROVIDER=deepgram_flux
 LLM_PROVIDER=anthropic
 LLM_MODEL=claude-sonnet-5-5
-JUDGE_MODEL=claude-haiku-5-5
 LLM_EFFORT=medium
 TTS_PROVIDER=cartesia
 TTS_SANITIZE_ENABLED=true
@@ -590,8 +589,23 @@ LLM_MODEL=claude-sonnet-5-5
 RATE_LLM_PER_1M_TOKENS_IN=2
 RATE_LLM_PER_1M_TOKENS_OUT=10
 ```
-and no `JUDGE_MODEL` line unless it names a Claude model. `GOOGLE_API_KEY`
-can stay (unused) or go.
+`GOOGLE_API_KEY` can stay (unused) or go. A `JUDGE_MODEL` line left in
+`.env` from before 2026-11-16 is no longer read (the create gate it
+configured was removed) and can go too.
+
+The turn checks (REQUIREMENTS.md §4.15) are the second: both are on by
+default, and with either one on the backend refuses to boot without
+```
+TYPESAFE_API_KEY=...
+```
+so it must be in your local `.env` before the sync that precedes that
+deploy (the sync replaces the VM's file with yours). The switches and
+thresholds (`TURN_CHECK_DONE`, `TURN_CHECK_MODE`, `CHECK_*`) are optional;
+`.env.example` lists them with their defaults. After the deploy,
+`docker compose -f docker-compose.prod.yml exec backend python
+scripts/smoke_llm.py` checks Claude AND one request to the turn checker,
+and `python scripts/bench_turn_checks.py --latency` gives the checks'
+response time from the VM.
 
 Push your change to GitHub from your laptop as usual, then on the VM:
 ```bash

@@ -11,6 +11,8 @@ import pytest
 os.environ.setdefault("DEEPGRAM_API_KEY", "test-dg")
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-a")
 os.environ.setdefault("CARTESIA_API_KEY", "test-c")
+# §4.15: the turn checks are on by default and need their key (FR-69)
+os.environ.setdefault("TYPESAFE_API_KEY", "test-t")
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite://")
 # Never a real file: auth deps are overridden in tests, and app.auth inits
 # Firebase lazily, so this path is never opened.
@@ -56,7 +58,6 @@ def make_settings():
             cartesia_api_key="c_fake",
             cartesia_voice_id="voice",
             llm_model="claude-sonnet-5-5",
-            judge_model="claude-haiku-5-5",
             llm_effort="medium",
             stt_provider="deepgram_flux",
             llm_provider="anthropic",

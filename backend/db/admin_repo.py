@@ -194,6 +194,20 @@ async def session_detail(admin: AuthedUser, session_id: str) -> dict | None:
             .where(UsageEvent.session_id == session_id)
             .group_by(UsageEvent.turn_id, UsageEvent.stage, UsageEvent.unit)
         )
+        # FR-36: each turn's §4.15 outcome is the `detail` of its one
+        # `check` event (FR-70) — a lookup beside the aggregate above, not
+        # folded into its grouping (detail is not a grouping key there).
+        check_rows = await db.execute(
+            select(UsageEvent.turn_id, UsageEvent.detail)
+            .where(
+                UsageEvent.session_id == session_id,
+                UsageEvent.stage == "check",
+            )
+            .order_by(UsageEvent.id)
+        )
+        outcome_by_turn = {
+            turn_id: detail for turn_id, detail in check_rows if turn_id is not None
+        }
 
     turn_usage: dict[int | None, dict] = {}
     for turn_id, stage, unit, total in usage_rows:
@@ -221,6 +235,7 @@ async def session_detail(admin: AuthedUser, session_id: str) -> dict | None:
                 metrics_by_turn[t].stages_ms if t in metrics_by_turn else None
             ),
             "usage": turn_usage.get(t, {}),
+            "outcome": outcome_by_turn.get(t),
         }
         for t in turn_ids
     ]

@@ -8,9 +8,10 @@ record FR-71 points to. It has three parts, in the order they run:
 2. the full bench from the production VM, once §4.15 is built;
 3. the live voice run.
 
-A check is switched on in production only after parts 2 and 3 and the
-privacy-policy update, on the owner's decision. No pass mark is set in
-advance: the numbers below are recorded and read, not gated.
+The checks are on by default once built (FR-71). This file is the
+acceptance record the owner reads before deploying them; either check
+can be switched off afterwards. No pass mark is set in advance: the
+numbers below are recorded and read, not gated.
 
 ## What is being tested
 
@@ -19,8 +20,9 @@ advance: the numbers below are recorded and read, not gated.
   something to be written or changed?), SPEAK (do they expect nothing,
   a few words, or a real answer?).
 - What those answers decide (FR-63): silence (mid-thought, or nothing
-  asked), a talk-only turn, the affirm instruction, the edit-and-speak
-  instruction, or a plain turn.
+  asked), the affirm instruction, the answer instruction, the
+  edit-and-speak instruction, or a plain turn. They never take a tool
+  away.
 - The answer modes (FR-72): 1 affirm in five words or fewer, 2 summary
   in one or two sentences, 3 explain or recite on an explicit ask.
   "Hmm." is gone from the prompt while both checks are on (FR-73).
@@ -78,11 +80,9 @@ modes:
 
 ## Part 3 — live voice run (owner, local dev server)
 
-This run is a condition of switching on, so it happens where the
-switches may already be on: the owner's development server, with only
-the owner speaking. It is repeated on the live site after switch-on, as
-a check of that deploy. Fresh session, no documents attached, both
-switches on. Topic is free;
+Run on the owner's development server before the deploy, and again on
+the live site after it. Fresh session, no documents attached, both
+switches on (the default). Topic is free;
 the turns below are shapes, not exact words. Every row names the
 outcome the checks should select and the answer mode the reply should
 take. Duration class: modes 1 and 2 finish in seconds; mode 3 takes as
@@ -94,46 +94,46 @@ run 2 script except for the expected columns):
 | # | Spoken turn | Outcome | Mode | Required result |
 |---|---|---|---|---|
 | 1 | (connect) | not checked | — | a few words of greeting |
-| 2 | a plain factual question | plain or talk only | 2 | one or two sentences, no document |
+| 2 | a plain factual question | answer | 2 | one or two sentences, no document |
 | 3 | thinking aloud, trailing off ("…maybe two nights? Probably…") | silent (mid-thought) | — | nothing spoken; the indicator returns to Listening |
 | 4 | "Create a new document called … with what I've said so far." | affirm | 1 | one document; a few words of confirmation |
 | 5 | "Add that we need to book the campsite by Friday." | affirm | 1 | edit without asking; a few words of confirmation |
-| 6 | "Give me a quick summary of the plan." | talk only | 2 | spoken, one or two sentences, nothing written |
+| 6 | "Give me a quick summary of the plan." | answer | 2 | spoken, one or two sentences, nothing written |
 | 7 | "Organize the plan into three sections: …" | affirm | 1 | restructured; a few words of confirmation |
-| 8 | "What am I missing?" | talk only | 2 | spoken, no write; a short list is allowed here |
-| 9 | "Poke holes in this plan." | talk only | 2 | spoken critique, no write |
+| 8 | "What am I missing?" | answer | 2 | spoken, no write; a short list is allowed here |
+| 9 | "Poke holes in this plan." | answer | 2 | spoken critique, no write |
 | 10 | "Rename the document to …" | affirm | 1 | one rename; a few words of confirmation |
-| 11 | "Which of my documents mention a budget?" | talk only | 2 | silent search (a read tool on a talk-only turn), then the answer |
+| 11 | "Which of my documents mention a budget?" | answer | 2 | silent search, then the answer |
 | 12 | "Change the line about X to Y." (no such line) | plain | 2 | one short sentence that it could not; no tool names |
-| 13 | "Actually, never mind. Let's go back to the trip." | silent (nothing asked) or plain | 2 | no tool; silence is acceptable |
-| 14 | "Walk me through the whole plan in detail." / "Hold on." / "Okay. Continue." | talk only, then silent or plain, then plain | 3 | long answer; resumes from what was heard |
+| 13 | "Actually, never mind. Let's go back to the trip." | silent (nothing asked) or affirm | 2 | no tool; silence is acceptable |
+| 14 | "Walk me through the whole plan in detail." / "Hold on." / "Okay. Continue." | answer, then silent, then answer | 3 | long answer; resumes from what was heard |
 | 15 | "Stop." mid-reply | silent (nothing asked) | — | the agent stops and stays stopped |
 | 16 | "Can you put the…" | silent (mid-thought) | — | nothing spoken; then finish the sentence and it acts on the whole thought |
-| 17 | "That's all for now." | silent (nothing asked) or plain | 2 | silence or one short line |
+| 17 | "That's all for now." | silent (nothing asked) or affirm | 2 | silence or one short line |
 
 Rows for this change:
 
 | # | Spoken turn | Outcome | Mode | Required result |
 |---|---|---|---|---|
-| 18 | "I think we should probably…" (pause five seconds or more) "…go with the cheaper campsite." | silent (mid-thought), then plain or talk only | 2 | silence through the pause, however long; then one reply to the whole thought |
+| 18 | "I think we should probably…" (pause five seconds or more) "…go with the cheaper campsite." | silent (mid-thought), then answer | 2 | silence through the pause, however long; then one reply to the whole thought |
 | 19 | "Okay." / "Right, right." / "Hmm." after a reply | silent (nothing asked) | — | nothing spoken, each time |
 | 20 | after the agent asks a yes/no question: "Yeah." | affirm | 1 | it acts on the yes; not judged mid-thought or nothing-asked |
 | 21 | "Split the list into client side and server side, and give me your ideas for each." | edit and speak | 1 then 2 | the edit lands AND the ideas are spoken |
-| 22 | "What do you think of that split?" | talk only | 2 | spoken opinion, one or two sentences, no write |
-| 23 | "Should we add a budget section? What would go in it?" | talk only | 2 | spoken answer; nothing written, and it does not claim to have written anything |
+| 22 | "What do you think of that split?" | answer | 2 | spoken opinion, one or two sentences, no write |
+| 23 | "Should we add a budget section? What would go in it?" | answer | 2 | spoken answer; nothing written, and it does not claim to have written anything |
 | 24 | "Add a budget section with those." | affirm | 1 | the edit lands; a few words of confirmation |
-| 25 | "Explain the schedule section in detail." | talk only | 3 | a full explanation |
-| 26 | "Read me the gear section." | talk only | 3 | the section read word for word |
-| 27 | "Give me five things I should double-check before leaving." | talk only | 2 | a spoken list: at most five points, one clause each, no bullet words |
+| 25 | "Explain the schedule section in detail." | answer | 3 | a full explanation |
+| 26 | "Read me the gear section." | answer | 3 | the section read word for word |
+| 27 | "Give me five things I should double-check before leaving." | answer | 2 | a spoken list: at most five points, one clause each, no bullet words |
 | 28 | a question, then barge in inside the reply's first second with a different question | plain | 2 | the second answer does not treat the first reply as heard |
 | 29 | say "mm-hmm" while the agent is mid-reply | silent (nothing asked) | — | recorded, not gated: the agent stops and does not resume (accepted limit); note how it feels |
 | 30 | a garbled or half-heard instruction | plain | 2 | "say that again?" in some form; never "Hmm." |
-| 31 | a real request, immediately after row 19's silence | plain or talk only | per row | the reply uses the earlier turn too if it was part of the thought, and ignores it if not |
+| 31 | a real request, immediately after row 19's silence | answer | per row | the reply uses the earlier turn too if it was part of the thought, and ignores it if not |
 | 32 | an edit request on which the agent narrates first ("I'll add that…") | affirm | 1 | the narration, a pause of about a second, then the confirmation; neither is dropped |
-| 33 | after the agent checks its understanding ("…is that right?"): "Yeah." | talk only, affirm | 1 | five words or fewer, not a new paragraph |
-| 34 | "Hi." mid-session | talk only, affirm | 1 | a short greeting back |
+| 33 | after the agent checks its understanding ("…is that right?"): "Yeah." | affirm | 1 | five words or fewer, not a new paragraph |
+| 34 | "Hi." mid-session | affirm | 1 | a short greeting back |
 | 35 | thinking aloud about a plan, several sentences, nothing asked | silent (nothing asked) | — | nothing spoken |
-| 36 | answer a question the agent asked, with new information | talk only | 2 | one or two sentences back |
+| 36 | answer a question the agent asked, with new information | answer | 2 | one or two sentences back |
 
 Also run once with each switch off in turn (rows 3, 6, 19 and 21 are
 enough): with a switch off, its outcomes must not occur and the agent
@@ -146,8 +146,8 @@ must behave as it did before.
   `turn.check` log lines and the owner's notes. The owner prefers the
   first mistake to the second; the thresholds are tuned until the
   balance feels right, and the final values are recorded here.
-- **Wrongly withheld** (an edit request that could not edit): the agent
-  must have said the change was not made, never that it was.
+- **An edit request always edits.** No outcome takes the tools away,
+  so "I can't edit right now" in any form fails the run.
 - **Wrongly instructed** (the edit-and-speak instruction on a turn that
   asked for no edit; row 23 is the shape): nothing is written. Any edit
   on a turn that asked for none fails the run.
@@ -175,7 +175,7 @@ must behave as it did before.
   `turn.check_bypassed` lines. A bypass is not a failure of the run,
   but its count is recorded, and so is that turn's end-of-speech →
   first audio on its own line: it carries the whole ceiling.
-- End-of-speech → first audio on the plain and talk-only rows,
+- End-of-speech → first audio on the answer rows,
   compared with the 2026-11-12 run 2 figures: the checks should add
   about their own response time and no more.
 
@@ -369,3 +369,156 @@ a factor of eight.
    tune against.
 3. Mid-thought has 13 examples and edit-plus-ideas has 2. Neither
    threshold should be trusted from this file; the live run sets them.
+
+### Build checks — 2026-11-14, development machine, branch `feature/turn-checks`
+
+Run while §4.15 was being built, against the live providers.
+
+**The request shape FR-65 depends on is accepted.** `scripts/smoke_llm.py`
+gained a case whose history calls `edit_document` while the request
+declares only a read tool, with the turn's instruction as a trailing
+system message: Claude Sonnet 5.5 accepts it.
+
+**That same case caught a wording bug.** With the first wording of the
+talk-only instruction the model retracted the earlier, real edit ("I
+need to correct my earlier reply… milk has not been added"), on both of
+two tries. Scoped to the user's latest message and told that earlier
+edits stand, it answered the question and left the edit alone, 3 of 3.
+
+**The one-turn instructions, on the real system prompt** (both checks
+on), two tries each, all as intended:
+
+| Case | What the model did |
+|---|---|
+| talk-only, the latest message asks for an edit | "I can't make that change right now, so eggs haven't been added to the list." No tool call |
+| talk-only + affirm, a "Yeah." that confirms | "Okay." |
+| affirm, a plain edit request | called `edit_document`, said nothing before it |
+| edit-and-speak on a turn that asked for no edit | answered in one sentence; no edit |
+| thinking aloud that reached the model | "Sounds good." |
+
+**The checker through the factory** (`make_turn_checker`, the real
+questions, evidence builder and outcome rules;
+`scripts/bench_turn_checks.py`):
+
+- Response time, 36 scripted requests on one warm connection: p50 74 ms,
+  p95 99 ms, max 300 ms, none over a second. (The earlier runs opened a
+  connection per request; the app shares one.) From the development
+  machine: the VM figure is still owed.
+- Accuracy on the labelled set, at the knob table's values: 64 of 87
+  turns get the outcome their labels call for (run 2's scratch script
+  gave 65; the evidence text differs by a line). Wrongly silent: 1
+  (row 40). Wrongly withheld: 0. Wrongly replying: 9 — the two short
+  fragments and the thinking-aloud statements, which now close with a
+  few words when they reach the model. Wrongly instructed: 5 (rows 33,
+  51, 54, 59, 100), three of them plain edit requests in rough speech
+  that SPEAK read as wanting an answer; the instruction's own wording
+  keeps that from causing an edit nobody asked for.
+
+Part 2's response time from the VM and all of part 3 remain to run.
+
+### Part 3, run 1 — owner, local dev server, 2026-11-14 (session `5cf0c0e2…`)
+
+On commit `add3129`, both checks on. 31 turns, rows 1 to 20 of the
+spoken script; it ended there because the voice provider ran out of
+credits. 85 trace rows; check response time 111 to 340 ms, no bypass.
+
+| Row | What happened | Cause | Fix |
+|---|---|---|---|
+| 3 | "…Probably" arrived as its own one-word turn, twice, and got "Got it." and "Okay." | DONE scored the bare word 0.53 and 0.76 | none yet: better than the advice it used to get, not the silence wanted. Carried |
+| 8 | "What am I missing?" got four sentences ending in an unasked "Also… worth confirming" | the answer mode's bound lives in the prompt only, and did not hold (also 3 sentences on rows 2 and 20) | FR-66 gains an **answer** instruction on the turn. Re-probed live: two sentences, twice |
+| 10 | the rename got silence | speech recognition delivered "Receiving the document to late weekend plan"; DONE scored it 0.44, just inside the 0.5 line | `CHECK_MID_THOUGHT_MIN` 0.5 → 0.6. Every real mid-thought in the session scored 0.32 or lower |
+| 14 | "Hold on" had to be said four times; "continue" got "Okay, holding" | (a) the server registered no speech for 29 s of playback: the microphone path, not this change. (b) "continue" was transcribed as "Good evening", and the model answered the earlier, unanswered "Hold on" | (a) none here: roadmap feature 8. (b) the prompt now says to answer the newest message |
+| 15 | "Stop" had to be said three times | same as 14(a): 9 s before speech registered; all three arrived as one turn | none here |
+| 16 | after 'Did you mean "put the first aid kit under gear"?' and "Yes.", the agent said "Document editing is off for this reply" | WRITE scored the "Yes." 0.05, so the tools were withheld; and the instruction's wording was repeated aloud | WRITE now includes agreeing to an offered change (0.06 → 0.93 on this turn, live); the instruction never names itself and asks the user to say it again |
+| 20 | stuck on Thinking for 20 s and on every turn after | Cartesia returned `quota_exceeded` from 05:45:59 UTC: replies were generated and could not be spoken | owner tops up. A voice-provider failure showing as endless Thinking is older than this change, and is not fixed here |
+
+Worked as intended: the mid-thought silences on "After that," (twice),
+"I said" and "Can you put"; the nothing-asked silences on "Okay.",
+"Right. Right." and "Stop. Stop. Stop."; the create, the edits and the
+restructure, each closed in a word ("Done.", "Added.", "Fixed.",
+"Renamed."); the playback cut on rows 14 and 15 once the interruption
+registered.
+
+Not reached: rows 21 to 36. The run is repeated from the top on the
+fixed build once the voice provider has credits.
+
+**What the fixes cost on the labelled set** (`bench_turn_checks.py
+--accuracy`, same 102 turns, after the fixes):
+
+- The reworded WRITE question withholds the edit tools less often: on
+  47 of the 63 turns that asked for no edit, down from 59. It still
+  withholds them from none of the 16 that did. The turns it no longer
+  withholds keep their tools as they did before the checks existed,
+  which is the lean FR-63 chose. Two "Great."-type turns now get a
+  short closing word where they got silence, because a turn that keeps
+  its tools is never silent.
+- A tighter wording was tried ("saying yes to the assistant's question
+  about making a specific change counts; a yes to any other question
+  does not"). It kept 60 of 63, and scored the first-aid-kit "Yes." at
+  0.17, which is still withheld. Rejected: the wording has to fix the
+  turn it was written for with room to spare (the chosen one scores it
+  0.91 to 0.93).
+- With the mid-thought line at 0.6: one real request still silenced
+  (row 40), three mid-thought fragments answered (rows 24, 30, 35).
+
+### Design change after run 1 — owner, 2026-11-14
+
+The no-edit verdict no longer touches the tools and no instruction
+mentions editing (FR-63, decision 4; FR-65 removed). Run 1's row 16 is
+why: a wrong verdict on a "Yes." that confirmed an edit left the turn
+unable to edit. Before removing it, a softer form was probed live with
+every tool available and one line saying no edit seemed to be asked,
+three tries per case:
+
+| Case | Result |
+|---|---|
+| "Yes." confirming an edit, wrongly steered | edited, 3 of 3 |
+| "Sure." to an offered edit, wrongly steered | edited, 3 of 3 |
+| a plain edit request, wrongly steered | edited, 3 of 3 — and said the conflict aloud each time ("The note says not to edit, but you've clearly asked…"), even when told never to mention the note |
+| opinion and "tell me what you have" questions, rightly steered | no edit, 3 of 3 each |
+| the same question with no steer at all | no edit, 3 of 3 |
+
+So a line about edits is audible when it is wrong and unnecessary when
+it is right. What a no-edit verdict now adds is only the answer
+instruction's length bound.
+
+### Before run 2: Pipecat 1.3 → 1.16 is in the same build
+
+Run 2 is on the upgraded framework, so it tests two things at once.
+If something sounds wrong, switch both checks off (`TURN_CHECK_DONE=0`,
+`TURN_CHECK_MODE=0`) and repeat the row: if it still happens, it is the
+framework and not the checks. Listen for, beyond the script's rows:
+
+- barge-in while the agent is speaking (rows 14, 15, 28, 29), and a
+  second burst of speech right after the first;
+- what the agent believes it said after a cut (FR-61), now on 1.16's
+  word-by-word releases;
+- the pause between a narration and its closing word (row 32);
+- `turn.straggler_dropped` warnings in the backend log;
+- with `TTS_PROVIDER=assemblyai`: the first run of that voice at all.
+
+### The AssemblyAI voice, first live sessions — owner, local dev server, 2026-11-15
+
+Recorded here because the watch list above names "the first run of that
+voice at all" and no result had been written down.
+
+- **What was heard.** The voice was choppy: it stopped for half a second
+  to a second in the middle of sentences and words, then went on.
+- **Where it came from.** The development laptop, not the voice and not
+  the build. The laptop was out of memory and its processor was
+  saturated (95 to 100%, 0.3 to 0.4 GB free), and the backend's one
+  event-loop thread took 27 to 31 seconds to send 17 seconds of speech.
+  After a restart the same test sent 17 seconds in 16 to 17.5.
+- **What rules the voice out.** The service returned 17 seconds of
+  audio in about 1.5 seconds with no gaps between chunks, and the audio
+  saved straight from it (16.5 s at 24 kHz) has no silent stretches.
+- **Not ruled out.** Whether Pipecat 1.16 costs more processor time per
+  reply than 1.3 did. No 1.3 image was at hand to compare.
+- **Since then.** The four sessions of 2026-11-19
+  (`2026-11-16-create-gate-removal.md`) ran on Pipecat 1.16 with no
+  audio complaint from the owner. Which voice they used was not
+  recorded: the usage rows do not name the provider.
+
+Still deferred from this file's run 2: the full 36-row script, and the
+response time of the checks from the VM. Resume point: part 3, row 1,
+on the commit that merges.

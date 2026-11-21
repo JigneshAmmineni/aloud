@@ -13,6 +13,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 
 import { authedFetch } from "@/lib/auth";
+import { fmtOutcome } from "@/lib/turnOutcome";
 import {
   AdminShell,
   fmtCost,
@@ -34,6 +35,9 @@ type Turn = {
   stages_ms: Record<string, number> | null;
   usage: Usage;
   estimated_cost: CostEstimate;
+  // §4.15: what the turn checks decided (FR-70's `detail`); null for a
+  // turn that was never checked
+  outcome: string | null;
 };
 
 type Detail = {
@@ -159,6 +163,7 @@ export default function AdminSessionPage() {
               <thead>
                 <tr>
                   <th>turn</th>
+                  <th>outcome</th>
                   <th>speech → first audio</th>
                   <th>tokens in</th>
                   <th>tokens out</th>
@@ -170,7 +175,7 @@ export default function AdminSessionPage() {
               <tbody>
                 {data.turns.length === 0 && (
                   <tr>
-                    <td colSpan={7} className="admin-empty">
+                    <td colSpan={8} className="admin-empty">
                       no per-turn data for this session
                     </td>
                   </tr>
@@ -181,6 +186,7 @@ export default function AdminSessionPage() {
                   return (
                     <tr key={t.turn_id} className={breach ? "error-row" : ""}>
                       <td>{t.turn_id}</td>
+                      <td>{fmtOutcome(t.outcome)}</td>
                       <td className={breach ? "breach" : ""}>
                         {ms != null ? `${ms}ms${breach ? " ⚠" : ""}` : "—"}
                         {isToolFirst(t.stages_ms) ? " ⏳" : ""}
@@ -198,7 +204,8 @@ export default function AdminSessionPage() {
           </div>
           <p className="admin-footnote">
             “—” latency = turn interrupted before first audio (its spend still
-            counts); ⚠ = over the {NFR1_BUDGET_MS / 1000}s NFR-1 target; ⏳ =
+            counts), or a turn the agent chose not to answer (see its
+            outcome); ⚠ = over the {NFR1_BUDGET_MS / 1000}s NFR-1 target; ⏳ =
             silent until its first tool call (an expected slow turn, not a
             regression)
           </p>

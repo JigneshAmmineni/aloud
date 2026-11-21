@@ -13,6 +13,8 @@ Message format is the neutral one agent/providers.py translates
 translation, this seam owns assembly and bookkeeping.
 """
 
+import re
+
 from loguru import logger
 
 from agent.prompts import render_documents_block
@@ -24,6 +26,11 @@ from agent.providers import LLMToolCall
 # complete answer). Owned here: the loop passes interrupted=True, the
 # provider applies the mark.
 INTERRUPTED_SUFFIX = " [cut off by the user here]"
+
+# FR-61's first-sentence cut: a sentence ends at the first . ? or ! that
+# is followed by whitespace or by the end of the text (so "3.5" and
+# "notes.md" do not end one).
+_SENTENCE_END = re.compile(r"[.?!](?=\s|$)")
 
 # Locally computed, explicitly approximate token estimate (FR-44): chars/4,
 # never a provider count_tokens round trip on the hot path.
@@ -215,6 +222,11 @@ class ContextProvider:
                 break
         if kept:
             amended = " ".join(words[:kept]) + INTERRUPTED_SUFFIX
+        elif heard and norm.startswith(heard):
+            # under the floor, but it IS how the entry opens: the cut
+            # landed within its first few words. Same answer as a cut
+            # before anything was released (cut_to_first_sentence).
+            return self.cut_to_first_sentence()
         elif heard:
             # THIS ENTRY's own sentences played but none prefix-match: the
             # two streams disagree textually (the TTS sanitizer rewrites
@@ -246,6 +258,33 @@ class ContextProvider:
         ).info("post-turn barge-in: assistant entry amended to spoken prefix")
         return True
 
+    def cut_to_first_sentence(self) -> bool:
+        """FR-61: audio played, but playback was cut before the last
+        entry's first sentence finished. Keep that sentence — the user
+        heard part of it, the accepted over-approximation — and drop the
+        rest, which never played, under the cut-off mark. Reads only the
+        entry itself: its own text up to the first `.`, `?` or `!` that
+        is followed by whitespace or ends the text. An entry that is a
+        single sentence keeps all of it, with the mark."""
+        last = self._messages[-1] if self._messages else None
+        if not last or last.get("role") != "assistant" or last.get("tool_calls"):
+            return False
+        content = last.get("content") or ""
+        if not content.strip() or content.endswith(INTERRUPTED_SUFFIX):
+            return False
+        end = _SENTENCE_END.search(content)
+        first = content[: end.end()] if end else content
+        amended = first.rstrip() + INTERRUPTED_SUFFIX
+        self._approx_chars += len(amended) - len(content)
+        last["content"] = amended
+        self._log.bind(
+            event="context.playback_cut",
+            first_sentence=True,
+            kept_chars=len(first),
+            total_chars=len(content),
+        ).info("post-turn barge-in: assistant entry cut to its first sentence")
+        return True
+
     def append_assistant(self, text: str, *, interrupted: bool = False) -> None:
         """The turn's closing text-only assistant entry (also FR-46's
         spoken-prefix capture)."""
@@ -255,51 +294,47 @@ class ContextProvider:
         self._approx_chars += len(text)
 
     def last_assistant_text(self, max_chars: int = 300) -> str | None:
-        """FR-60 round 2: the judge's evidence must include the assistant's
-        own preceding reply — after the gate's branch (3) asks "do you
-        want a new document?", the user's bare "yes" has no referent
-        without the question it answers. The cap keeps the TAIL: a reply
-        explains first and asks last, so the head of a long one is the
-        part without the offer (PR #24 round 1).
+        """FR-68: the assistant's last spoken reply BEFORE the run of
+        unanswered user turns at the end of the conversation (FR-64
+        leaves such runs): that reply is still what a bare "yeah"
+        answers. The cap keeps the TAIL: a reply explains first and
+        asks last, so the head of a long one is the part without the
+        question.
 
-        Returns only the reply the user's LATEST turn directly follows,
-        else None (round 2): the judge is told this text is what that
-        turn responds to, so an offer from before an earlier user turn
-        must never be passed off as adjacent. A turn can leave no spoken
-        reply at all (a barge-in during a tool round, a fallback that
-        spoke nothing), and a later bare "yeah" would then confirm an
-        offer the user had already declined.
+        A tool-call step's text counts: the model speaks before tool
+        calls, and an offer made in the same step as a call is still
+        the offer. The loop speaks no line of its own, so the only text
+        in an entry that is not the model's is FR-46's cut-off mark.
 
-        A tool-call step's text counts (round 4): the model speaks
-        before tool calls, and an offer made in the same step as a
-        call is still the offer. The loop speaks no line of its own,
-        so the only text in an entry that is not the model's is
-        FR-46's cut-off mark."""
+        It stops at an older turn: a user message found after anything
+        else has been walked past ends the search."""
         latest_user_seen = False
+        past_trailing_users = False
         for m in reversed(self._messages):
             if m.get("role") == "user":
-                if latest_user_seen:
-                    return None  # nothing spoken between the last two turns
+                if past_trailing_users:
+                    return None  # nothing spoken between the turns
                 latest_user_seen = True
                 continue
             if not latest_user_seen:
                 continue  # the current turn's own entries
+            past_trailing_users = True
             if m.get("role") == "assistant":
                 content = (m.get("content") or "").strip()
                 if content:
                     return content[-max_chars:]
         return None
 
-    def recent_user_texts(self, n: int = 4) -> list[str]:
-        """FR-60: the gate's evidence — the last n USER turns, oldest
-        first. Tool results carry role 'tool' in the neutral format, so
-        role 'user' here is genuinely the user's speech."""
-        texts = [
-            m["content"]
-            for m in self._messages
-            if m["role"] == "user" and isinstance(m["content"], str)
-        ]
-        return texts[-n:]
+    def trailing_user_texts(self) -> list[str]:
+        """FR-68: the user turns at the very end of the conversation
+        that no assistant entry follows — the current turn last, any
+        unanswered ones (FR-64's silence) before it. Oldest first."""
+        texts: list[str] = []
+        for m in reversed(self._messages):
+            if m.get("role") != "user" or not isinstance(m.get("content"), str):
+                break
+            texts.append(m["content"])
+        return texts[::-1]
 
     def _approx_tokens(self) -> int:
         # O(1): the running counter is maintained by every append/update

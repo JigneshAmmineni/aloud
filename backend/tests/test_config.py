@@ -13,7 +13,6 @@ _REQUIRED = (
 _OPTIONAL = (
     "CARTESIA_VOICE_ID",
     "LLM_MODEL",
-    "JUDGE_MODEL",
     "LLM_EFFORT",
     "STT_PROVIDER",
     "LLM_PROVIDER",
@@ -56,7 +55,6 @@ def test_defaults(monkeypatch):
     _clear_optional(monkeypatch)
     s = load_settings()
     assert s.llm_model == "claude-sonnet-5-5"
-    assert s.judge_model == "claude-haiku-5-5"
     assert s.llm_effort == "medium"
     assert s.stt_provider == "deepgram_flux"
     assert s.llm_provider == "anthropic"
@@ -90,7 +88,6 @@ def test_required_llm_key_follows_the_provider(monkeypatch):
     monkeypatch.setenv("GOOGLE_API_KEY", "test-g")
     s = load_settings()
     assert s.llm_model == "gemini-2.5-flash"
-    assert s.judge_model == "gemini-2.5-flash"  # no second model on google
     assert s.anthropic_api_key == ""
 
 
@@ -107,7 +104,6 @@ def test_llm_effort_outside_the_thinking_off_range_fails_at_boot(monkeypatch, ef
 def test_env_overrides(monkeypatch):
     _clear_optional(monkeypatch)
     monkeypatch.setenv("LLM_MODEL", "gemini-2.5-flash-lite")
-    monkeypatch.setenv("JUDGE_MODEL", "claude-sonnet-5-5")
     monkeypatch.setenv("LLM_EFFORT", "low")
     monkeypatch.setenv("CARTESIA_VOICE_ID", "my-voice")
     monkeypatch.setenv("TTS_SANITIZE_ENABLED", "false")
@@ -116,7 +112,6 @@ def test_env_overrides(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://x:y@host/db")
     s = load_settings()
     assert s.llm_model == "gemini-2.5-flash-lite"
-    assert s.judge_model == "claude-sonnet-5-5"
     assert s.llm_effort == "low"
     assert s.cartesia_voice_id == "my-voice"
     assert s.tts_sanitize_enabled is False
