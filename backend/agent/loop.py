@@ -102,7 +102,9 @@ STEP_SPEECH_HOLD_MAX_S = 30.0
 # An earlier step's text that never becomes audio (the filters reduced it
 # to nothing, synthesis failed) has no playback to wait for: if no sign of
 # it arrives within this long, the wait is over. Its own event, not the
-# missing-signal warning.
+# missing-signal warning. Must stay below the smallest ceiling above
+# (STEP_SPEECH_HOLD_SLACK_S + 1 / STEP_SPEECH_SLOWEST_CPS, 2.17s today),
+# or a step with nothing to play warns as a broken signal instead.
 STEP_SPEECH_START_MAX_S = 2.0
 
 class _TurnState:
@@ -410,8 +412,10 @@ class AgentLoopProcessor(FrameProcessor):
         self._uttered_mark = len(self._uttered)
         messages = self._context.build(turn_id=state.turn_id, step=state.step)
         # §4.15: the turn's one instruction rides every call of the turn
-        # and is never appended to the context (FR-66)
-        if state.plan.instruction:
+        # and is never appended to the context (FR-66) — except the forced
+        # final call, which has its own closing contract (FR-42: say where
+        # things stand). FR-66's five-word bound would gag it.
+        if state.plan.instruction and not wrap_up:
             messages = messages + [
                 {"role": "system", "content": state.plan.instruction}
             ]

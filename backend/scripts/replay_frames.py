@@ -60,6 +60,22 @@ from agent.providers import LLMTextDelta, LLMToolCall, make_loop_llm  # noqa: E4
 from agent.tools import build_registry, registry_schemas  # noqa: E402
 from app.config import load_settings  # noqa: E402
 
+# Every key `failures` reads. A key outside this set is a typo, and a
+# typo would otherwise read as a bound that was met.
+EXPECT_KEYS = {
+    "no_calls",
+    "calls_must",
+    "calls_any",
+    "calls_none",
+    "target_document",
+    "quiet_work",
+    "max_sentences",
+    "max_words",
+    "min_words",
+    "must_say",
+    "must_not_say",
+}
+
 
 def fill(messages: list[dict]) -> list[dict]:
     """The recorded conversation with today's prompt texts in place."""
@@ -147,6 +163,15 @@ async def main() -> int:
     if not frames:
         print(f"no frames in {args.folder}")
         return 1
+    mistyped = {
+        f["id"]: sorted(set(f.get("expect") or {}) - EXPECT_KEYS)
+        for f in frames
+        if set(f.get("expect") or {}) - EXPECT_KEYS
+    }
+    if mistyped:
+        for frame_id, keys in mistyped.items():
+            print(f"{frame_id}: unknown expect key(s) {keys}")
+        return 2
 
     llm = make_loop_llm(load_settings())
     schemas = registry_schemas(build_registry())

@@ -32,7 +32,7 @@ const detail = {
       stages_ms: { check: 120, "step.1.ttfb.llm": 900 },
       usage: { "llm.tokens_in": 400, "check.count": 3 },
       estimated_cost: { stt: 0, llm: 0, tts: 0, total: 0, configured: false },
-      outcome: "talk_only+affirm",
+      outcome: "edit_and_speak",
     },
     {
       turn_id: 2,
@@ -82,8 +82,9 @@ describe("the outcome label (FR-70 vocabulary)", () => {
   it("names each outcome and joins bindings", () => {
     expect(fmtOutcome("silent_mid_thought")).toBe("silent: mid-thought");
     expect(fmtOutcome("silent_nothing_asked")).toBe("silent: nothing asked");
-    expect(fmtOutcome("talk_only+affirm")).toBe("talk only, affirm");
-    expect(fmtOutcome("talk_only+answer")).toBe("talk only, answer");
+    expect(fmtOutcome("affirm")).toBe("affirm");
+    // a part outside the vocabulary passes through as written
+    expect(fmtOutcome("talk_only+affirm")).toBe("talk_only, affirm");
     expect(fmtOutcome("answer")).toBe("answer");
     expect(fmtOutcome("edit_and_speak")).toBe("edit and speak");
     expect(fmtOutcome("plain")).toBe("plain");
@@ -114,7 +115,7 @@ describe("the admin drill-down (FR-36)", () => {
     expect(cells[0].textContent).toBe("2");
     expect(cells[2].textContent).toBe("—"); // speech → first audio
     // and the answered turn shows its outcome beside its latency
-    const spoken = screen.getByText("talk only, affirm").closest("tr")!;
+    const spoken = screen.getByText("edit and speak").closest("tr")!;
     expect(within(spoken).getAllByRole("cell")[2].textContent).toBe("1400ms");
   });
 });

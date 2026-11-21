@@ -371,6 +371,12 @@ it can create a duplicate. Revisit with the memory layer (feature 6).
 Watch for in live use: "note that down" during a discussion of an
 attached document creating a stray new one (the original 2026-10-10
 failure). If it comes back, the first step is a prompt fix, not a gate.
+Also watch for an edit nobody asked for after the agent's own offer:
+in the 2026-11-19 run it offered to update a document, read the user's
+next statement as a yes, and edited (row 2.3 of the create-gate eval,
+3 of 3 on replay). The owner accepted that case on 2026-11-20. Edits
+run with no check and one-step undo (documents follow-ups, feature 4)
+is not built, so undo is what closes this if it starts to hurt.
 
 The original entry, kept for the record:
 

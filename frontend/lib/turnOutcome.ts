@@ -21,8 +21,6 @@ export function modeForServerMessage(type: unknown): VoiceMode | null {
 const LABELS: Record<string, string> = {
   silent_mid_thought: "silent: mid-thought",
   silent_nothing_asked: "silent: nothing asked",
-  // sessions recorded before the checks stopped withholding tools
-  talk_only: "talk only",
   affirm: "affirm",
   answer: "answer",
   edit_and_speak: "edit and speak",
@@ -31,7 +29,7 @@ const LABELS: Record<string, string> = {
   bypass: "check unanswered",
 };
 
-/** "talk_only+affirm+bypass" → "talk only, affirm (check unanswered)".
+/** "edit_and_speak+bypass" → "edit and speak (check unanswered)".
  * A turn with no check event (the greeting, sessions before §4.15, a
  * switch that was off) shows "—". Unknown parts pass through as written,
  * so a future outcome is visible rather than hidden. */

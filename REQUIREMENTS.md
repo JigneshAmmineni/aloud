@@ -58,7 +58,7 @@ User explicitly asks for the agent's opinion, alternatives, or next steps. The a
 - **FR-7** By default, the agent is reactive: it responds when the user speaks.
 - **FR-9** The agent must ask one question at a time. It must not overwhelm the user with multiple questions or unsolicited lists of suggestions.
 - **FR-11** When asked, the agent must be able to summarize the current session's key ideas, decisions, and open questions.
-- **FR-12** When asked, the agent must be able to produce a written artifact: a structured summary, a list of action items, or a cleaned-up version of the user's idea. Where the writing goes is the agent's choice: an existing document it clearly belongs in, or a new document when none fits or the user asks for one. It does not ask the user where to put it, and it never writes unasked.
+- **FR-12** When asked, the agent must be able to produce a written artifact: a structured summary, a list of action items, or a cleaned-up version of the user's idea. Where the writing goes is the agent's choice: an existing document it clearly belongs in, or a new document when none fits or the user asks for one. It does not ask the user where to put it, and it is instructed to write only when asked. That boundary is the prompt, not code: the instruction steers, it does not guarantee. Measured gap (`docs/evals/2026-11-16-create-gate-removal.md`, row 2.3): after the agent offered to update a document, it read the user's next statement as consent and edited, in the live run and in 3 of 3 replays. The owner accepts that case (2026-11-20: it did sound like the change was wanted). The exposure while it stands: `edit_document` runs without a check and one-step undo is not built (ROADMAP, documents follow-ups). Revisited if live use shows edits the user did not want.
 
 *FR-8 (proactive flagging) and FR-10 (brainstorm/critique modes) are demo stretch goals — moved to §6 Out of Scope. Requirement numbering stays stable; removed numbers are not reused.*
 
@@ -678,7 +678,12 @@ FR-7 still governs: the agent acts when the user asks.
   rejected as a rule that depends on what the model happens to say.
   Whitespace is not speech. After a failure the context keeps
   only what was spoken. The trace row keeps the model's full output. The
-  system prompt directs the model to work without narrating its steps. Mandated
+  system prompt directs the model to work without narrating its steps and,
+  since 2026-11-19, to write nothing at all before or between tool calls.
+  That wording was measured and does not hold (quiet in 4 of 15 replays
+  against 1 of 15 before it, three wordings tried,
+  `docs/evals/2026-11-19-reply-length-and-narration.md`), so this
+  requirement's pause is the mechanism and the prompt is only a lean. Mandated
   tests: a silent tool round pushes no text and stamps only that
   marker beyond its measurements; text streamed before a tool call is
   spoken, recorded on that step's entry, and not marked; a step that
@@ -2908,7 +2913,11 @@ edit) is removed: the checks steer and never restrict (decision 4).
 Requirement numbering stays stable; removed numbers are not reused.*
 
 - **FR-66** **The affirm, answer and edit-and-speak outcomes are each
-  bound by one instruction, added to that turn's calls only.**
+  bound by one instruction, added to that turn's calls only.** It rides
+  every call of the turn but one: FR-42's forced final call carries the
+  wrap-up's own closing contract (say where things stand) and not this
+  instruction, because a five-word bound there would reduce the one
+  reply that must report unfinished work to "Done.".
   - *Affirm:* do the work with nothing said before or during it, then
     close the exchange with any short phrase, five words or
     fewer ("Okay.", "Done.", "Sounds good.") — after a task or tool

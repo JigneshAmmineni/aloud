@@ -379,6 +379,17 @@ def test_the_prompt_says_to_answer_the_newest_message_when_one_went_unanswered()
     assert "reply to the newest" in build_system_prompt(checks_on=True)
 
 
+@pytest.mark.parametrize("checks_on", [True, False])
+def test_the_prompt_says_to_write_nothing_before_or_between_tool_calls(checks_on):
+    """Measured on 2026-11-19 and known not to hold on its own (quiet in
+    4 of 15 replays, three wordings tried): FR-43's pause is the
+    mechanism, this sentence is a lean. Pinned so it is neither dropped
+    as redundant with "Work silently" nor re-tried as if it were new."""
+    prompt = build_system_prompt(checks_on=checks_on)
+    assert "Every word you write is spoken aloud" in prompt
+    assert "before a tool call and between tool calls write nothing at all" in prompt
+
+
 def test_no_instruction_restricts_editing_or_talks_about_it():
     """Owner decision after the first live run: the checks steer, they
     never restrict. A wrong no-edit verdict used to take the edit tools
@@ -520,16 +531,32 @@ def test_an_edit_the_checks_did_not_expect_still_runs():
     result = next(m for m in h.ctx.build() if m["role"] == "tool")["content"]
     assert result == {"status": "ok"}
 
-def test_the_forced_wrap_up_still_carries_the_turn_s_instruction_and_every_tool():
+@pytest.mark.parametrize(
+    ("verdict", "instruction"),
+    [
+        (dict(write=0.02), ANSWER_INSTRUCTION),
+        # a plain edit request that burns every step: "five words or
+        # fewer, nothing beyond the closing" would reduce the one call
+        # that must say the work is unfinished to "Done."
+        (dict(write=0.9, affirm=0.9, answer=0.1), AFFIRM_INSTRUCTION),
+    ],
+)
+def test_the_forced_wrap_up_drops_the_turn_s_instruction_and_keeps_every_tool(
+    verdict, instruction
+):
     scripts = [[LLMToolCall(name="echo", arguments={}, id=f"c{i}"), _done()] for i in range(5)]
     scripts.append([LLMTextDelta("Here is where things stand."), _done()])
-    h = checked_loop(scripts, answers(write=0.02), tools=[read_tool(), write_tool()])
+    h = checked_loop(scripts, answers(**verdict), tools=[read_tool(), write_tool()])
     asyncio.run(h.loop._run_turn("look into it"))
+    # every working call of the turn carried the instruction...
+    for call in h.llm.calls[:-1]:
+        assert call["messages"][-1] == {"role": "system", "content": instruction}
+    # ...and the forced final call carries the wrap-up's contract alone
     last = h.llm.calls[-1]
     assert last["tool_choice"] == "none"
     assert [t["name"] for t in last["tools"]] == ["echo", "save"]
     contents = [m["content"] for m in last["messages"] if m["role"] == "system"]
-    assert ANSWER_INSTRUCTION in contents and WRAP_UP_INSTRUCTION in contents
+    assert WRAP_UP_INSTRUCTION in contents and instruction not in contents
 
 @pytest.mark.parametrize(
     "result, instruction",

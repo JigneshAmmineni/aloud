@@ -108,8 +108,10 @@ document to edit precisely."). Three wordings were tried (the system
 prompt's rule, the affirm instruction, the answer instruction), and
 none held.
 
-**Tool decisions: unchanged.** No frame missed on which tool is called
-or which document is edited, before or after. Full set on the final
+**Tool decisions: unchanged.** No gated frame missed on which tool is
+called or which document is edited, before or after. Frame 2.3 is
+outside the gated set and edits in every replay, under either wording
+(`2026-11-16-create-gate-removal.md`, "Against the bar"). Full set on the final
 wording, 3 runs each: 27 of 37 frames passed every run (25 before), and
 every miss is length or narration.
 

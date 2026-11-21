@@ -171,7 +171,8 @@ Four sessions on commit `f6ea238` (`80b99310…`, `6202733f…`,
 `733570ac…`, `0b7acaa8…`), 55 turns with a model call. Rows 2.4, 3.4,
 4.15 and the "Hmm." of 4.6 were not said.
 
-**Where writes went: every gated row passed.**
+**Where writes went: every row about the removed gate passed. One row
+of the bar failed, 2.3 (see "Against the bar" below).**
 
 - 1.4 and 3.5 created the document at once, with no question and no
   listing step. First audio 3.1 s and 2.9 s. The same kind of turn on
@@ -227,6 +228,36 @@ Four sessions on commit `f6ea238` (`80b99310…`, `6202733f…`,
   answered on its own before the second arrived.
 - 4.13, 4.14, 4.16: it stopped and stayed stopped each time.
 
+### Against the bar
+
+- **Met:** every row about where a requested write goes (1.4 to 1.6,
+  1.9 to 1.12, 2.9, 2.10, 3.1, 3.5); no summary row wrote anything
+  (1.7, 2.1, 3.3); no transcript contains the gate's phrases; rows 1.1
+  to 1.3, 2.2, 2.7 and 2.8 called no tool.
+- **Failed: row 2.3.** The bar lists it among the rows that call no
+  tool. It edited. After "I'm thinking we should push the trip a week
+  later", the agent offered "Want me to update the doc to the third
+  weekend of December?". The next turn was a statement, "Forecast looks
+  better for the weekend of the nineteenth.", and the agent took it as
+  a yes and changed the date. The frame built from that turn repeats
+  the edit in 3 of 3 replays.
+- **What was done about it.** The frame is kept and marked recorded,
+  not gated, on purpose: the conversation it holds includes the agent's
+  own offer, so it does not test "nothing asked" cleanly, and its
+  result is printed on every replay instead of being hidden. This is a
+  failed row of the bar that was reclassified, not a pass.
+- **Owner's decision (2026-11-20):** this edit is acceptable. It did
+  sound like the change was wanted.
+- **The exposure while that stands.** Nothing in code sits in front of
+  `edit_document` (this change deletes the only check there was, and it
+  covered creates, not edits), and one-step undo is not built. A
+  statement made after an offer can change the working document with no
+  confirmation. REQUIREMENTS FR-12 now states this, and ROADMAP 3.3.1's
+  watch list carries it beside the stray-create item.
+- **Not met for other reasons:** 2.4, 3.4, 4.15 and the "Hmm." of 4.6
+  were not said, so they have no live result. 2.4 and 3.4 exist as
+  hand-written frames.
+
 ### Frames built from run 1
 
 35 frames in `local-evals/frames/` (33 recorded turns with recognition
@@ -243,7 +274,8 @@ nothing) and the two shapes from 2026-11-16 (1.4 and 3.5 create at
 once). The five that failed are all finding 1, every miss a third or
 fourth sentence: the summaries 1.7 (0 of 3), 2.1 (2 of 3) and 3.3 (0 of
 3), and the answers 4.5 (1 of 3) and 4.9 (0 of 3). Frame 2.3 is
-recorded, not gated: it edited in 3 of 3. Frame 4.14 did not repeat the
+the failed row of the bar, kept as recorded and not gated (see "Against
+the bar"): it edited in 3 of 3. Frame 4.14 did not repeat the
 spoken "They want…" in 3 runs.
 
 A separate replay of frame 2.1 against larger documents (4 runs per
